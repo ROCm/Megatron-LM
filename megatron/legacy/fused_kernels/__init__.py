@@ -17,21 +17,21 @@ os.environ["TORCH_CUDA_ARCH_LIST"] = ""
 def load(args):
 
     # Check if cuda 11 is installed for compute capability 8.0
-    cc_flag = []
-    _, bare_metal_major, bare_metal_minor = _get_cuda_bare_metal_version(
-        cpp_extension.CUDA_HOME
-    )
-    if int(bare_metal_major) >= 11:
-        cc_flag.append('-gencode')
-        cc_flag.append('arch=compute_80,code=sm_80')
-        if int(bare_metal_minor) >= 8:
-            cc_flag.append('-gencode')
-            cc_flag.append('arch=compute_90,code=sm_90')
+#    cc_flag = []
+#    _, bare_metal_major, bare_metal_minor = _get_cuda_bare_metal_version(
+#        cpp_extension.CUDA_HOME
+#    )
+#    if int(bare_metal_major) >= 11:
+#        cc_flag.append('-gencode')
+#        cc_flag.append('arch=compute_80,code=sm_80')
+#        if int(bare_metal_minor) >= 8:
+#            cc_flag.append('-gencode')
+#            cc_flag.append('arch=compute_90,code=sm_90')
 
     # Build path
-    srcpath = pathlib.Path(__file__).parent.absolute()
-    buildpath = srcpath / "build"
-    _create_build_dir(buildpath)
+#    srcpath = pathlib.Path(__file__).parent.absolute()
+#    buildpath = srcpath / "build"
+#    _create_build_dir(buildpath)
 
     # Helper function to build the kernels.
     def _cpp_extention_load_helper(name, sources, extra_cuda_flags):
