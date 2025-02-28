@@ -6,11 +6,22 @@
 #################################################################################
 # set -x
 
+# parsing input arguments
+for ARGUMENT in "$@"
+do
+   KEY=$(echo $ARGUMENT | cut -f1 -d=)
+
+   KEY_LENGTH=${#KEY}
+   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
+
+   export "$KEY"="$VALUE"
+done
+
 # set envs
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
 export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 
+export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
 export NCCL_IB_GID_INDEX=3
 export NCCL_CROSS_NIC=0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -66,6 +77,9 @@ RECOMPUTE="${RECOMPUTE:-0}"
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Llama-2-7b-chat-hf}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
+EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
+CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 
 if [ "$FSDP" -eq 1 ] && [ "$TP" -gt 1 ]; then
     echo "It is not recommended to use FSDP and TP together. Disabling TP."
@@ -75,8 +89,6 @@ fi
 
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
-CHECKPOINT_PATH=${CHECKPOINT_PATH:-"$EXPERIMENT_DIR/ckpts"}
-
 DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/TE_FP8_${TE_FP8}/${TIME_STAMP}"
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
 TRAIN_LOG="${LOG_DIR}/output_${EXP_NAME}.log"
@@ -143,6 +155,7 @@ GPT_ARGS="
     --bf16 \
     --no-masked-softmax-fusion \
 "
+
 if [ "$RECOMPUTE" -eq 1 ]; then
     GPT_ARGS="$GPT_ARGS --recompute-num-layers 80 \
         --recompute-granularity full \
@@ -202,7 +215,25 @@ OUTPUT_ARGS="
     --no-save-optim \
     --eval-iters -1
 "
-#  --save $CHECKPOINT_PATH \
+
+if [ ! -z ${SAVE_CKPT_PATH+x} ]; then
+    OUTPUT_ARGS="$OUTPUT_ARGS \
+        --save-interval $SAVE_INTERVAL \
+        --eval-interval $EVAL_INTERVAL \
+        --ckpt-format $CKPT_FORMAT \
+        --save $SAVE_CKPT_PATH
+    "
+fi
+
+CKPT_LOAD_ARGS="--exit-on-missing-checkpoint \
+    --no-load-optim \
+    --use-checkpoint-args \
+    --no-load-rng
+"
+
+if [ ! -z {$LOAD_CKPT_PATH+x} ]; then
+    CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS --load ${LOAD_CKPT_PATH}"
+fi
 
 DISTRIBUTED_ARGS="
     --nproc_per_node $GPUS_PER_NODE \
@@ -211,12 +242,6 @@ DISTRIBUTED_ARGS="
     --master_addr $MASTER_ADDR \
     --master_port $MASTER_PORT \
 "
-
-CKPT_LOAD_ARGS="--exit-on-missing-checkpoint \
-        --no-load-optim \
-        --use-checkpoint-args \
-        --no-load-rng"
-
 
 EXTRA_ARGS="
     --group-query-attention \
@@ -278,6 +303,7 @@ run_cmd="
         $OUTPUT_ARGS \
         $EXTRA_ARGS \
         $TRAIN_ARGS \
+        $CKPT_LOAD_ARGS
 "
 
 if [ "$TEE_OUTPUT" -eq 0 ]; then 
