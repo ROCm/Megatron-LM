@@ -6,17 +6,6 @@
 #################################################################################
 #set -x
 
-# parsing input arguments
-for ARGUMENT in "$@"
-do
-   KEY=$(echo $ARGUMENT | cut -f1 -d=)
-
-   KEY_LENGTH=${#KEY}
-   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
-
-   export "$KEY"="$VALUE"
-done
-
 # set envs
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
@@ -56,6 +45,17 @@ if [ "${NNODES:-1}" -gt 1 ]; then
 else
     echo "Single node setup, skipping NCCL and GLOO socket interface settings."
 fi
+
+# parsing input arguments
+for ARGUMENT in "$@"
+do
+   KEY=$(echo $ARGUMENT | cut -f1 -d=)
+
+   KEY_LENGTH=${#KEY}
+   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
+
+   export "$KEY"="$VALUE"
+done
 
 MODEL_SIZE="${MODEL_SIZE:-70}"
 TP="${TP:-8}"

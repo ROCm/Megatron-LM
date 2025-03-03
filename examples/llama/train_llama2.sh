@@ -6,17 +6,6 @@
 #################################################################################
 # set -x
 
-# parsing input arguments
-for ARGUMENT in "$@"
-do
-   KEY=$(echo $ARGUMENT | cut -f1 -d=)
-
-   KEY_LENGTH=${#KEY}
-   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
-
-   export "$KEY"="$VALUE"
-done
-
 # set envs
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
@@ -57,6 +46,17 @@ else
     echo "Single node setup, skipping NCCL and GLOO socket interface settings."
 fi
 
+# parsing input arguments
+for ARGUMENT in "$@"
+do
+   KEY=$(echo $ARGUMENT | cut -f1 -d=)
+
+   KEY_LENGTH=${#KEY}
+   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
+
+   export "$KEY"="$VALUE"
+done
+
 MODEL_SIZE="${MODEL_SIZE:-70}"
 TP="${TP:-8}"
 PP="${PP:-1}"
@@ -74,12 +74,22 @@ MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
 FSDP="${FSDP:-1}"
 RECOMPUTE="${RECOMPUTE:-0}"
-TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
-TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Llama-2-7b-chat-hf}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
 EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
+
+TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
+if [ "$TOKENIZER_TYPE" == "Llama2Tokenizer" ]; then
+    if [ ! -z ${TOKENIZER_MODEL+x} ]; then
+        echo "do not provide TOKENIZER_MODEL for Llama2Tokenizer TOKENIZER_TYPE"
+        exit 1
+    fi
+    TOKENIZER_MODEL="/tmp/tokenizer.model"
+    wget -O "$TOKENIZER_MODEL" https://huggingface.co/NousResearch/Llama-2-7b-chat-hf/resolve/main/tokenizer.model
+else
+    TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Llama-2-7b-chat-hf}"
+fi
 
 if [ "$FSDP" -eq 1 ] && [ "$TP" -gt 1 ]; then
     echo "It is not recommended to use FSDP and TP together. Disabling TP."
