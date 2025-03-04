@@ -48,13 +48,6 @@ try:
 except Exception:
     has_nvidia_modelopt = False
 
-# Imports needed to allow loading checkpoints previously saved with saver_mcore
-from argparse import Namespace
-from megatron.core.enums import ModelType
-from io import BytesIO
-
-torch.serialization.add_safe_globals([Namespace, ModelType, BytesIO])
-
 _CHECKPOINT_VERSION = None
 
 logger = getLogger(__name__)
