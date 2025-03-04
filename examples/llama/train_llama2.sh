@@ -226,7 +226,7 @@ OUTPUT_ARGS="
     --eval-iters -1
 "
 
-if [ ! -z ${SAVE_CKPT_PATH+x} ]; then
+if [ -n "$SAVE_CKPT_PATH" ]; then
     OUTPUT_ARGS="$OUTPUT_ARGS \
         --save-interval $SAVE_INTERVAL \
         --eval-interval $EVAL_INTERVAL \
@@ -241,7 +241,7 @@ CKPT_LOAD_ARGS="--exit-on-missing-checkpoint \
     --no-load-rng
 "
 
-if [ ! -z {$LOAD_CKPT_PATH+x} ]; then
+if [ -n "$LOAD_CKPT_PATH" ]; then
     CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS --load ${LOAD_CKPT_PATH}"
 fi
 

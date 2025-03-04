@@ -10,6 +10,7 @@ fi
 DATA_DIR="${DATA_DIR:-data}"
 DATASET="${DATASET:-bookcorpus}" # one of wiki,bookcorpus,fineweb
 DATASET_PATH="${DATA_DIR}/data.jsonl"
+TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 
 # Create directories
 mkdir -p ${DATA_DIR}
@@ -39,7 +40,7 @@ fi
 echo "Preprocessing '${DATASET}' dataset using '${TOKENIZER_MODEL}' tokenizer..."
 python3 tools/preprocess_data.py \
     --input "${DATASET_PATH}"  \
-    --tokenizer-type "HuggingFaceTokenizer" \
+    --tokenizer-type $TOKENIZER_TYPE \
     --tokenizer-model "${TOKENIZER_MODEL}" \
     --output-prefix "${DATA_DIR}/data" \
     --workers `nproc`
