@@ -61,7 +61,7 @@ fi
 
 MODEL_SIZE="${MODEL_SIZE:-70}"
 TP="${TP:-8}"
-PP="${PP:-1}"
+PP="${PP:-8}"
 CP="${CP:-1}"
 MBS="${MBS:-2}"
 BS="${BS:-8}"
