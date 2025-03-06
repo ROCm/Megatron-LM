@@ -51,7 +51,7 @@ DeepSeek-V2 uses `DeepSeekV2Tokenizer`
 To run the training on a single node, go to Megatron-LM folder, use the following command:
 ```bash
 cd /workspace/Megatron-LM
-GEMM_TUNING=1 PR=bf16 MBS=4 AC=none bash examples/deepseek_v2/train_deepseekv2.sh
+GEMM_TUNING=1 PR=bf16 MBS=4 AC=none SEQ_LEN=4096 PAD_LEN=4096 bash examples/deepseek_v2/train_deepseekv2.sh
 ```
 
 ## 4. Key Variables to Pay Attention To

@@ -48,12 +48,12 @@ DATA_DIR="/root/deepseek-datasets"
 MODEL=deepseek-ai/${MODEL_NAME}
 
 MODEL_SIZE=16B
-BATCH_SIZE="${MBS:-1}"
+BATCH_SIZE="${MBS:-4}"
 GLOBAL_BATCH_SIZE="${GBS:-256}"
 LR=1e-5
 MIN_LR=1e-6
-SEQ_LEN=4096
-PAD_LEN=4096
+SEQ_LEN="${SEQ_LEN:2048}"
+PAD_LEN="${PAD_LEN:2048}"
 PR="${PR:-bf16}" #fp8 or bf16
 TP=1
 PP=1  
@@ -63,14 +63,14 @@ SP=true
 DO=true
 FL=true
 SFT=false   
-AC="${AC:-none}" #full, sel, none
+AC="${AC:-sel}" #full, sel, none
 OPTIMIZER_OFFLOAD=false
 SAVE_INTERVAL=5000000
 TRAIN_ITERS="${TRAIN_ITERS:-50}"
 LR_WARMUP_ITERS=2
 LR_DECAY_ITERS=$(( ${TRAIN_ITERS} - ${LR_WARMUP_ITERS}))
 OUTPUT_BASEPATH=${EXPERIMENT_DIR}/deepseek-ckpts/test_ft
-GEMM_TUNING="${GEMM_TUNING:-1}"
+GEMM_TUNING="${GEMM_TUNING:-0}"
 
 TRAIN_LOG=${EXPERIMENT_DIR}/MI300X-$MODEL_NAME-${PR}-seq${SEQ_LEN}-tp${TP}pp${PP}ep${EP}-mbs${MBS}gbs${GBS}-ac_${AC}-do_${DO}-fa_${FL}-sp_${SP}-${TIMESTAMP}.log
 
@@ -358,7 +358,7 @@ megatron_options="  \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
         --patch-tokenizer-type DeepSeekV2Tokenizer \
         --tokenizer-type DeepSeekV2Tokenizer \
-        --load ${TOKENIZER_MODEL}\
+        --load ${TOKENIZER_MODEL} \ 
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --normalization RMSNorm \
@@ -377,6 +377,8 @@ megatron_options="  \
         --transformer-impl transformer_engine \
         --eod-mask-loss
         "
+
+#Replace with --load ${PRETRAIN_CHECKPOINT_PATH} to load from checkpoint
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
