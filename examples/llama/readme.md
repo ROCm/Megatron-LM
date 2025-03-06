@@ -11,7 +11,7 @@ Start a Docker container by running
 
 ```
 docker run \
-    -it \
+    -it --rm \
     --device /dev/dri --device /dev/kfd \
     --network host --ipc host \
     --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged \
@@ -39,20 +39,20 @@ in `/root/Megatron-LM` to install megatron package.
 ## 2. How to Run
 
 ### 2.1 Single Node Training
-To run training on a single node, go to ROCm/Megatron-LM repository root and run
+To run training on a single MI300X node, go to ROCm/Megatron-LM repository root and run
 the command
 
 ```bash
-bash examples/llama/train_llama2.sh
+./examples/llama/train_llama2.sh
 ```
 
 and similarly for `examples/llama/train_llama3.sh`. 
 
 For either script, to run training with non-default options, for example `FSDP-v2`
-disabled, simply add (in this case) `FSDP=0` argument as shown in
+enabled, simply add (in this case) `FSDP=1` argument as shown in
 
 ```bash
-FSDP=0 bash examples/llama/train_llama2.sh
+FSDP=1 ./examples/llama/train_llama3.sh
 ```
 
 **Note** that it is suggested to use `TP=1` when FSDP is enabled, for higher throughput.
@@ -66,13 +66,13 @@ required network-related environment variables (see Section 3.1) and run
 - **On the Master Node:**
 
   ```bash
-  MASTER_ADDR=address NNODES=N NODE_RANK=0 bash examples/llama/train_llama2.sh
+  MASTER_ADDR=address NNODES=N NODE_RANK=0 ./examples/llama/train_llama2.sh
   ```
 
 - **On Worker Node i:**
 
   ```bash
-  MASTER_ADDR=address NNODES=N NODE_RANK=i bash examples/llama/train_llama2.sh
+  MASTER_ADDR=address NNODES=N NODE_RANK=i ./examples/llama/train_llama2.sh
   ```
 
 where `address` is the master node ip address.
@@ -108,7 +108,7 @@ You can use either mock data or real data for training.
   following command to download and preprocess the bookcorpus dataset:
 
   ```bash
-  DATASET=bookcorpus DATA_DIR=bookcorpus TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf bash examples/llama/prepare_dataset.sh
+  DATASET=bookcorpus DATA_DIR=bookcorpus TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf ./examples/llama/prepare_dataset.sh
   ```
 
   where `TOKENIZER_MODEL` can be any accessible HuggingFace tokenizer. Remember to
@@ -119,7 +119,7 @@ You can use either mock data or real data for training.
   bookcorpus data can be used with
 
   ```bash
-  DATA_PATH=bookcorpus/data_text_document TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf bash examples/llama/train_llama2.sh 
+  DATA_PATH=bookcorpus/data_text_document TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf ./examples/llama/train_llama2.sh 
   ```
 
   **Note** that when training you need to set `DATA_PATH` to the specific file name
