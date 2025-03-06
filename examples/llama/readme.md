@@ -14,7 +14,7 @@ This guide provides the steps for setting up the environment and configuring the
 
 2. **Launch Docker Container**  
    Start the Docker container:  
-   `docker run -it --device /dev/dri --device /dev/kfd --network host --ipc host --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged -v $HOME:$HOME -v  $HOME/.ssh:/root/.ssh --shm-size 64G --name megatron_training_env <image_name>`
+   `docker run -it --device /dev/dri --device /dev/kfd --device /dev/infiniband --network host --ipc host --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged -v $HOME:$HOME -v  $HOME/.ssh:/root/.ssh --shm-size 64G --name megatron_training_env <image_name>`
 
 ---
 
@@ -96,6 +96,11 @@ If you're running multi-node training, update the following environment variable
 
  - **Network Drivers Inside Docker:**
    For multi-node runs, make sure correct network drivers are installed on the nodes. If inside a docker, either install the drivers inside the docker container or pass the network drivers from the host while creating docker container.
+
+   ```bash
+   # specify which RDMA interfaces to use for communication
+   export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
+   ```
 
 ---
 

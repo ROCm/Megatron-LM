@@ -65,8 +65,8 @@ FL=true
 SFT=false   
 AC="${AC:-sel}" #full, sel, none
 OPTIMIZER_OFFLOAD=false
-SAVE_INTERVAL=5000000
-TRAIN_ITERS="${TRAIN_ITERS:-50}"
+SAVE_INTERVAL=5000
+TRAIN_ITERS="${TRAIN_ITERS:-20}"
 LR_WARMUP_ITERS=2
 LR_DECAY_ITERS=$(( ${TRAIN_ITERS} - ${LR_WARMUP_ITERS}))
 OUTPUT_BASEPATH=${EXPERIMENT_DIR}/deepseek-ckpts/test_ft
@@ -108,7 +108,7 @@ MASTER_ADDR=localhost
 MASTER_PORT=$(shuf -n 1 -i 10000-65535)
 NNODES=1
 NODE_RANK=0
-GPUS_PER_NODE=8
+GPUS_PER_NODE=`python3 -c "import torch; print(torch.cuda.device_count())"`
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 elif [ $ENV = dlc ]; then
 
@@ -379,7 +379,6 @@ megatron_options="  \
         "
 
 #Replace with --load ${PRETRAIN_CHECKPOINT_PATH} to load from checkpoint
-# --dataset LLama-Pretrain-Idxmap \
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
@@ -415,4 +414,10 @@ echo "elapsed time per iteration: $(python mean_log_value.py tmp.txt)" |& tee -a
 TIME_PER_ITER=$(python3 mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
 TGS=$(awk -v bs="$GLOBAL_BATCH_SIZE" -v sl="$SEQ_LEN" -v tpi="$TIME_PER_ITER" -v ws="$WORLD_SIZE" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
 echo "tokens/GPU/s: $TGS" |& tee -a $TRAIN_LOG
+rm tmp.txt
+
+# Extract memory usage
+grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*/\1/' > tmp.txt
+MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
+echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt

@@ -74,10 +74,10 @@ GEMM_TUNING=1 PR=bf16 MBS=4 AC=none SEQ_LEN=4096 PAD_LEN=4096 bash examples/deep
 - **GBS:**
   Global Batch size
 
-- **SEQ_LEN**
+- **SEQ_LEN:**
   Sequence length
 
-- **AC**
+- **AC:**
   Activation Checkpointing (`none`, `sel` , `full`). Default:`sel` (Selective). 
 
 That's it! You'are now ready to train DeepSeek-v2-lite model.
