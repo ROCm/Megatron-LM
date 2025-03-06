@@ -165,14 +165,12 @@ GPT_ARGS="
     --bf16 \
     --no-masked-softmax-fusion \
 "
-
 if [ "$RECOMPUTE" -eq 1 ]; then
     GPT_ARGS="$GPT_ARGS --recompute-num-layers 80 \
         --recompute-granularity full \
         --recompute-method block \
         "
 fi
-
 if [ "$ROPE_FUSION" -eq 0 ]; then
     GPT_ARGS="$GPT_ARGS --no-rope-fusion"
 fi
@@ -186,7 +184,6 @@ TRAIN_ARGS="--lr 1e-4 \
         --ckpt-format torch_dist \
 "
 # Note that --use-torch-fsdp2 requires --ckpt-format torch_dist
-
 if [ "$OPTIMIZER" == "adam" ]; then
     TRAIN_ARGS="$TRAIN_ARGS --optimizer adam \
         --adam-beta1 0.9 \
@@ -209,7 +206,6 @@ DATA_ARGS="
     --eval-iters 10 \
     --num-workers $ds_works \
 "
-
 if [ -z ${DATA_PATH+x} ]; then
     DATA_ARGS="$DATA_ARGS --mock-data"
     echo "Using Mock data"
@@ -225,7 +221,6 @@ OUTPUT_ARGS="
     --no-save-optim \
     --eval-iters -1
 "
-
 if [ -n "$SAVE_CKPT_PATH" ]; then
     OUTPUT_ARGS="$OUTPUT_ARGS \
         --save-interval $SAVE_INTERVAL \
@@ -235,14 +230,14 @@ if [ -n "$SAVE_CKPT_PATH" ]; then
     "
 fi
 
-CKPT_LOAD_ARGS="--exit-on-missing-checkpoint \
-    --no-load-optim \
-    --use-checkpoint-args \
-    --no-load-rng
-"
-
+CKPT_LOAD_ARGS=""
 if [ -n "$LOAD_CKPT_PATH" ]; then
-    CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS --load ${LOAD_CKPT_PATH}"
+    CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS \
+        --exit-on-missing-checkpoint \
+        --no-load-optim \
+        --no-load-rng \
+        --use-checkpoint-args \
+        --load ${LOAD_CKPT_PATH}"
 fi
 
 DISTRIBUTED_ARGS="

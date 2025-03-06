@@ -163,7 +163,6 @@ if [ "$RECOMPUTE" -eq 1 ]; then
         --recompute-method block \
         "
 fi
-
 if [ "$ROPE_FUSION" -eq 0 ]; then
     GPT_ARGS="$GPT_ARGS --no-rope-fusion"
 fi
@@ -176,7 +175,6 @@ TRAIN_ARGS="--lr 1e-4 \
     --clip-grad 1.0 \
     --ckpt-format torch_dist \
 "
-
 if [ "$OPTIMIZER" == "adam" ]; then
     TRAIN_ARGS="$TRAIN_ARGS --optimizer adam \
         --adam-beta1 0.9 \
@@ -198,7 +196,6 @@ DATA_ARGS="
     --eval-iters 10 \
     --num-workers $ds_works \
 "
-
 if [ -z ${DATA_PATH+x} ]; then
     DATA_ARGS="$DATA_ARGS --mock-data"
     echo "Using Mock data"
@@ -213,7 +210,7 @@ OUTPUT_ARGS="
     --no-save-optim \
     --eval-iters -1
 "
-if [ ! -z ${SAVE_CKPT_PATH+x} ]; then
+if [ -n "$SAVE_CKPT_PATH" ]; then
     OUTPUT_ARGS="$OUTPUT_ARGS \
         --save-interval $SAVE_INTERVAL \
         --eval-interval $EVAL_INTERVAL \
@@ -222,13 +219,14 @@ if [ ! -z ${SAVE_CKPT_PATH+x} ]; then
     "
 fi
 
-CKPT_LOAD_ARGS="--exit-on-missing-checkpoint \
-    --no-load-optim \
-    --use-checkpoint-args \
-    --no-load-rng
-"
-if [ ! -z {$LOAD_CKPT_PATH+x} ]; then
-    CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS --load ${LOAD_CKPT_PATH}"
+CKPT_LOAD_ARGS=""
+if [ -n "$LOAD_CKPT_PATH" ]; then
+    CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS \
+        --exit-on-missing-checkpoint \
+        --no-load-optim \
+        --no-load-rng \
+        --use-checkpoint-args \
+        --load ${LOAD_CKPT_PATH}"
 fi
 
 DISTRIBUTED_ARGS="
