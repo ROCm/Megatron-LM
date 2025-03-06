@@ -52,8 +52,8 @@ BATCH_SIZE="${MBS:-4}"
 GLOBAL_BATCH_SIZE="${GBS:-256}"
 LR=1e-5
 MIN_LR=1e-6
-SEQ_LEN="${SEQ_LEN:2048}"
-PAD_LEN="${PAD_LEN:2048}"
+SEQ_LEN="${SEQ_LEN:-2048}"
+PAD_LEN="${PAD_LEN:-2048}"
 PR="${PR:-bf16}" #fp8 or bf16
 TP=1
 PP=1  
@@ -358,7 +358,7 @@ megatron_options="  \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
         --patch-tokenizer-type DeepSeekV2Tokenizer \
         --tokenizer-type DeepSeekV2Tokenizer \
-        --load ${TOKENIZER_MODEL} \ 
+        --load ${TOKENIZER_MODEL}\
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --normalization RMSNorm \
@@ -379,6 +379,7 @@ megatron_options="  \
         "
 
 #Replace with --load ${PRETRAIN_CHECKPOINT_PATH} to load from checkpoint
+# --dataset LLama-Pretrain-Idxmap \
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
