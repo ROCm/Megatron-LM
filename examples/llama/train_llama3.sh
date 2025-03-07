@@ -143,6 +143,15 @@ elif [[ $MODEL_SIZE -eq 70 ]]; then
         NUM_KV_HEADS=8 # llama3 70B uses GQA 
         SEQ_LENGTH=$SEQ_LENGTH
         MAX_POSITION_EMBEDDINGS=$MAX_POSITION_EMBEDDINGS
+elif [[ $MODEL_SIZE -eq 405 ]]; then
+        HIDDEN_SIZE=16384
+        FFN_HIDDEN_SIZE=28672
+        NUM_LAYERS=126
+        NUM_HEADS=128
+        NUM_KV_HEADS=8 
+        SEQ_LENGTH=$SEQ_LENGTH
+        MAX_POSITION_EMBEDDINGS=131072
+
 else
         echo "Model size not supported."
         exit 1
