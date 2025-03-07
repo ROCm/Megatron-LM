@@ -14,9 +14,17 @@ def clean_docker_build_cache() {
     sh 'docker system prune -f --volumes || true'
 }
 
+def clean_workspace() {
+    sh "sudo find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf '{}' \\;"
+}
+
 pipeline {
     agent {
         label 'build-only'
+    }
+
+    options {
+        disableConcurrentBuilds(abortPrevious: true)
     }
 
     parameters {
@@ -80,10 +88,11 @@ pipeline {
             }
             post {
                 always {
-                // Archive test results
-                script {
-                    archiveArtifacts artifacts: 'test_report.csv', allowEmptyArchive: true
-                    clean_up_docker_images()
+                    // Archive test results
+                    script {
+                        archiveArtifacts artifacts: 'test_report.csv', allowEmptyArchive: true
+                        clean_up_docker_images()
+                        clean_workspace()
                     }
                 }
             }
