@@ -42,19 +42,19 @@ You can use either mock data or real data for training.
   MOCK_DATA=0
   DATA_DIR="/root/deepseek-datasets"  # Change to where your dataset is stored
   ```
-### 2.2 Tokenizer
+### 3.2 Tokenizer
 DeepSeek-V2 uses `DeepSeekV2Tokenizer`
 
-## 3. How to Run
+## 4. How to Run
 
-### 3.1 Single Node Training
+### 4.1 Single Node Training
 To run the training on a single node, go to Megatron-LM folder, use the following command:
 ```bash
 cd /workspace/Megatron-LM
 GEMM_TUNING=1 PR=bf16 MBS=4 AC=none SEQ_LEN=4096 PAD_LEN=4096 bash examples/deepseek_v2/train_deepseekv2.sh
 ```
 
-## 4. Key Variables to Pay Attention To
+## 5. Key Variables to Pay Attention To
 
 - **PR:**
   Stands for precision for training. `bf16` for Bf16 (default), `fp8` for FP8 GEMMS.
