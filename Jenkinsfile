@@ -10,10 +10,6 @@ def clean_up_docker_images() {
     }
 }
 
-def clean_docker_build_cache() {
-    sh 'docker system prune -f --volumes || true'
-}
-
 def clean_workspace() {
     sh "sudo find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf '{}' \\;"
 }
@@ -45,7 +41,6 @@ pipeline {
     stages {
         stage('Build Docker Image') {
             steps {
-                clean_docker_build_cache()
                 script {
 
                     // Generate a unique UUID for the Docker image name
