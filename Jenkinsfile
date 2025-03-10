@@ -11,7 +11,9 @@ def clean_up_docker_images() {
 }
 
 def clean_workspace() {
-    sh "sudo find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf '{}' \\;"
+    if (env.WORKSPACE) {
+        sh "sudo find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf '{}' \\;"
+    }
 }
 
 pipeline {
