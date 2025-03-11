@@ -15,7 +15,7 @@ docker run \
     --device /dev/dri --device /dev/kfd \
     --network host --ipc host \
     --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged \
-    -v .:/root/Megatron-LM \
+    -v .:/workspace/Megatron-LM \
     --shm-size 64G \
     rocm/pytorch-training:latest bash
 ```
@@ -32,7 +32,12 @@ Run
 pip install .
 ```
 
-in `/root/Megatron-LM` to install megatron package.
+in `/workspace/Megatron-LM` to install megatron package.
+
+**Note** that it is also possible to use `rocm/megatron-lm:latest` like images, which
+have ROCm/Megatron-LM already installed. If doing so, the bind mount is not required,
+there is no need to install anything and please make sure to follow the README inside
+the container to run these examples.
 
 ---
 
@@ -48,11 +53,11 @@ the command
 
 and similarly for `examples/llama/train_llama3.sh`. 
 
-For either script, to run training with non-default options, for example `FSDP-v2`
-enabled, simply add (in this case) `FSDP=1` argument as shown in
+For either script, to run training with non-default options, simply add arguments as
+shown in
 
 ```bash
-FSDP=1 ./examples/llama/train_llama3.sh
+MBS=2 BS=16 TP=1 TE_FP8=0 FSDP=1 RECOMPUTE=1 SEQ_LENGTH=8192 ./examples/llama/train_llama3.sh
 ```
 
 **Note** that it is suggested to use `TP=1` when FSDP is enabled, for higher throughput.
@@ -75,7 +80,9 @@ required network-related environment variables (see Section 3.1) and run
   MASTER_ADDR=address NNODES=N NODE_RANK=i ./examples/llama/train_llama2.sh
   ```
 
-where `address` is the master node ip address.
+where `NNODES` sets the number of nodes, `NODE_RANK` is a variable indicating the rank
+of the node (with zero reserved for the master node) and `MASTER_ADDR=address` sets the
+master node ip address to `address`. 
 
 ## 3. Configurations in Scripts
 
@@ -130,6 +137,15 @@ You can use either mock data or real data for training.
 
 ## 4. Key Variables to Pay Attention To
 
+- **BS:**  
+  Sets the global batch size (default: 8)
+
+- **MBS:**  
+  Sets the micro batch size (default: 1)
+
+- **SEQ_LENGTH:**  
+  Sets the sequence length
+
 - **TE_FP8:**  
   `0` for BP16 (default), `1` for FP8.
 
@@ -148,9 +164,9 @@ You can use either mock data or real data for training.
   `1` to enable PyTorch profiling for performance analysis.
 
 - **MODEL_SIZE:**  
-  Set to `7` or `70` for Llama2, and `8` or `70` for Llama3/3.1.
+  Set to `7` or `70` for Llama2, and `8` or `70` for Llama3/3.1 (default: 70).
 
 - **TOTAL_ITERS:**  
-  Set the total number of iterations (default: 10).
+  Sets the total number of iterations (default: 10).
 
 --- 
