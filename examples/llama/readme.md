@@ -86,7 +86,7 @@ master node ip address to `address`.
 
 ## 3. Configurations in Scripts
 
-### 3.1 Network Interface
+### 3.1 Network
 Update the network interface in the training scripts to match your system’s network
 interface. To find your network interface, run
 
@@ -102,6 +102,20 @@ export GLOO_SOCKET_IFNAME=ens50f0np0
 ```
 
 in the training scripts based on the output.
+
+**Note** that for multi-node runs, make sure that the correct network drivers are
+available. Either install the drivers inside the docker container or pass the network
+drivers from the host (e.g. with `--device /dev/infiniband`) when launching the
+container.
+
+Specify which RDMA interfaces to use for communication. Update 
+
+```bash
+export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
+```
+
+in your training script to match available interfaces.
+
 
 ### 3.2 Dataset
 You can use either mock data or real data for training.
@@ -133,7 +147,10 @@ You can use either mock data or real data for training.
   prefix that is pointing to `.bin` or `.idx` file. Remember also to be consistent with
   the choice of the tokenizer.
 
----
+  **Note** that for multi-node runs, set `DATA_CACHE_PATH` to a directory accessible to
+  all of the nodes, for example an NFS directory, and pass it to the training scripts.
+  Remember to properly setup bind mount for this directory to make it accessible inside
+  the container.
 
 ## 4. Key Variables to Pay Attention To
 
@@ -147,7 +164,7 @@ You can use either mock data or real data for training.
   Sets the sequence length
 
 - **TE_FP8:**  
-  `0` for BP16 (default), `1` for FP8.
+  `0` for B16 (default), `1` for FP8.
 
 - **GEMM_TUNING:**  
   `1` to enable GEMM tuning, which boosts performance by using the best GEMM kernels.
@@ -167,6 +184,6 @@ You can use either mock data or real data for training.
   Set to `7` or `70` for Llama2, and `8` or `70` for Llama3/3.1 (default: 70).
 
 - **TOTAL_ITERS:**  
-  Sets the total number of iterations
+  Sets the total number of iterations.
 
 --- 

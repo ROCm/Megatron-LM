@@ -65,7 +65,7 @@ MBS="${MBS:-1}"
 BS="${BS:-8}"
 SEQ_LENGTH="${SEQ_LENGTH:-4096}"
 MAX_POSITION_EMBEDDINGS=32000
-TOTAL_ITERS="${TOTAL_ITERS:-5}"
+TOTAL_ITERS="${TOTAL_ITERS:-10}"
 SEQ_PARALLEL="${SEQ_PARALLEL:-1}" 
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
@@ -78,6 +78,7 @@ ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
 EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
+DATA_CACHE_PATH="${DATA_CACHE_PATH:-/home/cache}"
 
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 if [ "$TOKENIZER_TYPE" == "Llama2Tokenizer" ]; then
@@ -166,7 +167,7 @@ GPT_ARGS="
     --no-masked-softmax-fusion \
 "
 if [ "$RECOMPUTE" -eq 1 ]; then
-    GPT_ARGS="$GPT_ARGS --recompute-num-layers 80 \
+    GPT_ARGS="$GPT_ARGS --recompute-num-layers $NUM_LAYERS \
         --recompute-granularity full \
         --recompute-method block \
         "
@@ -205,12 +206,21 @@ DATA_ARGS="
     --eval-iters 10 \
     --num-workers $ds_works \
 "
+DATA_CACHE_PATH="/home/cache"
 if [ -z ${DATA_PATH+x} ]; then
-    DATA_ARGS="$DATA_ARGS --mock-data"
+    DATA_ARGS="$DATA_ARGS --mock-data --data-cache-path $DATA_CACHE_PATH"
     echo "Using Mock data"
 else
-    DATA_ARGS="$DATA_ARGS --data-path $DATA_PATH"
+    DATA_ARGS="$DATA_ARGS --data-path $DATA_PATH --data-cache-path ${DATA_CACHE_PATH}"
     echo "Using ${DATA_PATH} data"
+fi
+if [ "$NNODES" -gt 1 ]; then
+    if [ -z ${DATA_CACHE_PATH+x} ]; then
+        echo "For multi-node runs DATA_CACHE_PATH should exist and point to a common path accessible by all the nodes (e.g. an NFS directory)"
+        exit 1
+    else
+        DATA_ARGS="$DATA_ARGS --data-cache-path $DATA_CACHE_PATH"
+    fi
 fi
 
 OUTPUT_ARGS="
@@ -351,4 +361,16 @@ echo "elapsed time per iteration: $ETPI" |& tee -a $TRAIN_LOG
 TIME_PER_ITER=$(python3 mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
 TGS=$(awk -v bs="$BS" -v sl="$SEQ_LENGTH" -v tpi="$TIME_PER_ITER" -v ws="$WORLD_SIZE" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
 echo "tokens/GPU/s: $TGS" |& tee -a $TRAIN_LOG
+rm tmp.txt
+
+# Extract memory usage
+grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*/\1/' > tmp.txt
+MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
+echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
+rm tmp.txt
+
+# Extract memory usage
+grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*/\1/' > tmp.txt
+MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
+echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt
