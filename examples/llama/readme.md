@@ -163,6 +163,9 @@ You can use either mock data or real data for training.
 - **SEQ_LENGTH:**  
   Sets the sequence length
 
+- **TP:**  
+  Tensor parallel (1, 2, 4, 8). Note `TP` is disabled with `FSDP`.
+
 - **TE_FP8:**  
   `0` for B16 (default), `1` for FP8.
 
