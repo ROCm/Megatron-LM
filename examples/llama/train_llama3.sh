@@ -77,10 +77,11 @@ RECOMPUTE="${RECOMPUTE:-0}"
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Meta-Llama-3-8B}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
+LOG_INTERVAL="${LOG_INTERVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
+EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
-DATA_CACHE_PATH="${DATA_CACHE_PATH:-/home/cache}"
 
 if [ "$FSDP" -eq 1 ]; then
     if [ "$TP" -gt 1 ]; then
@@ -214,10 +215,11 @@ if [ "$NNODES" -gt 1 ]; then
 fi
 
 OUTPUT_ARGS="
-    --log-interval 1 \
+    --log-interval $LOG_INTERVAL \
     --log-throughput \
     --no-save-optim \
-    --eval-iters -1
+    --no-save-rng \
+    --eval-iters $EVAL_ITERS
 "
 if [ -n "$SAVE_CKPT_PATH" ]; then
     OUTPUT_ARGS="$OUTPUT_ARGS \
