@@ -19,6 +19,17 @@ export RCCL_MSCCL_ENABLE=0
 export TOKENIZERS_PARALLELISM=false
 export HSA_NO_SCRATCH_RECLAIM=1
 
+# parsing input arguments
+for ARGUMENT in "$@"
+do
+   KEY=$(echo $ARGUMENT | cut -f1 -d=)
+
+   KEY_LENGTH=${#KEY}
+   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
+
+   export "$KEY"="$VALUE"
+done
+
 TIME_STAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 EXP_NAME="${EXP_NAME:-perf}"
 
@@ -45,17 +56,6 @@ if [ "${NNODES:-1}" -gt 1 ]; then
 else
     echo "Single node setup, skipping NCCL and GLOO socket interface settings."
 fi
-
-# parsing input arguments
-for ARGUMENT in "$@"
-do
-   KEY=$(echo $ARGUMENT | cut -f1 -d=)
-
-   KEY_LENGTH=${#KEY}
-   VALUE="${ARGUMENT:$KEY_LENGTH+1}"
-
-   export "$KEY"="$VALUE"
-done
 
 MODEL_SIZE="${MODEL_SIZE:-70}"
 TP="${TP:-8}"
@@ -173,7 +173,6 @@ TRAIN_ARGS="--lr 1e-4 \
     --lr-decay-style cosine \
     --weight-decay 1.0e-1 \
     --clip-grad 1.0 \
-    --ckpt-format torch_dist \
 "
 if [ "$OPTIMIZER" == "adam" ]; then
     TRAIN_ARGS="$TRAIN_ARGS --optimizer adam \
@@ -186,7 +185,7 @@ else
 fi
 
 DATA_ARGS="
-    --tokenizer-type HuggingFaceTokenizer \
+    --tokenizer-type ${TOKENIZER_TYPE} \
     --tokenizer-model ${TOKENIZER_MODEL} \
     --dataloader-type cyclic \
     --save-interval 200000 \

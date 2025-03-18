@@ -44,7 +44,7 @@ the container to run these examples.
 ## 2. How to Run
 
 ### 2.1 Single Node Training
-To run training on a single MI300X node, go to ROCm/Megatron-LM repository root and run
+To run training on a single node, go to ROCm/Megatron-LM repository root and run
 the command
 
 ```bash
@@ -167,6 +167,6 @@ You can use either mock data or real data for training.
   Set to `7` or `70` for Llama2, and `8` or `70` for Llama3/3.1 (default: 70).
 
 - **TOTAL_ITERS:**  
-  Sets the total number of iterations (default: 10).
+  Sets the total number of iterations
 
 --- 
