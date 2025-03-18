@@ -369,9 +369,3 @@ grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*
 MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
 echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt
-
-# Extract memory usage
-grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*/\1/' > tmp.txt
-MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
-echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
-rm tmp.txt
