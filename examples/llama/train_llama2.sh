@@ -207,12 +207,11 @@ DATA_ARGS="
     --eval-iters 10 \
     --num-workers $ds_works \
 "
-DATA_CACHE_PATH="/home/cache"
 if [ -z ${DATA_PATH+x} ]; then
-    DATA_ARGS="$DATA_ARGS --mock-data --data-cache-path $DATA_CACHE_PATH"
+    DATA_ARGS="$DATA_ARGS --mock-data"
     echo "Using Mock data"
 else
-    DATA_ARGS="$DATA_ARGS --data-path $DATA_PATH --data-cache-path ${DATA_CACHE_PATH}"
+    DATA_ARGS="$DATA_ARGS --data-path $DATA_PATH"
     echo "Using ${DATA_PATH} data"
 fi
 if [ "$NNODES" -gt 1 ]; then
