@@ -84,7 +84,12 @@ where `NNODES` sets the number of nodes, `NODE_RANK` is a variable indicating th
 of the node (with zero reserved for the master node) and `MASTER_ADDR=address` sets the
 master node ip address to `address`. 
 
-## 3. Configurations in Scripts
+**Note** that for multi-node runs, remember to properly setup a bind mount, with the
+default mount point `/root/cache` inside the container, to a host directory accessible
+to all of the nodes, for example a NFS directory. For non-default mount points, set
+`DATA_CACHE_PATH` appropriately and pass it to the training scripts.
+
+## 3. Configurations
 
 ### 3.1 Network
 Update the network interface in the training scripts to match your system’s network
@@ -116,9 +121,27 @@ export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
 
 in your training script to match available interfaces.
 
-
 ### 3.2 Dataset
 You can use either mock data or real data for training.
+
+When preparing a real dataset, a tokenizer is required. The scripts support tokenizers
+which are fully specified with choices of `TOKENIZER_TYPE` and `TOKENIZER_MODEL`. With
+the exception of Llama 2 training script, the default `TOKENIZER_TYPE` is
+`HuggingFaceTokenizer` and for it, only a valid `TOKENIZER_MODEL` is needed. For
+example, after obtaining a permission, run
+
+```bash
+wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/special_tokens_map.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/special_tokens_map.json
+wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/tokenizer.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/tokenizer.json
+wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/tokenizer.model https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/original/tokenizer.model
+wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/tokenizer_config.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/tokenizer_config.json
+```
+
+with a valid `HF_TOKEN` to download Llama 3.1 tokenizer and pass the path of
+`tokenizer` as `TOKENIZER_MODEL` to use it.
+
+**Note** that while the training scripts support default tokenizers, the user is
+adviced to be explicit about their tokenizer choice.
 
 - **Mock Data:**  
   Mock data is used when no `DATA_PATH` argument is passed. 
@@ -146,11 +169,6 @@ You can use either mock data or real data for training.
   **Note** that when training you need to set `DATA_PATH` to the specific file name
   prefix that is pointing to `.bin` or `.idx` file. Remember also to be consistent with
   the choice of the tokenizer.
-
-  **Note** that for multi-node runs, set `DATA_CACHE_PATH` to a directory accessible to
-  all of the nodes, for example an NFS directory, and pass it to the training scripts.
-  Remember to properly setup bind mount for this directory to make it accessible inside
-  the container.
 
 ## 4. Key Variables to Pay Attention To
 
