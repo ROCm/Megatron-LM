@@ -9,3 +9,4 @@ logs
 .vscode
 local/
 .gitmodules
+test
