@@ -84,7 +84,7 @@ with a valid `HF_TOKEN` to download Llama 3.1 tokenizer and pass the path of
 **Note** that while the training scripts support default tokenizers, the user is
 adviced to be explicit about their tokenizer choice.
 
-### 2.2.1 Usage
+### 2.2.2 Usage
 You can use either mock data or real data for training.
 
 - **Mock Data:**  
