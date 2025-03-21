@@ -59,20 +59,7 @@ export NCCL_SOCKET_IFNAME=ens50f0np0
 export GLOO_SOCKET_IFNAME=ens50f0np0
 ```
 
-in the training scripts based on the output.
-
-**Note** that for multi-node runs, make sure that the correct network drivers are
-available. Either install the drivers inside the docker container or pass the network
-drivers from the host (e.g. with `--device /dev/infiniband`) when launching the
-container.
-
-Specify which RDMA interfaces to use for communication. Update 
-
-```bash
-export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
-```
-
-in your training script to match available interfaces.
+in the training scripts based on the output. 
 
 ### 2.2 Dataset
 
@@ -109,7 +96,7 @@ You can use either mock data or real data for training.
   following command to download and preprocess the bookcorpus dataset:
 
   ```bash
-  DATASET=bookcorpus DATA_DIR=bookcorpus TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf ./examples/llama/prepare_dataset.sh
+  DATASET=bookcorpus DATA_DIR=bookcorpus TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf bash ./examples/llama/prepare_dataset.sh
   ```
 
   where `TOKENIZER_MODEL` can be any accessible HuggingFace tokenizer. Remember to
@@ -120,7 +107,7 @@ You can use either mock data or real data for training.
   bookcorpus data can be used with
 
   ```bash
-  DATA_PATH=bookcorpus/data_text_document TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf ./examples/llama/train_llama2.sh 
+  DATA_PATH=bookcorpus/data_text_document TOKENIZER_MODEL=NousResearch/Llama-2-7b-chat-hf bash ./examples/llama/train_llama2.sh 
   ```
 
   **Note** that when training you need to set `DATA_PATH` to the specific file name
