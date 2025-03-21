@@ -41,57 +41,10 @@ the container to run these examples.
 
 ---
 
-## 2. How to Run
+## 2. Configurations in Script (`Megatron-LM/examples/llama`)
+Use `train_llama3.sh` for Llama3/3.1 models and `train_llama2.sh` for Llama2 models.
 
-### 2.1 Single Node Training
-To run training on a single node, go to ROCm/Megatron-LM repository root and run
-the command
-
-```bash
-./examples/llama/train_llama2.sh
-```
-
-and similarly for `examples/llama/train_llama3.sh`. 
-
-For either script, to run training with non-default options, simply add arguments as
-shown in
-
-```bash
-MBS=2 BS=16 TP=1 TE_FP8=0 FSDP=1 RECOMPUTE=1 SEQ_LENGTH=8192 ./examples/llama/train_llama3.sh
-```
-
-**Note** that it is suggested to use `TP=1` when FSDP is enabled, for higher throughput.
-And FSDP-v2 is not supported with pipeline parallelism, expert parallelism, MCore's
-distributed optimizer, gradient accumulation fusion and fp16.
-
-### 2.2 Multi-node Training
-To manually run training on N nodes: launch a container on each node, setup the
-required network-related environment variables (see Section 3.1) and run
-
-- **On the Master Node:**
-
-  ```bash
-  MASTER_ADDR=address NNODES=N NODE_RANK=0 ./examples/llama/train_llama2.sh
-  ```
-
-- **On Worker Node i:**
-
-  ```bash
-  MASTER_ADDR=address NNODES=N NODE_RANK=i ./examples/llama/train_llama2.sh
-  ```
-
-where `NNODES` sets the number of nodes, `NODE_RANK` is a variable indicating the rank
-of the node (with zero reserved for the master node) and `MASTER_ADDR=address` sets the
-master node ip address to `address`. 
-
-**Note** that for multi-node runs, remember to properly setup a bind mount, with the
-default mount point `/root/cache` inside the container, to a host directory accessible
-to all of the nodes, for example a NFS directory. For non-default mount points, set
-`DATA_CACHE_PATH` appropriately and pass it to the training scripts.
-
-## 3. Configurations
-
-### 3.1 Network
+### 2.1 Network Interface
 Update the network interface in the training scripts to match your system’s network
 interface. To find your network interface, run
 
@@ -121,14 +74,15 @@ export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
 
 in your training script to match available interfaces.
 
-### 3.2 Dataset
-You can use either mock data or real data for training.
+### 2.2 Dataset
 
-When preparing a real dataset, a tokenizer is required. The scripts support tokenizers
+### 2.2.1 Tokenizer
+When preparing a dataset, a tokenizer is required. The scripts support tokenizers
 which are fully specified with choices of `TOKENIZER_TYPE` and `TOKENIZER_MODEL`. With
 the exception of Llama 2 training script, the default `TOKENIZER_TYPE` is
 `HuggingFaceTokenizer` and for it, only a valid `TOKENIZER_MODEL` is needed. For
-example, after obtaining a permission, run
+example, after obtaining a [permission](https://huggingface.co/meta-llama/Llama-3.1-8B),
+run
 
 ```bash
 wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/special_tokens_map.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/special_tokens_map.json
@@ -142,6 +96,9 @@ with a valid `HF_TOKEN` to download Llama 3.1 tokenizer and pass the path of
 
 **Note** that while the training scripts support default tokenizers, the user is
 adviced to be explicit about their tokenizer choice.
+
+### 2.2.1 Usage
+You can use either mock data or real data for training.
 
 - **Mock Data:**  
   Mock data is used when no `DATA_PATH` argument is passed. 
@@ -169,6 +126,87 @@ adviced to be explicit about their tokenizer choice.
   **Note** that when training you need to set `DATA_PATH` to the specific file name
   prefix that is pointing to `.bin` or `.idx` file. Remember also to be consistent with
   the choice of the tokenizer.
+
+### 2.3 Multi-node Training
+If you're running multi-node training, update the following environment variables on
+each node. They can also be passed as command line arguments.
+
+- **Master Address:**
+  Change `localhost` to the master node's hostname:
+  ```bash
+  MASTER_ADDR="${MASTER_ADDR:-localhost}"
+  ```
+  
+- **Number of Nodes:**
+  Set the number of nodes you want to train on (e.g., 2, 4, 8):
+  ```bash
+  NNODES="${NNODES:-1}"
+  ```
+
+- **Node Rank:**
+  Set the rank of each node (0 for master, 1 for the first worker node, etc.):
+  ```bash
+  NODE_RANK="${NODE_RANK:-0}"
+  ```
+
+- **DATA_CACHE_PATH:**
+  Set `DATA_CACHE_PATH` to a common directory accessible by all the nodes (for eg, an
+  NFS directory) for multi-node runs
+  ```bash
+  DATA_CACHE_PATH=/root/cache
+  ```
+  **Note** that for multi-node runs, remember to properly setup a bind mount, with the
+  default mount point `/root/cache` inside the container, to a host directory
+  accessible to all of the nodes, for example a NFS directory. For non-default mount
+  points, set `DATA_CACHE_PATH` appropriately and pass it to the training scripts.
+
+ - **Network Drivers Inside Docker:**
+   For multi-node runs, make sure correct network drivers are installed on the nodes.
+   If inside a docker, either install the drivers inside the docker container or pass
+   the network drivers from the host while creating docker container.
+   ```bash
+   # specify which RDMA interfaces to use for communication
+   export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
+   ```
+
+---
+
+## 3. How to Run
+
+### 3.1 Single Node Training
+To run the training on a single node, go to Megatron-LM folder, use the following
+command:
+```bash
+TEE_OUTPUT=1 MBS=2 BS=128 TP=1 TE_FP8=1 SEQ_LENGTH=8192 MODEL_SIZE=8  bash examples/llama/train_llama3.sh
+```
+
+To run the training with `FSDP-v2` enabled, simply add `FSDP=1` argument, for example,
+use the following command:
+```bash
+TEE_OUTPUT=1 MBS=2 BS=16 TP=1 TE_FP8=0 FSDP=1 RECOMPUTE=1 SEQ_LENGTH=8192 MODEL_SIZE=70 bash examples/llama/train_llama3.sh
+```
+**Note:** It is suggested to use `TP=1` when FSDP is enabled, for higher throughput.
+And FSDP-v2 is not supported with pipeline parallelism, expert parallelism, MCore's
+distributed optimizer, gradient accumulation fusion and fp16.
+
+### 3.2 Multi-node Training
+To run training on multiple nodes, launch the Docker container on each node. Example,
+follow these steps for 2 Node run with Node0 as master node :
+
+- **On the Master Node0:**
+  ```bash
+  TEE_OUTPUT=1 MBS=2 BS=256 TP=1 TE_FP8=1 SEQ_LENGTH=8192 MODEL_SIZE=8 MASTER_ADDR=IP_NODE0 NNODES=2 NODE_RANK=0 bash examples/llama/train_llama3.sh
+  ```
+
+- **On the Worker Node1:**
+  ```bash
+  TEE_OUTPUT=1 MBS=2 BS=256 TP=1 TE_FP8=1 SEQ_LENGTH=8192 MODEL_SIZE=8 MASTER_ADDR=IP_NODE0 NNODES=2 NODE_RANK=1 bash examples/llama/train_llama3.sh
+  ```
+
+where `MASTER_ADDR=IP_NODE0` tells the script that the master node ip address is
+`IP_NODE0`.
+
+---
 
 ## 4. Key Variables to Pay Attention To
 
@@ -208,3 +246,6 @@ adviced to be explicit about their tokenizer choice.
   Sets the total number of iterations.
 
 --- 
+
+That's it! You've now set up the environment and configured the necessary settings for
+training Llama2 or Llama3 models.
