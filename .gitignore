@@ -4,9 +4,9 @@ build
 .coverage_*
 *.egg-info
 *~
-slurm*
 logs
 .vscode
 local/
 .gitmodules
-test
+output
+experiment

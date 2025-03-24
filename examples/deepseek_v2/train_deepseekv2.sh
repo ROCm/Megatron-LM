@@ -151,6 +151,7 @@ NUM_SHARED_EXPERTS=2
 MOE_LAYER_FREQ=1
 
 moe_options=" \
+    --multi-latent-attention \
     --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
     --enable-shared-expert \
     --moe-layer-freq ${MOE_LAYER_FREQ} \
@@ -188,6 +189,7 @@ NUM_SHARED_EXPERTS=2
 MOE_LAYER_FREQ=1
 
 moe_options=" \
+    --multi-latent-attention \
     --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
     --enable-shared-expert \
     --moe-layer-freq ${MOE_LAYER_FREQ} \
