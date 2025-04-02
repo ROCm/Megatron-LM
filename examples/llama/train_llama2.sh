@@ -10,7 +10,7 @@
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
 export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA="${NCCL_IB_HCA:-rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7} 
+export NCCL_IB_HCA="${NCCL_IB_HCA:-rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7}" 
 export NCCL_IB_GID_INDEX=3
 export NCCL_CROSS_NIC=0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
