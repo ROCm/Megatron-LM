@@ -296,6 +296,8 @@ if [ "$MCORE" -eq 1 ]; then
 EXTRA_ARGS="$EXTRA_ARGS --use-mcore-models"
 fi
 
+EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=local --no-persist-layer-norm"
+
 if [ "$TE_FP8" -eq 1 ]; then
 EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
     --fp8-margin=0 \
