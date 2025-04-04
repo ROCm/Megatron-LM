@@ -174,7 +174,6 @@ GPT_ARGS="
     --untie-embeddings-and-output-weights \
     --position-embedding-type rope \
     --no-position-embedding \
-    --disable-bias-linear \
     --swiglu \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \

@@ -169,10 +169,15 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         else:
             assert self.config.moe_layer_freq < num_layers_per_pipeline_rank, \
                 "Must have at least 1 moe layer in a pp stage"
-        if self.layer_number > self.config.moe_layer_freq:
-            self.mlp = build_module(submodules.mlp, config=self.config)
+        if self.config.num_moe_experts:
+            # MoE model
+            if self.layer_number > self.config.moe_layer_freq:
+                self.mlp = build_module(submodules.mlp, config=self.config)
+            else:
+                self.mlp = build_module(submodules.mlp_dense, config=self.config)
         else:
-            self.mlp = build_module(submodules.mlp_dense, config=self.config)
+            # Dense model
+            self.mlp = build_module(submodules.mlp, config=self.config)
         if hasattr(self.mlp, 'set_layer_number'):
             self.mlp.set_layer_number(self.layer_number)
 

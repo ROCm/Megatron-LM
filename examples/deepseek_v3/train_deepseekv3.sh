@@ -50,7 +50,7 @@ elif [ $RUN_ENV = "slurm" ]; then
     MASTER_PORT=${SLURM_MASTER_PORT}
     NNODES=$SLURM_NNODES
     NODE_RANK=${SLURM_NODEID}
-    GPUS_PER_NODE=$((SLURM_WORLD_SIZE / SLURM_NNODES))
+    GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 fi
 gpus=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES=$gpus
@@ -75,8 +75,8 @@ echo ""
 
 # data
 DATA_DIR=${DATA_DIR:-"/home/azureuser/tas-public/data"}
-DATASET_PATH=${DATA_DIR}/deepseek-datasets/mmap_deepseekv2_datasets_text_document
-VALID_DATASET_PATH=${DATA_DIR}/deepseek-datasets/mmap_deepseekv2_datasets_text_document
+DATASET_PATH=${DATA_DIR}/deepseek-datasets/mmap_deepseekv3_datasets_text_document
+VALID_DATASET_PATH=${DATA_DIR}/deepseek-datasets/mmap_deepseekv3_datasets_text_document
 echo "DATASET_PATH: $DATASET_PATH"
 echo "VALID_DATASET_PATH: $VALID_DATASET_PATH"
 echo ""
@@ -145,6 +145,7 @@ PROFILE_SYNC=${PROFILE_SYNC:-false}
 PROFILE_START=${PROFILE_START:-6}
 PROFILE_END=${PROFILE_END:-7}
 FORCE_BALANCE=${FORCE_BALANCE:-false}
+MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-false}
 echo "PROFILE: $PROFILE"
 echo "PROFILE_START: $PROFILE_START"
 echo "PROFILE_END: $PROFILE_END"
@@ -273,7 +274,12 @@ elif [ $MODEL_SIZE = 16B ]; then
         --moe-router-group-topk 1
     "
 fi
-
+if [ $MOE_PERMUTE_FUSION != false ]; then
+    moe_permute_fustion_options=" \
+            --moe-permute-fusion "
+else
+    moe_permute_fustion_options=""
+fi
 moe_options=" \
     ${moe_options} \
     --multi-latent-attention \
@@ -285,7 +291,7 @@ moe_options=" \
     --moe-shared-expert-intermediate-size  $((${NUM_SHARED_EXPERTS} * ${MOE_INTERMEDIATE_SIZE})) \
     --moe-router-load-balancing-type seq_aux_loss\
     --moe-router-topk ${ROUTER_TOPK} \
-    --moe-permute-fusion \
+    ${moe_permute_fustion_options} \
     --num-experts ${NUM_EXPERTS} \
     --moe-token-dispatcher-type alltoall \
     --moe-shared-expert-overlap \
@@ -315,11 +321,13 @@ fi
 TP_COMM_OVERLAP=0
 comm_overlap_option="\
     --overlap-grad-reduce \
+    --ddp-bucket-size 629145600 \
     --overlap-param-gather"
 
 if [ $TP_COMM_OVERLAP -eq 1 ]; then
     comm_overlap_option="\
         --tp-comm-overlap \
+        --ddp-bucket-size 629145600 \
         --overlap-grad-reduce \
         --overlap-param-gather"
 fi

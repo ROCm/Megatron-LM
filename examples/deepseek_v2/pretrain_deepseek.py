@@ -51,13 +51,24 @@ def model_provider(
     args = get_args()
     build_tokenizer(args)
     config = core_transformer_config_from_args(args, DeepSeekV2TransformerConfig)
-    args.deprecated_use_mcore_models=True
-    # if use_te:
-    if args.deprecated_use_mcore_models:
-        print_rank_0("building deepseek_v2 model ...")
 
-        transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(args.num_experts, args.moe_grouped_gemm, 
-                                                          qk_layernorm=True)
+    use_te = args.transformer_impl == "transformer_engine"
+    assert not args.use_legacy_models, "Only support mcore models."
+    
+    if not args.use_legacy_models:
+        print_rank_0("building deepseek_v2 model ...")
+        if use_te:
+            print("debug: using TE modules for GPT layer")
+            # Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
+            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                                        args.num_experts, args.moe_grouped_gemm, 
+                                        qk_layernorm=True, moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm)
+        else:
+            print("debug: using local modules for GPT layer")
+            # Use this spec for an implementation using only modules in Megatron-Core
+            transformer_layer_spec = get_gpt_layer_local_spec(
+                                        args.num_experts, args.moe_grouped_gemm, qk_layernorm=True)
+        
         model = GPTModel(
             config=config,
             transformer_layer_spec=transformer_layer_spec,

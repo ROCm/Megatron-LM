@@ -44,7 +44,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 MODEL_NAME=DeepSeek-V2-Lite
 
-DATA_DIR="/root/deepseek-datasets"
+DATA_DIR="/workspace/dev/data/deepseek-datasets"
 MODEL=deepseek-ai/${MODEL_NAME}
 
 MODEL_SIZE=16B
@@ -358,9 +358,8 @@ megatron_options="  \
         --no-load-rng \
         --num-workers 8 \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
-        --patch-tokenizer-type DeepSeekV2Tokenizer \
         --tokenizer-type DeepSeekV2Tokenizer \
-        --load ${TOKENIZER_MODEL}\
+        --tokenizer-model ${TOKENIZER_MODEL}\
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --normalization RMSNorm \
@@ -372,7 +371,8 @@ megatron_options="  \
         --untie-embeddings-and-output-weights \
         --disable-bias-linear \
         --use-mcore-models \
-        --use-legacy-models \
+        --moe-grouped-gemm \
+        --moe-use-legacy-grouped-gemm \
         --ckpt-format torch \
         --rotary-base ${ROPE_THETA} \
         --rotary-scaling-factor ${SCALE_FACTOR} \
