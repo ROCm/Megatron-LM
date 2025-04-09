@@ -78,13 +78,23 @@ class TENorm:
             assert hasattr(
                 te.pytorch, "RMSNorm"
             ), "Transformer-Engine >= v0.11 required to use this feature"
-            instance = te.pytorch.RMSNorm(
-                hidden_size=hidden_size,
-                eps=eps,
-                sequence_parallel=config.sequence_parallel,
-                zero_centered_gamma=config.layernorm_zero_centered_gamma,
-                **_get_extra_te_kwargs(config),
-            )
+            if (get_te_version().base_version >= "1.13.0"):
+                # For Transformer Engine >= 1.13.0, use 'normalized_shape' instead of 'hidden_size'
+                instance = te.pytorch.RMSNorm(
+                    normalized_shape=hidden_size,
+                    eps=eps,
+                    sequence_parallel=config.sequence_parallel,
+                    zero_centered_gamma=config.layernorm_zero_centered_gamma,
+                    **_get_extra_te_kwargs(config),
+                )
+            else:
+                instance = te.pytorch.RMSNorm(
+                    hidden_size=hidden_size,
+                    eps=eps,
+                    sequence_parallel=config.sequence_parallel,
+                    zero_centered_gamma=config.layernorm_zero_centered_gamma,
+                    **_get_extra_te_kwargs(config),
+                )
         else:
             raise Exception('Only LayerNorm and RMSNorm are curently supported')
 
