@@ -17,12 +17,12 @@ echo "EXPERIMENT: $EXPERIMENT - $TIMESTAMP"
 echo "MEGATRON_PATH: ${MEGATRON_PATH}"
 echo "PYTHONPATH: ${PYTHONPATH}"
 echo ""
-
+NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
 # network envs
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
 export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=rdma0:1,rdma1:1,rdma2:1,rdma3:1,rdma4:1,rdma5:1,rdma6:1,rdma7:1
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=3
 export NCCL_CROSS_NIC=0
 export HSA_ENABLE_SDMA=0

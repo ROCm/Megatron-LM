@@ -10,8 +10,8 @@
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
 export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 
-export NCCL_IB_GID_INDEX=3
+NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}export NCCL_IB_GID_INDEX=3
 export NCCL_CROSS_NIC=0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 export NCCL_PROTO=Simple
@@ -135,13 +135,20 @@ if [ "$SEQ_LENGTH" -le 8192 ]; then
 else
   ds_works=24
 fi
-
+echo $MODEL_SIZE
 if [[ $MODEL_SIZE -eq 7 ]]; then #llama2-7B
         HIDDEN_SIZE=4096 # e.g. llama-13b: 5120
         FFN_HIDDEN_SIZE=11008 # e.g. llama-13b: 13824
         NUM_LAYERS=32 # e.g. llama-13b: 40
         NUM_HEADS=32 # e.g. llama-13b: 40
         NUM_KV_HEADS=32 # No GQA for llama2 7b.
+        SEQ_LENGTH=$SEQ_LENGTH
+elif [[ $MODEL_SIZE -eq 13 ]]; then #llama2-7B
+        HIDDEN_SIZE=5120 # e.g. llama-13b: 5120
+        FFN_HIDDEN_SIZE=13824 # e.g. llama-13b: 13824
+        NUM_LAYERS=40 # e.g. llama-13b: 40
+        NUM_HEADS=40 # e.g. llama-13b: 40
+        NUM_KV_HEADS=40 # No GQA for llama2 13b.
         SEQ_LENGTH=$SEQ_LENGTH
 elif [[ $MODEL_SIZE -eq 70 ]]; then
         HIDDEN_SIZE=8192 # e.g. llama-13b: 5120
@@ -232,7 +239,7 @@ DATA_ARGS="
 "
 
 # For multi-node runs DATA_CACHE_PATH should point to a common path accessible by all the nodes (for eg, an NFS directory)
-DATA_CACHE_PATH="/home/cache"
+DATA_CACHE_PATH="${DATA_CACHE_PATH:-/workspace/dev/cache}"
 
 if [ "$MOCK_DATA" -eq 1 ];then
     DATA_ARGS="$DATA_ARGS --mock-data --data-cache-path $DATA_CACHE_PATH"
@@ -368,7 +375,6 @@ echo "elapsed time per iteration: $ETPI" |& tee -a $TRAIN_LOG
 TIME_PER_ITER=$(python3 mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
 TGS=$(awk -v bs="$BS" -v sl="$SEQ_LENGTH" -v tpi="$TIME_PER_ITER" -v ws="$WORLD_SIZE" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
 echo "tokens/GPU/s: $TGS" |& tee -a $TRAIN_LOG
-rm tmp.txt
 
 # Extract memory usage
 grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*/\1/' > tmp.txt

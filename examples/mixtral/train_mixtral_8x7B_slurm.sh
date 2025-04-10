@@ -1,4 +1,12 @@
 #!/bin/bash
+#SBATCH --job-name=mixtral-8X7B-train
+#SBATCH --output=logs/slurm/multinode-job.%j.out
+#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
+#SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
+#SBATCH --cpus-per-task=226      # assign all CPUs to the job
+#SBATCH --gres=gpu:8                         # Request 8 GPUs per node
+#SBATCH --time=01:00:00                      # Adjust as necessary
+#SBATCH --reservation=gpu-40_gpu-41_gpu-43_gpu-44_gpu-46_gpu-47_gpu-50_gpu-55_reservation # modify based on your reservation settings
 
 export batch_size_per_node=32 # Set the batch size per node, change it to your own value
 export GBS=$(( SLURM_NNODES * batch_size_per_node ))
@@ -18,19 +26,23 @@ export SLURM_MASTER_PORT=29508
 echo "MASTER_ADDR=$SLURM_MASTER_ADDR"
 echo "MASTER_PORT=$SLURM_MASTER_PORT"
 # Define the Docker image
-export DOCKER_IMAGE="rocm/megatron-lm:latest"
+export DOCKER_IMAGE="rocm/megatron-lm:v25.4"
 # Pull docker image
-docker pull $DOCKER_IMAGE
+podman pull $DOCKER_IMAGE
 
 export NETWORK_INTERFACE="bond0" # Change this to your network interface name
 
-# # Define the mount points
-export HOST_MOUNT="/path/to/Megatron-LM" # Before run, change it to your own path
-export CONTAINER_MOUNT="/workspace/dev" # Before run, change it to your own path
+# Define the dataset path. Before each run, change the following paths accordingly
+export HOST_MOUNT=${HOST_MOUNT:-"/path/to/host/dir"}                  # change the path to host dir intend to be attached to the docker
+export CONTAINER_MOUNT=${CONTAINER_MOUNT:-"/workspace/dev"}           # change the path to workspace developing path inside the docker
+export MEGATRON_DIR=${MEGATRON_DIR:-"${CONTAINER_MOUNT}/Megatron-LM"} # change the path to Megatron-LM inside the docker
+export TOKENIZER_MODEL=${TOKENIZER_MODEL:-"${CONTAINER_MOUNT}/path/to/tokenizer.model"}   # change the tokenizer path accordingly
+export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/data"}                # change the path to dataset location
+
 # Run the Docker container with the script
-bash -c 'docker stop $(docker ps -q); \
+srun bash -c 'podman stop $(podman ps -q); \
   module load rocm ;\
-  docker run --rm \
+  podman run --rm \
  --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \
  --env SLURM_MASTER_PORT=$SLURM_MASTER_PORT \
  --env "SLURM_PROCID=$SLURM_PROCID" \
@@ -41,7 +53,9 @@ bash -c 'docker stop $(docker ps -q); \
  -v $HOST_MOUNT:$CONTAINER_MOUNT \
  $DOCKER_IMAGE /bin/bash -c \
  "echo $(date); \
- cd $CONTAINER_MOUNT/Megatron-LM; \
+ cd $MEGATRON_DIR; \
+ TOKENIZER_MODEL=${TOKENIZER_MODEL} \
+ DATA_DIR=${DATA_DIR} \
  NCCL_SOCKET_IFNAME=${NETWORK_INTERFACE} GLOO_SOCKET_IFNAME=${NETWORK_INTERFACE} \
  RECOMPUTE_NUM_LAYERS=0 \
  TEE_OUTPUT=1 MBS=2 GBS=${GBS} TP_SIZE=1 PP_SIZE=1 AC=none \

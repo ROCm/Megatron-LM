@@ -4,7 +4,8 @@ export CUDA_DEVICE_MAX_CONNECTIONS=1
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
 export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=3
 export NCCL_CROSS_NIC=0
 export NCCL_PROTO=Simple
@@ -61,7 +62,7 @@ LR_DECAY_ITERS=$(( ${TRAIN_ITERS} - ${LR_WARMUP_ITERS}))
 
 
 # tokenizer
-TOKENIZER_MODEL="/path/to/tokenizer.model"
+TOKENIZER_MODEL=${TOKENIZER_MODEL:-"/path/to/tokenizer.model"}
 
 # data
 DATA_DIR=${DATA_DIR:-"/workspace/dev/data"}

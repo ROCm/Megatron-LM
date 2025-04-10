@@ -51,14 +51,14 @@ Start the training script in the docker
 
 With slurm environment, the pretraining can be launched with the following script.
 
+Note: Before the run, please modify the $HOST_MOUNT, $CONTAINER_MOUNT, $MEGATRON_DIR, $TOKENIZER_MODEL and $DATA_DIR variables, as well as the SBATCH arguments accordingly in the slurm script.     
+
 Mixtral 8X7B
 ```
-  export NUM_NODE=8
-  srun -N $NUM_NODE --cpus-per-task=$(nproc) --ntasks-per-node=1 bash examples/mixtral/train_mixtral_8x7B_slurm.sh
+  sbatch examples/mixtral/train_mixtral_8x7B_slurm.sh
 ```
 
 Mixtral 8X22B
 ```
-  export NUM_NODE=8
-  srun -N $NUM_NODE --cpus-per-task=$(nproc) --ntasks-per-node=1 bash examples/mixtral/train_mixtral_8x22B_slurm.sh
+  sbatch examples/mixtral/train_mixtral_8x22B_slurm.sh
 ```

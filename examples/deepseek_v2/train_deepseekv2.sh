@@ -10,14 +10,15 @@ TOKENIZER_MODEL="deepseek-ai/DeepSeek-V2-Lite"
 
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
-export PYTHONPATH=${MEGATRON_PATH}:${MEGATRON_PATH}/PAI-Megatron-LM-240718:$PYTHONPATH
+export PYTHONPATH=${MEGATRON_PATH}:$PYTHONPATH
 export CUDA_DEVICE_MAX_CONNECTIONS=1
 echo $CURRENT_DIR
 
 export TORCH_NCCL_HIGH_PRIORITY=1
 
 # specify which RDMA interfaces to use for communication
-export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7
+NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 
 # define the Global ID index used in RoCE mode
 export NCCL_IB_GID_INDEX=3

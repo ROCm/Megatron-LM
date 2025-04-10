@@ -131,6 +131,22 @@ To run training on multiple nodes, launch the Docker container on each node. Exa
   ```bash
   TEE_OUTPUT=1 MBS=2 BS=256 TP=1 TE_FP8=1 SEQ_LENGTH=8192 MODEL_SIZE=8  MASTER_ADDR=IP_NODE0 NNODES=2 NODE_RANK=1 bash examples/llama/train_llama3.sh
   ```
+
+### 3.3 Multi-node Training with slurm 
+In the slurm environment, launch the multinode training in the following way.   
+  ```
+  sbatch examples/llama/train_llama2_slurm.sh <MODEL_SIZE> <MBS> <BATCH_SIZE_PER_NODE> <SEQ_LENTH> <TOTAL_ITERS> <FSDP> <RECOMPUTE>
+  ```
+The example settings can be as follows, 
+```
+  sbatch examples/llama/train_llama2_slurm.sh 13 6 48 4096 10 1 0
+  sbatch examples/llama/train_llama2_slurm.sh 13 3 24 8192 10 1 0
+
+```
+```
+  sbatch examples/llama/train_llama2_slurm.sh 70 18 144 4096 10 1 1
+  sbatch examples/llama/train_llama2_slurm.sh 70 7 56 8192 10 1 1
+```
 ---
 
 ## 4. Key Variables to Pay Attention To

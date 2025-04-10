@@ -1,5 +1,9 @@
 #!/bin/bash
-
+###############################################################################
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#################################################################################
 echo "get first node"
 # Get the list of nodes and the first node (master node)
 node_list=$(scontrol show hostnames $SLURM_JOB_NODELIST)
@@ -18,8 +22,8 @@ export DOCKER_IMAGE="rocm/megatron-lm:latest"
 # Pull docker image
 docker pull $DOCKER_IMAGE
 # # Define the mount points
-export HOST_MOUNT="/path/to/Megatron-LM" # Before run, change it to your own path where Megatron-LM locats
-export CONTAINER_MOUNT="/workspace/dev"
+export HOST_MOUNT=${HOST_MOUNT:-"/path/to/Megatron-LM"}     # Before run, change it to your own path 
+export CONTAINER_MOUNT=${CONTAINER_MOUNT:-"/workspace/dev"} # Before run, change it to your own path 
 
 # Run the Docker container with the script
 bash -c 'docker stop $(docker ps -q); \
