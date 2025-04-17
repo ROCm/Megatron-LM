@@ -257,6 +257,7 @@ class TestDistributedOptimizer:
         [((2, 2), (2, 4), False), ((1, 8), (4, 1), True), ((2, 4), (4, 2), False)],
     )
     @pytest.mark.skip(reason="Fails due to MoE layer requirements")
+    @pytest.mark.failing_on_rocm_mi250
     def test_finetune_doesnt_load_optimizer(
         self, tmp_path_dist_ckpt, src_tp_pp, dest_tp_pp, use_glu
     ):

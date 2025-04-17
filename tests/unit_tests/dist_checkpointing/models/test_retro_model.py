@@ -69,6 +69,7 @@ class TestRetroModel:
     @pytest.mark.parametrize('dst_spec_type', ['te', 'local'])
     @pytest.mark.parametrize('model_type', ['retro'])
     @pytest.mark.skip(reason="Missing keys in state dictionary")
+    @pytest.mark.failing_on_rocm
     def test_sharded_state_dict_save_load(
         self, tmp_path_dist_ckpt, src_spec_type, dst_spec_type, model_type
     ):
