@@ -60,10 +60,10 @@ Run command for Mixtral 8x7B with Mock data :
 Sample run command for a proxy N layer Mixtal 8x22B on single node with Mock data :
 ```
  TOKENIZER_MODEL=</path/to/tokenizer> \
- RECOMPUTE_NUM_LAYERS=16 \
- TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=full NUM_LAYERS=16 \
+ RECOMPUTE_NUM_LAYERS=4 \
+ TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=full NUM_LAYERS=4 \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=8192 FORCE_BALANCE=true MOCK_DATA=1  \
- NVTE_CK_USES_BWD_V3=1 RUN_ENV=cluster MODEL_SIZE=8x22B TRAIN_ITERS=50 bash examples/mixtral/train_mixtral_moe.sh
+ NVTE_CK_USES_BWD_V3=0 RUN_ENV=cluster MODEL_SIZE=8x22B TRAIN_ITERS=50 bash examples/mixtral/train_mixtral_moe.sh
  ```
 
 Note: Full model training of 8x22B requires multinode GPUs.

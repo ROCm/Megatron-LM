@@ -189,8 +189,7 @@ follow these steps for 2 Node run with Node0 as master node :
   ```bash
   TEE_OUTPUT=1 MBS=2 BS=256 TP=1 TE_FP8=1 SEQ_LENGTH=8192 MODEL_SIZE=8 MASTER_ADDR=IP_NODE0 NNODES=2 NODE_RANK=1 bash examples/llama/train_llama3.sh
   ```
-  where `MASTER_ADDR=IP_NODE0` tells the script that the master node ip address is
-`IP_NODE0`.
+  where `MASTER_ADDR=IP_NODE0` tells the script that the master node ip address is `IP_NODE0`.
 
 ---
 
