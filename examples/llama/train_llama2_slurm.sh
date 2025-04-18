@@ -1,17 +1,17 @@
 #!/bin/bash
-export CPU_PER_TASK=$(nproc)
 #SBATCH --job-name=llama-train
 #SBATCH --output=logs/slurm/multinode-job.%j.out
 #SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
-#SBATCH --cpus-per-task=${CPU_PER_TASK}      # assign all CPUs to the job
+#SBATCH --cpus-per-task=226                  # assign all CPUs to the job
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
 #SBATCH --time=01:00:00                      # Adjust as necessary
 #SBATCH --reservation=gpu-40_gpu-41_gpu-43_gpu-44_gpu-46_gpu-47_gpu-50_gpu-55_reservation # modify based on your reservation settings
 
 # Determine MASTER_ADDR and MASTER_PORT
-export MASTER_ADDR=$(srun --ntasks=1 hostname | head -n 1)
-export MASTER_PORT=29475
+MASTER_ADDR=$(srun --ntasks=1 hostname | head -n 1)
+export MASTER_ADDR="${MASTER_ADDR:-gpu-40}"
+export MASTER_PORT="${MASTER_PORT:-29475}"
 
 
 # Stop any existing Docker containers to avoid unwanted interruptions
@@ -19,10 +19,11 @@ srun bash -c 'podman stop $(podman ps -a -q)'       # change podmand command to 
 
 export CONTAINER_NAME="training_env"
 export IMAGE="docker.io/rocm/megatron-lm:v25.4" # change the docker name accordingly 
-
-export HOST_MOUNT="/path/to/host/dir"                # change this path to host dir intend to be attached to the docker
-export CONTAINER_MOUNT="/workspace/dev"              # change this path to development workspace path inside the docker
-export MEGATRON_DIR="${CONTAINER_MOUNT}/Megatron-LM" # change this path to Megatron-LM inside the docker
+MEGATRON_DIR=${PWD}
+export HOST_MOUNT=${HOME}                     # change this path to host dir intend to be attached to the docker
+export CONTAINER_MOUNT=${HOME}                # change this path to development workspace path inside the docker
+export MEGATRON_DIR=${MEGATRON_DIR}           # change this path to Megatron-LM inside the docker
+export CONTAINER_DIR=${HOME}
 # Build and launch the Docker container, change podmand command to docker command if the system is using docker instead of podman
 srun bash -c '
     podman pull $IMAGE

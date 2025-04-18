@@ -2,20 +2,20 @@
 
 ## 1. Prepare dataset
 ```
-mkdir -p /path/to/dataset/
-cd /path/to/dataset/
+mkdir -p dataset
+cd dataset
 wget https://atp-modelzoo-wlcb-pai.oss-cn-wulanchabu.aliyuncs.com/release/models/pai-megatron-patch/mistral-datasets/wudao_mistralbpe_content_document.bin
 wget https://atp-modelzoo-wlcb-pai.oss-cn-wulanchabu.aliyuncs.com/release/models/pai-megatron-patch/mistral-datasets/wudao_mistralbpe_content_document.idx
 ```
 
 ## 2. Prepare the tokenizer
 ```
-mkdir -p /path/to/tokenizer/mixtral-8x7B
-cd /path/to/tokenizer/mixtral-8x7B
+mkdir -p /tokenizer
+cd /tokenizer
 # download tokenizer.model from https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/blob/main/tokenizer.model
 ```
 
-## 3. Start the training
+## 3. Start the single node training 
 Start the docker
 ```
 docker run \
@@ -47,18 +47,22 @@ Start the training script in the docker
  RUN_ENV=localhost MODEL_SIZE=8x7B bash examples/mixtral/train_mixtral_moe.sh
 ```
 
-## 4. Start multinode training in slurm environment
+## 4. Start multinode training 
 
 With slurm environment, the pretraining can be launched with the following script.
 
-Note: Before the run, please modify the $HOST_MOUNT, $CONTAINER_MOUNT, $MEGATRON_DIR, $TOKENIZER_MODEL and $DATA_DIR variables, as well as the SBATCH arguments accordingly in the slurm script.     
+Note: Before the run, please modify the $TOKENIZER_MODEL and $DATA_DIR variables, as well as the SBATCH arguments accordingly in the slurm script.     
 
 Mixtral 8X7B
 ```
+  export TOKENIZER_MODEL=/path/to/tokenizer.model
+  export DATA_DIR=/path/to/dataset
   sbatch examples/mixtral/train_mixtral_8x7B_slurm.sh
 ```
 
 Mixtral 8X22B
 ```
+  export TOKENIZER_MODEL=/path/to/tokenizer.model
+  export DATA_DIR=/path/to/dataset
   sbatch examples/mixtral/train_mixtral_8x22B_slurm.sh
 ```
