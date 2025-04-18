@@ -4,8 +4,8 @@
 Download full dataset to train with real data and setting value of `MOCK_DATA` to `0` during training. By default `MOCK_DATA` is `1`
 
 ```
-mkdir -p /path/to/dataset/
-cd /path/to/dataset/
+mkdir -p dataset
+cd dataset
 wget https://atp-modelzoo-wlcb-pai.oss-cn-wulanchabu.aliyuncs.com/release/models/pai-megatron-patch/mistral-datasets/wudao_mistralbpe_content_document.bin
 wget https://atp-modelzoo-wlcb-pai.oss-cn-wulanchabu.aliyuncs.com/release/models/pai-megatron-patch/mistral-datasets/wudao_mistralbpe_content_document.idx
 ```
@@ -48,7 +48,7 @@ wget --header="Authorization: Bearer $HF_TOKEN" -O ./tokenizer.model https://hug
 ```
 
 ## 4. Run on Single Node
-Run command for Mixtral 8x7B:
+Run command for Mixtral 8x7B with Mock data :
 ```
  TOKENIZER_MODEL=</path/to/tokenizer> \
  RECOMPUTE_NUM_LAYERS=0 \
@@ -72,14 +72,18 @@ Note: Full model training of 8x22B requires multinode GPUs.
 
 With slurm environment, the pretraining can be launched with the following script.
 
-Note: Before the run, please modify the $HOST_MOUNT, $CONTAINER_MOUNT, $MEGATRON_DIR, $TOKENIZER_MODEL and $DATA_DIR variables, as well as the SBATCH arguments accordingly in the slurm script.     
+Note: Before the run, please modify the $TOKENIZER_MODEL and $DATA_DIR variables, as well as the SBATCH arguments accordingly in the slurm script.     
 
 Mixtral 8X7B
 ```
+  export TOKENIZER_MODEL=/path/to/tokenizer.model
+  export DATA_DIR=/path/to/dataset
   sbatch examples/mixtral/train_mixtral_8x7B_slurm.sh
 ```
 
 Mixtral 8X22B
 ```
+  export TOKENIZER_MODEL=/path/to/tokenizer.model
+  export DATA_DIR=/path/to/dataset
   sbatch examples/mixtral/train_mixtral_8x22B_slurm.sh
 ```

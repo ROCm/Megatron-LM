@@ -68,8 +68,8 @@ TOKENIZER_MODEL=${TOKENIZER_MODEL:-"/path/to/tokenizer.model"}
 
 # data
 DATA_DIR=${DATA_DIR:-"/workspace/dev/data"}
-DATASET_PATH=${DATA_DIR}/mixtral-datasets/wudao_mistralbpe_content_document
-VALID_DATASET_PATH=${DATA_DIR}/mixtral-datasets/wudao_mistralbpe_content_document
+DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
+VALID_DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
 echo "DATASET_PATH: $DATASET_PATH"
 echo "VALID_DATASET_PATH: $VALID_DATASET_PATH"
 echo ""

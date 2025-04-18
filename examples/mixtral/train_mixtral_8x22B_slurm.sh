@@ -31,12 +31,13 @@ podman pull $DOCKER_IMAGE        # change podman command to docker command if ne
 
 export NETWORK_INTERFACE="bond0" # Change this to your network interface name
 
+MEGATRON_DIR=${PWD}
 # Define the dataset path. Before each run, change the following paths accordingly
-export HOST_MOUNT=${HOST_MOUNT:-"/path/to/host/dir"}                  # change the path to host dir intend to be attached to the docker
-export CONTAINER_MOUNT=${CONTAINER_MOUNT:-"/workspace/dev"}           # change the path to workspace developing path inside the docker
-export MEGATRON_DIR=${MEGATRON_DIR:-"${CONTAINER_MOUNT}/Megatron-LM"} # change the path to Megatron-LM inside the docker
+export HOST_MOUNT=${HOME}                  # change the path to host dir intend to be attached to the docker
+export CONTAINER_MOUNT=${HOME}           # change the path to workspace developing path inside the docker
+export MEGATRON_DIR=${MEGATRON_DIR:-"${MEGATRON_DIR}"} # change the path to Megatron-LM inside the docker
 export TOKENIZER_MODEL=${TOKENIZER_MODEL:-"${CONTAINER_MOUNT}/path/to/tokenizer.model"}   # change the tokenizer path accordingly
-export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/data"}                # change the path to dataset location
+export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/path/to/dataset"}                # change the path to dataset location
 
 # Run the Docker container with the script
 srun bash -c 'podman stop $(podman ps -q); \
