@@ -31,6 +31,7 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
 
+GPUS_PER_NODE=`python3 -c "import torch; print(torch.cuda.device_count())"`
 # cluster envs
 RUN_ENV="${RUN_ENV:-cluster}"
 if [ $RUN_ENV = "cluster" ]; then
@@ -38,13 +39,11 @@ if [ $RUN_ENV = "cluster" ]; then
     MASTER_PORT=${MASTER_PORT:-$(shuf -n 1 -i 10000-65535)}
     NNODES=${NNODES:-1}
     NODE_RANK=${NODE_RANK:-0}
-    GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 elif [ $RUN_ENV = "slurm" ]; then
     MASTER_ADDR=${SLURM_MASTER_ADDR}
     MASTER_PORT=${SLURM_MASTER_PORT}
     NNODES=$SLURM_NNODES
     NODE_RANK=${SLURM_NODEID}
-    GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 fi
 gpus=$(seq -s, 0 $((GPUS_PER_NODE - 1)))
 export HIP_VISIBLE_DEVICES=$gpus

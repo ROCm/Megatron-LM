@@ -1,26 +1,29 @@
 #!/bin/bash
 
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export GPU_MAX_HW_QUEUES=2
-export TORCH_NCCL_HIGH_PRIORITY=1
-export NCCL_CHECKS_DISABLE=1
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
+export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
-export NCCL_IB_GID_INDEX=3
-export NCCL_CROSS_NIC=0
-export NCCL_PROTO=Simple
-export RCCL_MSCCL_ENABLE=0
-export TOKENIZERS_PARALLELISM=false
-export HSA_NO_SCRATCH_RECLAIM=1
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
+export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+export NCCL_PROTO=${NCCL_PROTO:-Simple}
+export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
-GPUS_PER_NODE=8
+
+GPUS_PER_NODE=`python3 -c "import torch; print(torch.cuda.device_count())"`
 EXPERIMENT="mixtral"
 
-if [ $RUN_ENV = localhost ]; then
+
+RUN_ENV="${RUN_ENV:-cluster}"
+if [ $RUN_ENV = cluster ]; then
 
 MASTER_ADDR="${MASTER_ADDR:-localhost}"
 MASTER_PORT="${MASTER_PORT:-27777}"
@@ -53,8 +56,7 @@ MBS=${MBS:-4}
 SEQLEN=${SEQLEN:-4096}
 PR=${PR:-bf16} # bf16, fp16, fp8
 
-EXIT_ITERS=${EXIT_ITERS:-10}
-TRAIN_ITERS=${TRAIN_ITERS:-100}
+TRAIN_ITERS=${TRAIN_ITERS:-10}
 
 
 LR_WARMUP_ITERS=2
@@ -260,13 +262,23 @@ DISTRIBUTED_ARGS=(
     --master_port $MASTER_PORT
 )
 
+
+if [ "$MODEL_SIZE" = "8x7B" ]; then
+    NUM_LAYERS=${NUM_LAYERS:-32}
+elif [ "$MODEL_SIZE" = "8x22B" ]; then
+    NUM_LAYERS=${NUM_LAYERS:-56}
+else
+    echo "invalid model size"
+    exit 1
+fi
+
 if [ "$MODEL_SIZE" = "8x7B" ]; then
 MODEL_ARGS=(
     --use-mcore-models
     --disable-bias-linear
     --seq-length ${SEQLEN}
     --max-position-embeddings 32768
-    --num-layers 32
+    --num-layers $NUM_LAYERS
     --hidden-size 4096
     --ffn-hidden-size 14336
     --num-attention-heads 32
@@ -289,7 +301,7 @@ MODEL_ARGS=(
     --disable-bias-linear
     --seq-length ${SEQLEN}
     --max-position-embeddings 65536
-    --num-layers 56
+    --num-layers $NUM_LAYERS
     --hidden-size 6144
     --ffn-hidden-size 16384
     --num-attention-heads 48
@@ -324,12 +336,29 @@ MOE_ARGS=(
     --overlap-param-gather
 )
 
+MOCK_DATA="${MOCK_DATA:-1}" # 1: use mock data, 0: use real data
+
+# For multi-node runs DATA_CACHE_PATH should point to a common path accessible by all the nodes (for eg, an NFS directory)
+DATA_CACHE_PATH="${DATA_CACHE_PATH:-/home/cache}"
+
+
 DATA_ARGS=(
     --tokenizer-type Llama2Tokenizer
     --tokenizer-model ${TOKENIZER_MODEL}
-    --data-path $DATASET_PATH
     --split 9900,80,20
 )
+
+if [ $MOCK_DATA = 1 ];then
+	EXTRA_ARGS+=( 
+	--mock-data 
+	--data-cache-path $DATA_CACHE_PATH
+	)
+else
+	EXTRA_ARGS+=( 
+	--data-path $DATASET_PATH 
+	--data-cache-path ${DATA_CACHE_PATH} 
+	)
+fi
 
 
 TRAINING_ARGS=(
@@ -344,7 +373,6 @@ TRAINING_ARGS=(
     --lr-warmup-iters ${LR_WARMUP_ITERS}
     --clip-grad 1.0
     --seed 1234
-    --exit-interval ${EXIT_ITERS}
     --ckpt-format torch 
 )
     #--save ${CHECKPOINT_PATH} 
@@ -380,8 +408,6 @@ if [ -n "${WANDB_API_KEY}" ]; then
     )
 fi
 
-CURDIR=$(cd $(dirname $0); pwd)
-cd $CURDIR/../..
 command="torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${pr_options[@]} \
@@ -398,3 +424,39 @@ command="$command  2>&1 | tee $TRAIN_LOG"
 echo "launch_command=${command}"
 eval ${command}
 echo ""
+
+
+if [ "$RUN_ENV" = "cluster" ] || ( [ "$RUN_ENV" = "slurm" ] && [ "$SLURM_NODEID" = "$((NNODES - 1))" ] ); then
+echo 'import argparse
+import numpy as np
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(
+                        prog="Process Log")
+    parser.add_argument("filename")
+    args = parser.parse_args()
+
+    with open(args.filename) as f:
+        lines = f.readlines()
+    lines = lines[1:-1]
+    lines = [float(a) for a in lines]
+    mean = np.mean(np.array(lines))
+    print(mean)' > mean_log_value.py
+
+
+echo '============================================================================================================'
+grep -Eo 'throughput per GPU [^|]*' $TRAIN_LOG | sed -E 's/.*throughput per GPU \(TFLOP\/s\/GPU\): ([0-9\.]+).*/\1/' > tmp.txt
+echo "throughput per GPU: $(python mean_log_value.py tmp.txt)" |& tee -a $TRAIN_LOG
+THROUGHPUT=$(python mean_log_value.py tmp.txt)
+rm tmp.txt
+
+echo '============================================================================================================'
+grep -Eo 'elapsed time per iteration [^|]*' $TRAIN_LOG | sed -E 's/.*elapsed time per iteration \(ms\): ([0-9\.]+).*/\1/' > tmp.txt
+echo "elapsed time per iteration: $(python mean_log_value.py tmp.txt)" |& tee -a $TRAIN_LOG
+
+TIME_PER_ITER=$(python mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
+PERFORMANCE=$(awk -v bs="$GBS" -v sl="$SEQLEN" -v tpi="$TIME_PER_ITER" -v ws="$((NNODES * GPUS_PER_NODE))" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
+echo "tokens/GPU/s: $PERFORMANCE" |& tee -a $TRAIN_LOG
+rm tmp.txt
+
+fi

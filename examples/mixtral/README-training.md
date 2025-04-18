@@ -1,6 +1,8 @@
 # Mixtral 8x7B and 8X22B MoE Model pretraining
 
 ## 1. Prepare dataset
+Download full dataset to train with real data and setting value of `MOCK_DATA` to `0` during training. By default `MOCK_DATA` is `1`
+
 ```
 mkdir -p /path/to/dataset/
 cd /path/to/dataset/
@@ -8,14 +10,8 @@ wget https://atp-modelzoo-wlcb-pai.oss-cn-wulanchabu.aliyuncs.com/release/models
 wget https://atp-modelzoo-wlcb-pai.oss-cn-wulanchabu.aliyuncs.com/release/models/pai-megatron-patch/mistral-datasets/wudao_mistralbpe_content_document.idx
 ```
 
-## 2. Prepare the tokenizer
-```
-mkdir -p /path/to/tokenizer/mixtral-8x7B
-cd /path/to/tokenizer/mixtral-8x7B
-# download tokenizer.model from https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/blob/main/tokenizer.model
-```
 
-## 3. Start the training
+## 2. Start the training
 Start the docker
 ```
 docker run \
@@ -35,19 +31,44 @@ docker run \
  -it docker.io/rocm/megatron-lm:latest sleep infinity
  
 ```
+
 Enter into the container
 ```
 docker exec -it mixtral_pretrain bash 
 ```
-Start the training script in the docker
+
+## 3. Prepare the tokenizer
 ```
- RECOMPUTE_NUM_LAYERS=0 \
- TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=none \
- PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=4096 FORCE_BALANCE=true \
- RUN_ENV=localhost MODEL_SIZE=8x7B bash examples/mixtral/train_mixtral_moe.sh
+mkdir -p </path/to/tokenizer/>
+cd </path/to/tokenizer/>
+
+export HF_TOKEN="hf_xxx" #set huggingface access token to be able to download tokenizer
+wget --header="Authorization: Bearer $HF_TOKEN" -O ./tokenizer.model https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/resolve/main/tokenizer.model
+
 ```
 
-## 4. Start multinode training in slurm environment
+## 4. Run on Single Node
+Run command for Mixtral 8x7B:
+```
+ TOKENIZER_MODEL=</path/to/tokenizer> \
+ RECOMPUTE_NUM_LAYERS=0 \
+ TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=none \
+ PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=4096 FORCE_BALANCE=true MOCK_DATA=1 \
+ RUN_ENV=cluster MODEL_SIZE=8x7B TRAIN_ITERS=50 bash examples/mixtral/train_mixtral_moe.sh
+```
+
+Sample run command for a proxy N layer Mixtal 8x22B on single node with Mock data :
+```
+ TOKENIZER_MODEL=</path/to/tokenizer> \
+ RECOMPUTE_NUM_LAYERS=16 \
+ TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=full NUM_LAYERS=16 \
+ PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=8192 FORCE_BALANCE=true MOCK_DATA=1  \
+ NVTE_CK_USES_BWD_V3=1 RUN_ENV=cluster MODEL_SIZE=8x22B TRAIN_ITERS=50 bash examples/mixtral/train_mixtral_moe.sh
+ ```
+
+Note: Full model training of 8x22B requires multinode GPUs.
+
+## 5. Start multinode training in slurm environment
 
 With slurm environment, the pretraining can be launched with the following script.
 
