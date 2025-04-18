@@ -7,19 +7,18 @@
 #set -x
 
 # set envs 
-export GPU_MAX_HW_QUEUES=2
-export TORCH_NCCL_HIGH_PRIORITY=1
-export NCCL_CHECKS_DISABLE=1
-#export NCCL_IB_HCA="${NCCL_IB_HCA:-rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7}"
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
+export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
-export NCCL_IB_GID_INDEX=3
-export NCCL_CROSS_NIC=0
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export NCCL_PROTO=Simple
-export RCCL_MSCCL_ENABLE=0
-export TOKENIZERS_PARALLELISM=false
-export HSA_NO_SCRATCH_RECLAIM=1
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
+export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+export NCCL_PROTO=${NCCL_PROTO:-Simple}
+export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 
 # parsing input arguments
@@ -169,6 +168,7 @@ GPT_ARGS="
     --position-embedding-type rope \
     --no-position-embedding \
     --swiglu \
+    --disable-bias-linear \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
     --hidden-dropout 0.0 \
@@ -224,7 +224,7 @@ DATA_ARGS="
     --num-workers $ds_works \
 "
 # For multi-node runs DATA_CACHE_PATH should point to a common path accessible by all the nodes (for eg, an NFS directory)
-DATA_CACHE_PATH="${DATA_CACHE_PATH:-/workspace/dev/cache}"
+DATA_CACHE_PATH="${DATA_CACHE_PATH:-/home/cache}"
 
 if [ "$MOCK_DATA" -eq 1 ];then
     DATA_ARGS="$DATA_ARGS --mock-data --data-cache-path $DATA_CACHE_PATH"

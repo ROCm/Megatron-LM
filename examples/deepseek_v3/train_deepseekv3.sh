@@ -17,25 +17,19 @@ echo "EXPERIMENT: $EXPERIMENT - $TIMESTAMP"
 echo "MEGATRON_PATH: ${MEGATRON_PATH}"
 echo "PYTHONPATH: ${PYTHONPATH}"
 echo ""
-NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
-# network envs
-export GPU_MAX_HW_QUEUES=2
-export TORCH_NCCL_HIGH_PRIORITY=1
-export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
-export NCCL_IB_GID_INDEX=3
-export NCCL_CROSS_NIC=0
-export HSA_ENABLE_SDMA=0
 
-export NCCL_SOCKET_IFNAME=${NCCL_SOCKET_IFNAME:-eth0}
-export GLOO_SOCKET_IFNAME=${GLOO_SOCKET_IFNAME:-eth0}
-export CUDA_DEVICE_MAX_CONNECTIONS=1 # Reducing to 1 ensures no PCIE traffic (even on single node)
-export NCCL_PROTO=Simple
-export RCCL_MSCCL_ENABLE=0
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-# export AMD_LOG_LEVEL=3
-# export AMD_SERIALIZE_KERNEL=3
-# export HSA_NO_SCRATCH_RECLAIM=1
+# network envs
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
+export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
+NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
+export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1} # Reducing to 1 ensures no PCIE traffic (even on single node)
+export NCCL_PROTO=${NCCL_PROTO:-Simple}
+export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
+export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
 
 # cluster envs
 RUN_ENV="${RUN_ENV:-cluster}"
@@ -62,6 +56,14 @@ echo "NODE_RANK: $NODE_RANK"
 echo "GPUS_PER_NODE: $GPUS_PER_NODE"
 echo ""
 
+if [ "${NNODES:-1}" -gt 1 ]; then
+    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens51np0}"
+    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-ens51np0}"
+    echo "NCCL and GLOO socket interfaces set."
+else
+    echo "Single node setup, skipping NCCL and GLOO socket interface settings."
+fi
+
 # model
 MODEL_NAME="deepseek-ai/DeepSeek-V3"
 MODEL_SIZE=${MODEL_SIZE:-16B} # 16B, 236B, 671B.
@@ -75,11 +77,23 @@ echo ""
 
 # data
 DATA_DIR=${DATA_DIR:-"/home/azureuser/tas-public/data"}
-DATASET_PATH=${DATA_DIR}/deepseek-datasets/mmap_deepseekv3_datasets_text_document
-VALID_DATASET_PATH=${DATA_DIR}/deepseek-datasets/mmap_deepseekv3_datasets_text_document
-echo "DATASET_PATH: $DATASET_PATH"
-echo "VALID_DATASET_PATH: $VALID_DATASET_PATH"
-echo ""
+
+MOCK_DATA="${MOCK_DATA:-1}"
+
+# For multi-node runs DATA_CACHE_PATH should point to a common path accessible by all the nodes (for eg, an NFS directory)
+DATA_CACHE_PATH=${DATA_CACHE_PATH:-"/root/cache"}
+
+if [ "$MOCK_DATA" -eq 1 ]; then
+    echo Using mock data.
+    data_args="--mock-data --data-cache-path ${DATA_CACHE_PATH}"
+else
+    echo Using data from $DATA_DIR
+
+    data_args="--train-data-path ${DATA_DIR}/mmap_deepseekv3_datasets_text_document \
+                --valid-data-path ${DATA_DIR}/mmap_deepseekv3_datasets_text_document \
+                --test-data-path ${DATA_DIR}/mmap_deepseekv3_datasets_text_document
+              "
+fi
 
 # hyper params
 MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-1}
@@ -448,9 +462,7 @@ megatron_options="  \
 	--log-throughput \
 	--no-gradient-accumulation-fusion \
 	--no-async-tensor-model-parallel-allreduce \
-        --train-data-path ${DATASET_PATH} \
-        --valid-data-path ${VALID_DATASET_PATH} \
-        --test-data-path ${VALID_DATASET_PATH} \
+	${data_args} \
         --lr ${LR} \
         --min-lr ${MIN_LR} \
         --lr-decay-style cosine \
@@ -542,7 +554,7 @@ echo ${run_cmd}
 eval ${run_cmd}
 set +x
 
-if [ "$RUN_ENV" = "localhost" ] || ( [ "$RUN_ENV" = "slurm" ] && [ "$SLURM_NODEID" = "$((NNODES - 1))" ] ); then
+if [ "$RUN_ENV" = "cluster" ] || ( [ "$RUN_ENV" = "slurm" ] && [ "$SLURM_NODEID" = "$((NNODES - 1))" ] ); then
 echo 'import argparse
 import numpy as np
 
