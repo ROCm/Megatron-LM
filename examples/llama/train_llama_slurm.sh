@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=llama-train
 #SBATCH --output=logs/slurm/multinode-job.%j.out
-#SBATCH --nodes=2                            # Number of nodes, Adjust as necessary
+#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
 #SBATCH --cpus-per-task=226                  # assign all CPUs to the job
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
@@ -40,6 +40,7 @@ export DATA_DIR=${DATA_DIR:-"${HOME}/.cache/data"}
 export HF_TOKEN="${HF_TOKEN:-hf_xxxx}"  
 export MODEL_NAME=${MODEL_NAME:-"llama2"}
 export NETWORK_INTERFACE=${NETWORK_INTERFACE:-"bond0"} # Can be get by run `ip a` 
+export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 # Build and launch the Docker container, change podmand command to docker command if the system is using docker instead of podman
 srun bash -c '
@@ -85,6 +86,7 @@ srun bash -c '
     -e TOTAL_ITERS='"$TOTAL_ITERS"' \
     -e RECOMPUTE='"$RECOMPUTE"' \
     -e FSDP='"$FSDP"' \
+    -e WANDB_API_KEY='"$WANDB_API_KEY"' \
     '"$CONTAINER_NAME"' \
     bash -c "
       echo Inside container: NODE_RANK=\$NODE_RANK

@@ -50,6 +50,7 @@ export HOST_MOUNT=${HOST_MOUNT:=${HOME}}                # Before run, change it 
 export CONTAINER_MOUNT=${CONTAINER_MOUNT:=${HOME}}      # Before run, change it to your own path 
 export NETWORK_INTERFACE=${NETWORK_INTERFACE:-"bond0"}  # Can be get by run `ip a` 
 export DATA_DIR=${DATA_DIR:-${MEGATRON_DIR}/../../data} 
+export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 # Run the Docker container with the script
 srun bash -c '${container_command} run --rm \
@@ -58,6 +59,7 @@ srun bash -c '${container_command} run --rm \
  --env "SLURM_PROCID=$SLURM_PROCID" \
  --env SLURM_NODEID=$SLURM_NODEID \
  --env SLURM_NNODES=$SLURM_NNODES \
+ --env WANDB_API_KEY=$WANDB_API_KEY \
  --ipc=host --network=host --device=/dev/kfd --device=/dev/dri  --cap-add=SYS_PTRACE  --cap-add=CAP_SYS_ADMIN  \
  --security-opt seccomp=unconfined --group-add video --privileged --device=/dev/infiniband \
  -v $HOST_MOUNT:$CONTAINER_MOUNT \

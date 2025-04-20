@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mixtral-8X7B-train
-#SBATCH --output=logs/slurm/multinode-job.%j.out
-#SBATCH --nodes=4                            # Number of nodes, Adjust as necessary
+#SBATCH --output=logs/slurm/mixtral-8X7B-job.%j.out
+#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
 #SBATCH --cpus-per-task=226                  # assign all CPUs to the job
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
@@ -55,6 +55,7 @@ export CONTAINER_MOUNT=${HOME}           # change the path to workspace developi
 export MEGATRON_DIR=${MEGATRON_DIR:-"${MEGATRON_DIR}"} # change the path to Megatron-LM inside the docker
 export TOKENIZER_MODEL=${TOKENIZER_MODEL:-"${CONTAINER_MOUNT}/path/to/tokenizer.model"}   # change the tokenizer path accordingly
 export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/path/to/dataset"}                # change the path to dataset location
+export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 # Run the Docker container with the script
 srun bash -c '${container_command} run --rm \
@@ -63,6 +64,7 @@ srun bash -c '${container_command} run --rm \
  --env "SLURM_PROCID=$SLURM_PROCID" \
  --env SLURM_NODEID=$SLURM_NODEID \
  --env SLURM_NNODES=$SLURM_NNODES \
+ --env WANDB_API_KEY=${WANDB_API_KEY} \
  --ipc=host --network=host --device=/dev/kfd --device=/dev/dri  --cap-add=SYS_PTRACE  --cap-add=CAP_SYS_ADMIN  \
  --security-opt seccomp=unconfined --group-add video --privileged --device=/dev/infiniband \
  -v $HOST_MOUNT:$CONTAINER_MOUNT \

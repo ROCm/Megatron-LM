@@ -405,6 +405,7 @@ if [ -n "${WANDB_API_KEY}" ]; then
     LOGGING_ARGS+=(
         --wandb-project ${WANDB_PROJECT:-"Mixtral"}
         --wandb-exp-name ${WANDB_NAME:-${MODEL_SIZE}}
+        --wandb-save-dir logs/wandb 
     )
 fi
 

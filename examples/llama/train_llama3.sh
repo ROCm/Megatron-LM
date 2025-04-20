@@ -300,6 +300,15 @@ if [ "$TE_FP8" -eq 1 ]; then
 "
 fi
 
+if [ -n "${WANDB_API_KEY}" ]; then
+    LOGGING_ARGS="--wandb-project=LLama \
+        --wandb-exp-name=LLama_${MODEL_SIZE}B \
+        --wandb-save-dir logs/wandb \
+    "
+else
+   LOGGING_ARGS=""
+fi
+
 run_cmd="
     torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
         $GPT_ARGS \
@@ -307,6 +316,7 @@ run_cmd="
         $OUTPUT_ARGS \
         $EXTRA_ARGS \
         $TRAIN_ARGS \
+        $LOGGING_ARGS \
         $CKPT_LOAD_ARGS
 "
 

@@ -542,11 +542,20 @@ else
         "
 fi
 
+if [ -n "${WANDB_API_KEY}" ]; then
+    LOGGING_ARGS="--wandb-project=deepseek \
+        --wandb-exp-name=LLama_${MODEL_SIZE} \
+        --wandb-save-dir logs/wandb \
+    "
+else
+   LOGGING_ARGS=""
+fi
+
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
 run_cmd="torchrun $DISTRIBUTED_ARGS examples/deepseek_v3/pretrain_deepseek_v3.py 
  ${megatron_options} ${pr_options} ${load_options} ${activation_checkpoint_options} \
- ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} ${sft_option} ${vp_options} ${flash_options} ${profile_options}"
+ ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} ${sft_option} ${vp_options} ${flash_options} ${profile_options} ${LOGGING_ARGS}"
 
 run_cmd="$run_cmd | tee $TRAIN_LOG"
 echo ${run_cmd}
