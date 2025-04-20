@@ -70,7 +70,7 @@ class TENorm:
     def __new__(cls, config: TransformerConfig, hidden_size: int, eps: float = 1e-5):
         if config.normalization == "LayerNorm":
             instance = te.pytorch.LayerNorm(
-                hidden_size=hidden_size,
+                hidden_size,
                 eps=eps,
                 sequence_parallel=config.sequence_parallel,
                 zero_centered_gamma=config.layernorm_zero_centered_gamma,
@@ -81,7 +81,7 @@ class TENorm:
                 te.pytorch, "RMSNorm"
             ), "Transformer-Engine >= v0.11 required to use this feature"
             instance = te.pytorch.RMSNorm(
-                hidden_size=hidden_size,
+                hidden_size,
                 eps=eps,
                 sequence_parallel=config.sequence_parallel,
                 zero_centered_gamma=config.layernorm_zero_centered_gamma,
@@ -188,22 +188,6 @@ class TELinear(te.pytorch.Linear):
         if is_te_min_version("1.7.0"):
             extra_kwargs["rng_tracker_name"] = rng_tracker_name
 
-        # # Disable communications in TE when using TP or EP by making TE agnostic of model parallel.
-        # if is_expert:
-        #     tp_group = get_expert_tensor_parallel_group(check_initialized=False)
-        #     tp_size = get_expert_tensor_parallel_world_size()
-        # else:
-        #     tp_group = get_tensor_model_parallel_group(check_initialized=False)
-        #     tp_size = get_tensor_model_parallel_world_size()
-        # explicit_expert_comm = is_expert and (tp_size > 1 or self.expert_parallel)
-
-        # if explicit_expert_comm:
-        #     if parallel_mode == "column":
-        #         output_size = divide(output_size, tp_size)
-        #     elif parallel_mode == "row":
-        #         input_size = divide(input_size, tp_size)
-        #     parallel_mode = None
-        #     tp_size = 1
         te_parallel_mode = parallel_mode
         if parallel_mode == "duplicated":
             # Handle non-parallel case

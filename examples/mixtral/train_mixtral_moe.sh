@@ -339,7 +339,7 @@ MOE_ARGS=(
 MOCK_DATA="${MOCK_DATA:-1}" # 1: use mock data, 0: use real data
 
 # For multi-node runs DATA_CACHE_PATH should point to a common path accessible by all the nodes (for eg, an NFS directory)
-DATA_CACHE_PATH="${DATA_CACHE_PATH:-/home/cache}"
+DATA_CACHE_PATH="${DATA_CACHE_PATH:-../.cache}"
 
 
 DATA_ARGS=(

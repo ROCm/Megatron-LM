@@ -45,7 +45,7 @@ TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 MODEL_NAME=DeepSeek-V2-Lite
 
-DATA_DIR="/workspace/dev/data/deepseek-datasets"
+DATA_DIR=${DATA_DIR:-"/root/deepseek-datasets"}
 MODEL=deepseek-ai/${MODEL_NAME}
 
 MODEL_SIZE=16B

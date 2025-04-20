@@ -67,7 +67,7 @@ fi
 MODEL_NAME="deepseek-ai/DeepSeek-V3"
 MODEL_SIZE=${MODEL_SIZE:-16B} # 16B, 236B, 671B.
 TOKENIZER_MODEL="deepseek-ai/DeepSeek-V3"
-export HF_HOME=${HF_HOME:-"/home/azureuser/tas-public/huggingface"}
+export HF_HOME=${HF_HOME:-"../huggingface"}
 echo "MODEL_NAME: $MODEL_NAME"
 echo "MODEL_SIZE: $MODEL_SIZE"
 echo "TOKENIZER_MODEL: $TOKENIZER_MODEL"
@@ -75,12 +75,12 @@ echo "HF_HOME: $HF_HOME"
 echo ""
 
 # data
-DATA_DIR=${DATA_DIR:-"/home/azureuser/tas-public/data"}
+DATA_DIR=${DATA_DIR:-"../data"}
 
 MOCK_DATA="${MOCK_DATA:-1}"
 
 # For multi-node runs DATA_CACHE_PATH should point to a common path accessible by all the nodes (for eg, an NFS directory)
-DATA_CACHE_PATH=${DATA_CACHE_PATH:-"/root/cache"}
+DATA_CACHE_PATH=${DATA_CACHE_PATH:-"../.cache"}
 
 if [ "$MOCK_DATA" -eq 1 ]; then
     echo Using mock data.

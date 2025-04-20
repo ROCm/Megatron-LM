@@ -30,6 +30,7 @@ from megatron.training.utils import (
     average_losses_across_data_parallel_group,
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
+    get_batch_on_this_tp_rank_idxmap_sft,
 )
 
 from megatron.training.arguments import get_patch_args
@@ -121,7 +122,7 @@ def get_batch(data_iterator):
         if args.train_mode == "pretrain":
             batch = get_batch_on_this_tp_rank(data_iterator)
         else:
-            batch = get_batch_on_this_cp_rank(batch)
+            batch = get_batch_on_this_tp_rank_idxmap_sft(data_iterator)
 
         packed_seq_params = None
         if args.reset_position_ids:

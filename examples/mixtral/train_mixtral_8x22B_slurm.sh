@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=mixtral-8X22B-train
-#SBATCH --output=logs/slurm/multinode-job.%j.out
+#SBATCH --output=logs/slurm/mixtral-8X22B-job.%j.out
 #SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
 #SBATCH --cpus-per-task=226                  # assign all CPUs to the job
@@ -18,18 +18,34 @@ master_node=${node_array[0]}
 
 # Set environment variables for distributed training
 export SLURM_MASTER_ADDR=$master_node
-export SLURM_MASTER_PORT=29508
+export SLURM_MASTER_PORT="${SLURM_MASTER_PORT:-29475}"
 
 
 # Optional: Print out the values for debugging
 echo "MASTER_ADDR=$SLURM_MASTER_ADDR"
 echo "MASTER_PORT=$SLURM_MASTER_PORT"
 # Define the Docker image
-export DOCKER_IMAGE="rocm/megatron-lm:v25.4"
-# Pull docker image
-podman pull $DOCKER_IMAGE        # change podman command to docker command if necessary
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.4"}
 
-export NETWORK_INTERFACE="bond0" # Change this to your network interface name
+echo "Trying 'docker ps'..."
+if docker ps; then
+    echo "Docker is working."
+    export container_command=docker
+else
+    echo "'docker ps' failed. Trying 'podman ps'..."
+    if podman ps; then
+        echo "Podman is working."
+        export container_command=podman
+    else
+        echo "Both 'docker ps' and 'podman ps' failed."
+        exit 1
+    fi
+fi
+
+# Pull docker image
+${container_command} pull $DOCKER_IMAGE        # change podman command to docker command if necessary
+
+export NETWORK_INTERFACE=${NETWORK_INTERFACE:-"bond0"} # Can be get by run `ip a` 
 
 MEGATRON_DIR=${PWD}
 # Define the dataset path. Before each run, change the following paths accordingly
@@ -40,9 +56,7 @@ export TOKENIZER_MODEL=${TOKENIZER_MODEL:-"${CONTAINER_MOUNT}/path/to/tokenizer.
 export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/path/to/dataset"}                # change the path to dataset location
 
 # Run the Docker container with the script
-srun bash -c 'podman stop $(podman ps -q); \
-  module load rocm ;\
-  podman run --rm \
+srun bash -c '${container_command} run --rm \
  --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \
  --env SLURM_MASTER_PORT=$SLURM_MASTER_PORT \
  --env "SLURM_PROCID=$SLURM_PROCID" \

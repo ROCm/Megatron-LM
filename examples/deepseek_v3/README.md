@@ -91,5 +91,5 @@ We provide an example scipt to enable training at scale under slurm environment.
 For example, to run the training on 16 nodes, one can use the following command
 
 ```
-srun -N 16 --cpus-per-task=$(nproc) --ntasks-per-node=1 bash examples/deepseek_v3/train_deepseek_v3_slurm.sh
+sbatch examples/deepseek_v3/train_deepseek_v3_slurm.sh
 ```
