@@ -70,9 +70,7 @@ TOKENIZER_MODEL=${TOKENIZER_MODEL:-"/path/to/tokenizer.model"}
 DATA_DIR=${DATA_DIR:-"/workspace/dev/data"}
 DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
 VALID_DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
-echo "DATASET_PATH: $DATASET_PATH"
-echo "VALID_DATASET_PATH: $VALID_DATASET_PATH"
-echo ""
+
 
 
 EXTRA_ARGS=(
@@ -358,6 +356,9 @@ else
 	--data-path $DATASET_PATH 
 	--data-cache-path ${DATA_CACHE_PATH} 
 	)
+    echo "DATASET_PATH: $DATASET_PATH"
+    echo "VALID_DATASET_PATH: $VALID_DATASET_PATH"
+    echo ""
 fi
 
 
