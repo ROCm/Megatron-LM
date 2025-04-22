@@ -43,14 +43,14 @@ mkdir -p </path/to/tokenizer/>
 cd </path/to/tokenizer/>
 
 export HF_TOKEN="hf_xxx" #set huggingface access token to be able to download tokenizer
-git di
+wget --header="Authorization: Bearer $HF_TOKEN" -O ./tokenizer.model https://huggingface.co/mistralai/Mixtral-8x7B-v0.1/resolve/main/tokenizer.mod
 
 ```
 
 ## 4. Run on Single Node
 Run command for Mixtral 8x7B with Mock data :
 ```
- TOKENIZER_MODEL=</path/to/tokenizer> \
+ TOKENIZER_MODEL=</path/to/tokenizer.model> \
  RECOMPUTE_NUM_LAYERS=0 \
  TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=none \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=4096 FORCE_BALANCE=true MOCK_DATA=1 \
@@ -59,7 +59,7 @@ Run command for Mixtral 8x7B with Mock data :
 
 Sample run command for a proxy `NUM_LAYERS=4` Mixtral 8x22B model on single node with Mock data :
 ```
- TOKENIZER_MODEL=</path/to/tokenizer> \
+ TOKENIZER_MODEL=</path/to/tokenizer.model> \
  RECOMPUTE_NUM_LAYERS=4 \
  TEE_OUTPUT=1 MBS=1 GBS=16 TP_SIZE=1 PP_SIZE=1 AC=full NUM_LAYERS=4 \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=8192 FORCE_BALANCE=true MOCK_DATA=1  \
