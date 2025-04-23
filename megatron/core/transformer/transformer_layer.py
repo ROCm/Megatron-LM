@@ -159,25 +159,7 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
             eps=self.config.layernorm_epsilon,
         )
         # [Module 8: MLP block]
-        assert isinstance(self.config.moe_layer_freq, int), "only support int layer freq in dsv3"
-        num_layers_per_pipeline_rank = self.config.num_layers // self.config.pipeline_model_parallel_size
-        if parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
-            vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
-            num_layers_per_virtual_rank = num_layers_per_pipeline_rank // vp_size
-            assert self.config.moe_layer_freq < num_layers_per_virtual_rank, \
-                "Must have at least 1 moe layer in a virtual pp chunk"
-        else:
-            assert self.config.moe_layer_freq < num_layers_per_pipeline_rank, \
-                "Must have at least 1 moe layer in a pp stage"
-        if self.config.num_moe_experts:
-            # MoE model
-            if self.layer_number > self.config.moe_layer_freq:
-                self.mlp = build_module(submodules.mlp, config=self.config)
-            else:
-                self.mlp = build_module(submodules.mlp_dense, config=self.config)
-        else:
-            # Dense model
-            self.mlp = build_module(submodules.mlp, config=self.config)
+        self.mlp = build_module(submodules.mlp, config=self.config)
         if hasattr(self.mlp, 'set_layer_number'):
             self.mlp.set_layer_number(self.layer_number)
 

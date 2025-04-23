@@ -37,7 +37,11 @@ from megatron.training.arguments import get_patch_args
 from megatron.training.tokenizer import build_tokenizer
 from megatron.training.global_vars import get_tokenizer
 
-from megatron.core.models.deepseekv2.layer_specs import get_gpt_layer_local_spec, get_gpt_layer_with_transformer_engine_spec
+from megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_decoder_block_spec,
+    get_gpt_layer_local_spec,
+    get_gpt_layer_with_transformer_engine_spec,
+)
 from megatron.core.models.deepseekv2.model import GPTModel
 
 from megatron.core.transformer.transformer_config import DeepSeekV2TransformerConfig
@@ -58,17 +62,19 @@ def model_provider(
     
     if not args.use_legacy_models:
         print_rank_0("building deepseek_v3 model ...")
-        if use_te:
-            print("debug: using TE modules for GPT layer")
-            # Use this spec to use lower-level Transformer Engine modules (required for fp8 training).
-            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
-                                        args.num_experts, args.moe_grouped_gemm, 
-                                        qk_layernorm=True, moe_use_legacy_grouped_gemm=args.moe_use_legacy_grouped_gemm)
+        if args.num_experts:
+            # Define the decoder block spec
+            transformer_layer_spec = get_gpt_decoder_block_spec(config, use_transformer_engine=use_te)
         else:
-            print("debug: using local modules for GPT layer")
-            # Use this spec for an implementation using only modules in Megatron-Core
-            transformer_layer_spec = get_gpt_layer_local_spec(
-                                        args.num_experts, args.moe_grouped_gemm, qk_layernorm=True)
+            # Define the decoder layer spec
+            if use_te:
+                transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
+                    args.num_experts, args.moe_grouped_gemm,
+                    args.qk_layernorm, args.multi_latent_attention, args.moe_use_legacy_grouped_gemm)
+            else:
+                transformer_layer_spec = get_gpt_layer_local_spec(
+                    args.num_experts, args.moe_grouped_gemm,
+                    args.qk_layernorm, args.multi_latent_attention, args.moe_use_legacy_grouped_gemm)
         
         model = GPTModel(
             config=config,

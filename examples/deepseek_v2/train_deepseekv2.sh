@@ -162,6 +162,7 @@ MOE_LAYER_FREQ=1
 
 moe_options=" \
     --multi-latent-attention \
+    --qk-layernorm \
     --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
     --enable-shared-expert \
     --moe-layer-freq ${MOE_LAYER_FREQ} \
@@ -200,6 +201,7 @@ MOE_LAYER_FREQ=1
 
 moe_options=" \
     --multi-latent-attention \
+    --qk-layernorm \
     --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
     --enable-shared-expert \
     --moe-layer-freq ${MOE_LAYER_FREQ} \

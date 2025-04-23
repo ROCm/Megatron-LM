@@ -168,8 +168,6 @@ echo ""
 NAME="${RUN_ENV}-mcore-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}-tp-${TP}-pp-${PP}-etp-${ETP}-ep-${EP}-ac-${AC}-do-${DO}-sp-${SP}-profile${PROFILE}-sync${PROFILE_SYNC}-${TIMESTAMP}"
 OUTPUT_BASEPATH=output/${EXPERIMENT}-${NAME}
 
-# OUTPUT_BASEPATH=output/debug
-
 TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/"
 CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint"
 TRAIN_LOG=${OUTPUT_BASEPATH}/log/${EXPERIMENT}-${NAME}.log
@@ -226,7 +224,8 @@ if [ $MODEL_SIZE = 671B ]; then
     NUM_EXPERTS=256 # change from 160 to 256 experts
     ROUTER_TOPK=8 # change from 6 to 8 experts
     NUM_SHARED_EXPERTS=1 # 1 epxert shared
-    MOE_LAYER_FREQ=1
+    # MOE_LAYER_FREQ='([0]*1+[1]*2)'
+    MOE_LAYER_FREQ='([0]*3+[1]*58)'
 
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
@@ -296,10 +295,11 @@ fi
 moe_options=" \
     ${moe_options} \
     --multi-latent-attention \
+    --qk-layernorm \
     --attention-sink-k ${ATTENTION_SINK_K} \
     --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
     --enable-shared-expert \
-    --moe-layer-freq ${MOE_LAYER_FREQ} \
+    --moe-layer-freq '${MOE_LAYER_FREQ}' \
     --num-shared-experts ${NUM_SHARED_EXPERTS} \
     --moe-shared-expert-intermediate-size  $((${NUM_SHARED_EXPERTS} * ${MOE_INTERMEDIATE_SIZE})) \
     --moe-router-load-balancing-type seq_aux_loss\
