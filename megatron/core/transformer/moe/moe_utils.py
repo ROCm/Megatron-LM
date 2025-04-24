@@ -367,7 +367,7 @@ def reduce_aux_losses_tracker_across_ranks():
 
 
 def track_moe_metrics(
-    loss_scale, iteration, writer, wandb_writer=None, total_loss_dict=None, per_layer_logging=False
+    loss_scale, iteration, writer, wandb_writer=None, mlflow_writer=None, total_loss_dict=None, per_layer_logging=False
 ):
     """Track the MoE metrics for logging."""
     # Aux loss logging
@@ -397,6 +397,16 @@ def track_moe_metrics(
                 wandb_writer.log({f"{name}": loss_list.mean()}, iteration)
                 if per_layer_logging:
                     wandb_writer.log(
+                        {
+                            f"moe/{name}_layer_{i}": loss
+                            for i, loss in enumerate(loss_list.tolist())
+                        },
+                        iteration,
+                    )
+            if mlflow_writer:
+                mlflow_writer.log_metric(f"{name}", loss_list.mean(), iteration)
+                if per_layer_logging:
+                    mlflow_writer.log_metrics(
                         {
                             f"moe/{name}_layer_{i}": loss
                             for i, loss in enumerate(loss_list.tolist())

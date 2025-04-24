@@ -1193,6 +1193,10 @@ def _add_logging_args(parser):
                        help='Path to save the wandb results locally.')
     group.add_argument('--logging-level', type=int, default=None,
                        help='Set default logging level')
+    group.add_argument('--mlflow-experiment-name', type=str, default=None,
+                       help='MLflow experiment name to log the run into')
+    group.add_argument('--mlflow-run-name', type=str, default=None,
+                       help='Name for the training run in MLflow')
     return parser
 
 

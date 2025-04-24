@@ -15,6 +15,7 @@ _GLOBAL_ARGS = None
 _GLOBAL_NUM_MICROBATCHES_CALCULATOR = None
 _GLOBAL_TOKENIZER = None
 _GLOBAL_TENSORBOARD_WRITER = None
+_GLOBAL_MLFLOW_WRITER = None
 _GLOBAL_WANDB_WRITER = None
 _GLOBAL_ONE_LOGGER = None
 _GLOBAL_ADLR_AUTORESUME = None
@@ -42,6 +43,11 @@ def get_tensorboard_writer():
 def update_num_microbatches(consumed_samples, consistency_check=True):
     _GLOBAL_NUM_MICROBATCHES_CALCULATOR.update(consumed_samples,
                                                consistency_check)
+
+def get_mlflow_writer():
+    """Return mlflow writer. It can be None so no need
+    to check if it is initialized."""
+    return _GLOBAL_MLFLOW_WRITER
 
 
 def get_wandb_writer():
@@ -99,6 +105,7 @@ def set_global_variables(args, build_tokenizer=True):
         _ = _build_tokenizer(args)
     _set_tensorboard_writer(args)
     _set_wandb_writer(args)
+    _set_mlflow_writer(args)
     _set_one_logger(args)
     _set_adlr_autoresume(args)
     _set_timers(args)
@@ -118,6 +125,7 @@ def unset_global_variables():
     global _GLOBAL_TOKENIZER
     global _GLOBAL_TENSORBOARD_WRITER
     global _GLOBAL_WANDB_WRITER
+    global _GLOBAL_MLFLOW_WRITER
     global _GLOBAL_ONE_LOGGER
     global _GLOBAL_ADLR_AUTORESUME
     global _GLOBAL_TIMERS
@@ -128,6 +136,7 @@ def unset_global_variables():
     _GLOBAL_TOKENIZER = None
     _GLOBAL_TENSORBOARD_WRITER = None
     _GLOBAL_WANDB_WRITER = None
+    _GLOBAL_MLFLOW_WRITER = None
     _GLOBAL_ONE_LOGGER = None
     _GLOBAL_ADLR_AUTORESUME = None
     _GLOBAL_TIMERS = None
@@ -174,6 +183,25 @@ def _set_tensorboard_writer(args):
                   'available (are you using PyTorch 1.1.0 or later?), '
                   'no TensorBoard logs will be written.', flush=True)
 
+def _set_mlflow_writer(args):
+    global _GLOBAL_MLFLOW_WRITER
+    _ensure_var_is_not_initialized(_GLOBAL_MLFLOW_WRITER,
+                                   'mlflow writer')
+    if getattr(args, 'mlflow_run_name', None) is not None and args.rank == (args.world_size - 1):
+        try:
+            import mlflow
+        except ModuleNotFoundError:
+            print('WARNING: MLflow logging requested but is not '
+                  'available, ensure mlflow is installed. '
+                  'No MLflow logs will be written.', flush=True)
+            return
+
+        if args.mlflow_experiment_name:
+            mlflow.set_experiment(experiment_name=args.mlflow_experiment_name)
+
+        mlflow.start_run(run_name=args.mlflow_run_name)
+        mlflow.log_params(vars(args))
+        _GLOBAL_MLFLOW_WRITER = mlflow
 
 def _set_wandb_writer(args):
     global _GLOBAL_WANDB_WRITER

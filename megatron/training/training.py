@@ -99,6 +99,7 @@ from .global_vars import (
     get_timers,
     get_tensorboard_writer,
     get_wandb_writer,
+    get_mlflow_writer,
     get_one_logger)
 from . import one_logger_utils
 
@@ -438,6 +439,10 @@ def pretrain(
     if wandb_writer:
         wandb_writer.finish()
     maybe_finalize_async_save(blocking=True)
+
+    mlflow_writer = get_mlflow_writer()
+    if wandb_writer:
+        mlflow_writer.end_run()
 
     one_logger and one_logger.log_metrics({
         'app_finish_time': one_logger_utils.get_timestamp_in_ms()
@@ -853,6 +858,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
     writer = get_tensorboard_writer()
     wandb_writer = get_wandb_writer()
     one_logger = get_one_logger()
+    mlflow_writer = get_mlflow_writer()
 
     # Advanced, skipped, and Nan iterations.
     advanced_iters_key = 'advanced iterations'
@@ -936,6 +942,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
         if wandb_writer:
             wandb_writer.log({'samples vs steps': args.consumed_train_samples},
                              iteration)
+        if mlflow_writer:
+            mlflow_writer.log_metric('samples vs steps', args.consumed_train_samples, step=iteration)
         writer.add_scalar('learning-rate', learning_rate, iteration)
         if args.decoupled_lr is not None:
             writer.add_scalar('decoupled-learning-rate', decoupled_learning_rate, iteration)
@@ -943,51 +951,69 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
                           args.consumed_train_samples)
         if wandb_writer:
             wandb_writer.log({'learning-rate': learning_rate}, iteration)
+        if mlflow_writer:
+            mlflow_writer.log_metric('learning-rate', learning_rate, step=iteration)
         if args.skipped_train_samples > 0:
             writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
             if wandb_writer:
                 wandb_writer.log({'skipped-train-samples': args.skipped_train_samples}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric('skipped-train-samples', args.skipped_train_samples, stepstep==iteration)
         writer.add_scalar('batch-size', batch_size, iteration)
         writer.add_scalar('batch-size vs samples', batch_size,
                           args.consumed_train_samples)
         if wandb_writer:
             wandb_writer.log({'batch-size': batch_size}, iteration)
+        if mlflow_writer:
+            mlflow_writer.log_metric('batch-size', batch_size, iteration)
         for key in loss_dict:
             writer.add_scalar(key , loss_dict[key], iteration)
             writer.add_scalar(key + ' vs samples', loss_dict[key],
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({key: loss_dict[key]}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric(key, loss_dict[key], step=iteration)
         if args.log_loss_scale_to_tensorboard:
             writer.add_scalar('loss-scale', loss_scale, iteration)
             writer.add_scalar('loss-scale vs samples', loss_scale,
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'loss-scale': loss_scale}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric('loss-scale', loss_scale, step=iteration)
         if args.log_world_size_to_tensorboard:
             writer.add_scalar('world-size', args.world_size, iteration)
             writer.add_scalar('world-size vs samples', args.world_size,
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'world-size': args.world_size}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric('world-size', args.world_size, step=iteration)
         if grad_norm is not None:
             writer.add_scalar('grad-norm', grad_norm, iteration)
             writer.add_scalar('grad-norm vs samples', grad_norm,
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'grad-norm': grad_norm}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric('grad-norm', grad_norm, step=iteration)
         if num_zeros_in_grad is not None:
             writer.add_scalar('num-zeros', num_zeros_in_grad, iteration)
             writer.add_scalar('num-zeros vs samples', num_zeros_in_grad,
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'num-zeros': num_zeros_in_grad}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric('num-zeros', num_zeros_in_grad, iteration)
         if params_norm is not None:
             writer.add_scalar('params-norm', params_norm, iteration)
             writer.add_scalar('params-norm vs samples', params_norm,
                               args.consumed_train_samples)
             if wandb_writer:
                 wandb_writer.log({'params-norm': params_norm}, iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric('params-norm', params_norm, iteration)
         if args.log_memory_to_tensorboard:
             mem_stats = torch.cuda.memory_stats()
             writer.add_scalar(
@@ -1007,7 +1033,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
             )
     if args.num_experts is not None:
         moe_loss_scale = 1 / get_num_microbatches()
-        track_moe_metrics(moe_loss_scale, iteration, writer, wandb_writer, total_loss_dict, args.moe_per_layer_logging)
+        track_moe_metrics(moe_loss_scale, iteration, writer, wandb_writer, mlflow_writer, total_loss_dict, args.moe_per_layer_logging)
 
     if iteration % args.log_interval == 0:
         elapsed_time = timers('interval-time').elapsed(barrier=True)
@@ -1025,6 +1051,12 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
             if wandb_writer:
                 wandb_writer.log({'iteration-time': elapsed_time_per_iteration},
                                  iteration)
+            if mlflow_writer:
+                mlflow_writer.log_metric(
+                    'iteration-time',
+                    elapsed_time_per_iteration,
+                    iteration
+                )
         log_string = f" [{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}]"
         log_string += ' iteration {:8d}/{:8d} |'.format(
             iteration, args.train_iters)
@@ -1045,6 +1077,8 @@ def training_log(loss_dict, total_loss_dict, learning_rate, decoupled_learning_r
                     writer.add_scalar('throughput', throughput, iteration)
                 if wandb_writer:
                     wandb_writer.log({'throughput': throughput}, iteration)
+                if mlflow_writer:
+                    mlflow_writer.log_metric('throughput', throughput, iteration)
         assert learning_rate is not None
         # Decoupled_learning_rate should be not None only on first and last pipeline stage.
         log_string += f' learning rate: {learning_rate:.6E} |'
@@ -1614,6 +1648,9 @@ def train(forward_step_func, model, optimizer, opt_param_scheduler,
         wandb_writer = get_wandb_writer()
         if wandb_writer:
             wandb_writer.finish()
+        mlflow_writer = get_mlflow_writer()
+        if mlflow_writer:
+            mlflow_writer.end_run()
         sys.exit(exit_code)
 
     return iteration, num_floating_point_operations_so_far
@@ -1750,6 +1787,7 @@ def evaluate_and_print_results(prefix, forward_step_func,
         writer = None
 
     wandb_writer = get_wandb_writer()
+    mlflow_writer = get_mlflow_writer()
 
     total_loss_dict, collected_non_loss_data, timelimit = evaluate(
         forward_step_func, data_iterator, model,
@@ -1777,6 +1815,11 @@ def evaluate_and_print_results(prefix, forward_step_func,
             if wandb_writer and is_last_rank():
                 wandb_writer.log({
                     '{} validation'.format(key): total_loss_dict[key].item()},
+                    iteration)
+            if mlflow_writer and is_last_rank():
+                mlflow_writer.log_metric(
+                    '{} validation'.format(key),
+                    total_loss_dict[key].item(),
                     iteration)
 
     if process_non_loss_data_func is not None and writer and is_last_rank():
