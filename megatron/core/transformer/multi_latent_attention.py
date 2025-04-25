@@ -80,7 +80,7 @@ def get_attention_sink_bias(batch_size, num_heads, seq_len, window_size=None, si
     attention_bias = attention_bias.expand(batch_size, num_heads, seq_len, seq_len)
 
     # incontiguous attention bias will led core dump of fused attention
-    return attention_bias.clone()
+    return attention_bias.contiguous()
 
 class MultiLatentAttention(Attention):
     """Multi-Latent Attention layer abstract class.

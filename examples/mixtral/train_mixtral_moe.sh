@@ -76,7 +76,7 @@ VALID_DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
 EXTRA_ARGS=(
     --use-flash-attn
     --no-gradient-accumulation-fusion
-    --moe-layer-freq 0
+    --moe-layer-freq 1
 )
 
 # do profile

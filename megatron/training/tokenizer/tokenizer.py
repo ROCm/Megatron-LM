@@ -856,7 +856,7 @@ class _DeepSeekV2Tokenizer(MegatronTokenizer):
         try:
             import transformers
         except ImportError:
-            raise EnvironmentError(f"The transformers library must be installed to use huggingface_tokenizer_provider")
+            raise EnvironmentError(f"The transformers library must be installed to use DeepSeekV2Tokenizer")
 
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             tokenizer_path,
@@ -910,7 +910,7 @@ class _DeepSeekV3Tokenizer(MegatronTokenizer):
         try:
             import transformers
         except ImportError:
-            raise EnvironmentError(f"The transformers library must be installed to use huggingface_tokenizer_provider")
+            raise EnvironmentError(f"The transformers library must be installed to use DeepSeekV3Tokenizer")
 
         self.tokenizer = transformers.AutoTokenizer.from_pretrained(
             tokenizer_path,

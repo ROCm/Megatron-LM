@@ -224,8 +224,8 @@ if [ $MODEL_SIZE = 671B ]; then
     NUM_EXPERTS=256 # change from 160 to 256 experts
     ROUTER_TOPK=8 # change from 6 to 8 experts
     NUM_SHARED_EXPERTS=1 # 1 epxert shared
-    # MOE_LAYER_FREQ='([0]*1+[1]*2)'
-    MOE_LAYER_FREQ='([0]*3+[1]*58)'
+    # MOE_LAYER_FREQ='([0]*1+[1]*2)'  # 3 layer example
+    MOE_LAYER_FREQ=1 # use '([0]*3+[1]*58)' for full model
 
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
