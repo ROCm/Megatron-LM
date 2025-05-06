@@ -4,6 +4,12 @@ import torch
 import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
+from transformer_engine.pytorch.cpp_extensions import swiglu as te_swiglu
+from transformer_engine.pytorch.cpp_extensions import dswiglu as te_dswiglu
+import transformer_engine_torch as tex
+import os 
+
+use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -63,13 +69,21 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.save_for_backward(input_for_backward)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
-        return swiglu(input)
+        if use_te_swiglu:
+            return te_swiglu(input, None, tex.FP8FwdTensors.GEMM1_INPUT, tex.DType.kBFloat16)
+        else:
+            return swiglu(input)
 
     @staticmethod
     def backward(ctx, grad_output):
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         tmp = swiglu_back(grad_output, input)
+        if use_te_swiglu:
+            tmp = te_dswiglu(grad_output, input, tex.DType.kBFloat16)
+        else:
+            tmp = swiglu_back(grad_output, input)
+
         return tmp, None
 
 
