@@ -1,5 +1,6 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+import inspect
 import dataclasses
 import io
 import os
@@ -42,6 +43,13 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_te_version, is_te_min_version
+
+
+def _has_parameter(cls, param_name):
+    init_func = cls.__init__
+    sig = inspect.signature(init_func)
+
+    return param_name in sig.parameters
 
 
 def _get_extra_te_kwargs(config: TransformerConfig):
@@ -213,6 +221,11 @@ class TELinear(te.pytorch.Linear):
                 te_parallel_mode = None
                 tp_size = 1
                 tp_group = None
+        
+        if self.config.no_fp8_weight_transpose_cache:
+            assert _has_parameter(te.pytorch.Linear, 
+                                  "keep_fp8_weight_transpose_cache"), "Current Transformer-Engine not support this feature."
+            extra_kwargs["keep_fp8_weight_transpose_cache"] = False
 
         super().__init__(
             in_features=input_size,
@@ -343,6 +356,11 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
                         tp_comm_buffer_name is not None
                     ), "Buffer name should be set to configure communication overlap settings"
                     extra_kwargs["ub_name"] = tp_comm_buffer_name
+        
+        if self.config.no_fp8_weight_transpose_cache:
+            assert _has_parameter(te.pytorch.LayerNormLinear, 
+                                  "keep_fp8_weight_transpose_cache"), "Current Transformer-Engine not support this feature."
+            extra_kwargs["keep_fp8_weight_transpose_cache"] = False
 
         super().__init__(
             in_features=input_size,

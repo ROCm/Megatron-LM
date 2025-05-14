@@ -316,6 +316,10 @@ EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
     --fp8-amax-compute-algo=max \
     --attention-softmax-in-fp32 \
 "
+    if [ "$FSDP" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
+        " 
+    fi
 fi
 
 if [ -n "${WANDB_API_KEY}" ]; then
