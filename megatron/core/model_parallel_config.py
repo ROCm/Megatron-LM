@@ -211,6 +211,8 @@ class ModelParallelConfig:
     """If this is enabled, the fused cross entropy implementation would be used.
        Defaults to False.
     """
+    
+    linear_cross_entropy_loss_fusion: bool = False
 
     tp_comm_overlap_disable_qkv: bool = False
     """

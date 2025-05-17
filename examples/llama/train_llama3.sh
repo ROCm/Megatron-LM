@@ -256,6 +256,11 @@ EXTRA_ARGS="
     --overlap-grad-reduce \
 "
 
+# NOTE: it may cause performance regression
+EXTRA_ARGS="
+    --linear-cross-entropy-loss-fusion \
+"
+
 if [ "$FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-torch-fsdp2"
     if [ "$SEQ_PARALLEL" -eq 1 ]; then

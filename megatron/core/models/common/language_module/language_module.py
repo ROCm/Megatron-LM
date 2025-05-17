@@ -110,7 +110,7 @@ class LanguageModule(MegatronModule):
 
         if parallel_state.is_pipeline_first_stage() and self.pre_process and not self.post_process:
             self.shared_embedding_or_output_weight().shared_embedding = True
-
+        
         if self.post_process and not self.pre_process:
             assert not parallel_state.is_pipeline_first_stage()
             # set word_embeddings weights to 0 here, then copy first

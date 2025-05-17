@@ -793,6 +793,11 @@ def validate_args(args, defaults={}):
             args.no_load_rng = True
             print('Warning: disabling --no-load-rng for upcycling.')
 
+    # Linear cross entropy loss fusion
+    if args.linear_cross_entropy_loss_fusion:
+        assert not args.cross_entropy_loss_fusion, "--cross-entropy-loss-fusion conflict with --linear-cross-entropy-loss-fusion."
+        assert args.use_torch_fsdp2, "--linear-cross-entropy-loss-fusion only available on torch fsdp2."
+
     # Print arguments.
     _print_args("arguments", args)
 
@@ -1425,6 +1430,9 @@ def _add_training_args(parser):
     group.add_argument('--cross-entropy-loss-fusion', action='store_true',
                        help='Enabled fusion of cross entropy loss calculation.',
                        dest='cross_entropy_loss_fusion')
+    group.add_argument('--linear-cross-entropy-loss-fusion', action='store_true',
+                       help='Enabled fusion of linear and cross entropy loss calculation.',
+                       dest='linear_cross_entropy_loss_fusion')
     group.add_argument('--use-flash-attn', action='store_true',
                        help='use FlashAttention implementation of attention. '
                        'https://arxiv.org/abs/2205.14135')

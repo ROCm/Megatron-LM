@@ -146,22 +146,33 @@ class GPTModel(LanguageModule):
                 self.embedding_activation_buffer = None
                 self.grad_output_buffer = None
 
-            self.output_layer = tensor_parallel.ColumnParallelLinear(
-                config.hidden_size,
-                self.vocab_size,
-                config=config,
-                init_method=config.init_method,
-                bias=False,
-                skip_bias_add=False,
-                gather_output=not self.parallel_output,
-                skip_weight_param_allocation=self.pre_process
-                and self.share_embeddings_and_output_weights,
-                embedding_activation_buffer=self.embedding_activation_buffer,
-                grad_output_buffer=self.grad_output_buffer,
-            )
+            if self.config.linear_cross_entropy_loss_fusion:
+                from megatron.core.extensions.transformer_engine import FusedLinearVocabCrossEntropy
 
-        if self.pre_process or self.post_process:
-            self.setup_embeddings_and_output_layer()
+                self.output_cross_entropy_layer = FusedLinearVocabCrossEntropy(
+                    config.hidden_size,
+                    self.vocab_size,
+                    config=config,
+                    init_method=config.init_method,
+                )
+            else:
+                self.output_layer = tensor_parallel.ColumnParallelLinear(
+                    config.hidden_size,
+                    self.vocab_size,
+                    config=config,
+                    init_method=config.init_method,
+                    bias=False,
+                    skip_bias_add=False,
+                    gather_output=not self.parallel_output,
+                    skip_weight_param_allocation=self.pre_process
+                    and self.share_embeddings_and_output_weights,
+                    embedding_activation_buffer=self.embedding_activation_buffer,
+                    grad_output_buffer=self.grad_output_buffer,
+                )
+
+        if not self.config.linear_cross_entropy_loss_fusion:
+            if self.pre_process or self.post_process:
+                self.setup_embeddings_and_output_layer()
 
         if has_config_logger_enabled(self.config):
             log_config_to_disk(
@@ -256,29 +267,38 @@ class GPTModel(LanguageModule):
 
         # logits and loss
         output_weight = None
-        if self.share_embeddings_and_output_weights:
-            output_weight = self.shared_embedding_or_output_weight()
-        logits, _ = self.output_layer(
-            hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
-        )
+        if self.config.linear_cross_entropy_loss_fusion:
+            assert not self.share_embeddings_and_output_weights, "share_embeddings_and_out_weights is not support when enable --linear-cross-entropy-loss-fusion."
+            assert labels is not None
 
-        if has_config_logger_enabled(self.config):
-            payload = OrderedDict(
-                {
-                    'input_ids': input_ids,
-                    'position_ids': position_ids,
-                    'attention_mask': attention_mask,
-                    'decoder_input': decoder_input,
-                    'logits': logits,
-                }
+            loss = self.output_cross_entropy_layer(
+                hidden_states, labels, weight=output_weight,
             )
-            log_config_to_disk(self.config, payload, prefix='input_and_logits')
+        else:
+            if self.share_embeddings_and_output_weights:
+                output_weight = self.shared_embedding_or_output_weight()
 
-        if labels is None:
-            # [s b h] => [b s h]
-            return logits.transpose(0, 1).contiguous()
+            logits, _ = self.output_layer(
+                hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
+            )
 
-        loss = self.compute_language_model_loss(labels, logits)
+            if has_config_logger_enabled(self.config):
+                payload = OrderedDict(
+                    {
+                        'input_ids': input_ids,
+                        'position_ids': position_ids,
+                        'attention_mask': attention_mask,
+                        'decoder_input': decoder_input,
+                        'logits': logits,
+                    }
+                )
+                log_config_to_disk(self.config, payload, prefix='input_and_logits')
+
+            if labels is None:
+                # [s b h] => [b s h]
+                return logits.transpose(0, 1).contiguous()
+
+            loss = self.compute_language_model_loss(labels, logits)
 
         return loss
 

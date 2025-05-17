@@ -1500,3 +1500,54 @@ except ImportError:
     fused_permute = None
     fused_unpermute = None
     fused_sort_chunks_by_index = None
+
+
+from transformer_engine.pytorch.linear_cross_entropy import linear_cross_entropy
+
+
+def _initialize_affine_weight_gpu(weight, init_method):
+    """Initialize affine weight for model parallel on GPU."""
+
+    with get_cuda_rng_tracker().fork():
+        init_method(weight)
+
+
+class FusedLinearVocabCrossEntropy(torch.nn.Module):
+
+    def __init__(self,
+                 input_size,
+                 output_size,
+                 config: ModelParallelConfig,
+                 init_method: Callable
+                 ):
+        super().__init__()
+
+        self.input_size = input_size
+        self.output_size = output_size
+
+        self.weight = Parameter(
+            torch.empty(
+                self.input_size,
+                self.output_size,
+                device=torch.cuda.current_device(),
+                dtype=config.params_dtype,
+            )
+        )
+        if config.perform_initialization:
+            _initialize_affine_weight_gpu(
+                self.weight,
+                init_method,
+            )
+            
+    
+    def forward(self, hidden_state : torch.Tensor, labels: torch.Tensor, weight : Optional[torch.Tensor] = None):
+        seq = hidden_state.size(0)
+        bs = hidden_state.size(1)
+
+        labels = labels.transpose(0,1).contiguous().view(-1) 
+        hidden_state = hidden_state.view(seq*bs, -1)
+        
+        weight = self.weight if weight is None else weight
+        loss = linear_cross_entropy(hidden_state, weight, labels, "mean")
+
+        return loss
