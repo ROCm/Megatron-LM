@@ -222,11 +222,16 @@ class TELinear(te.pytorch.Linear):
                 tp_size = 1
                 tp_group = None
         
-        if self.config.no_fp8_weight_transpose_cache:
+        if not self.config.fp8_weight_transpose_cache:
             assert _has_parameter(te.pytorch.Linear, 
                                   "keep_fp8_weight_transpose_cache"), "Current Transformer-Engine not support this feature."
             extra_kwargs["keep_fp8_weight_transpose_cache"] = False
 
+        if not self.config.fp8_weight_cache:
+            assert _has_parameter(te.pytorch.Linear, 
+                                  "keep_fp8_weight_cache"), "Current Transformer-Engine not support this feature."
+            extra_kwargs["keep_fp8_weight_cache"] = False
+        
         super().__init__(
             in_features=input_size,
             out_features=output_size,
@@ -357,7 +362,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
                     ), "Buffer name should be set to configure communication overlap settings"
                     extra_kwargs["ub_name"] = tp_comm_buffer_name
         
-        if self.config.no_fp8_weight_transpose_cache:
+        if not self.config.fp8_weight_transpose_cache:
             assert _has_parameter(te.pytorch.LayerNormLinear, 
                                   "keep_fp8_weight_transpose_cache"), "Current Transformer-Engine not support this feature."
             extra_kwargs["keep_fp8_weight_transpose_cache"] = False

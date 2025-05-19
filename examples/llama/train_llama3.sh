@@ -24,6 +24,9 @@ export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 export NVTE_USE_CAST_TRANSPOSE_TRITON=1
 # export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=1
 
+# critical: avoid memory fragment
+export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:2048
+
 # parsing input arguments
 for ARGUMENT in "$@"
 do
@@ -82,6 +85,7 @@ RECOMPUTE="${RECOMPUTE:-0}"
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Meta-Llama-3-8B}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
+LINEAR_CROSS_ENTROPY_LOSS_FUSION="${LINEAR_CROSS_ENTROPY_LOSS_FUSION:-0}"
 LOG_INTERVAL="${LOG_INTERVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
@@ -261,9 +265,12 @@ EXTRA_ARGS="
 "
 
 # NOTE: it may cause performance regression
-EXTRA_ARGS="$EXTRA_ARGS \
-    --linear-cross-entropy-loss-fusion \
-"
+if [ "$LINEAR_CROSS_ENTROPY_LOSS_FUSION" -eq 1 ]; then
+    pip install triton==3.2.0
+    EXTRA_ARGS="$EXTRA_ARGS \
+        --linear-cross-entropy-loss-fusion \
+    "
+fi
 
 if [ "$FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-torch-fsdp2"
@@ -309,6 +316,7 @@ if [ "$TE_FP8" -eq 1 ]; then
 "
     if [ "$FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
+            --no-fp8-weight-cache \
         " 
     fi
 fi
