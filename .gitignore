@@ -14,3 +14,4 @@ experiment
 
 # rocprof
 .rocprofv3
+mean_log_value.py
