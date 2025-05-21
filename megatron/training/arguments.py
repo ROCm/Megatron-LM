@@ -2707,7 +2707,9 @@ def _add_experimental_args(parser):
     group.add_argument('--moe-router-force-load-balancing',action='store_true',
                        help = 'Enforce token dispatch balancing to MoE routing')
     group.add_argument('--no-fp8-weight-transpose-cache',action='store_false',
-                       help = 'Not cache fp8 weight tranpose. Recommend open it when using FSDP in fp8 precision.')
+                       help = 'Not cache fp8 weight tranpose. Recommend open it when using FSDP in fp8 precision.',
+                       dest='fp8_weight_transpose_cache')
     group.add_argument('--no-fp8-weight-cache',action='store_false',
-                       help = 'Not cache fp8 weight. Recommend open it when using FSDP in fp8 precision.')
+                       help = 'Not cache fp8 weight. Recommend open it when using FSDP in fp8 precision.',
+                       dest='fp8_weight_cache')
     return parser
