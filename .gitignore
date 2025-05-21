@@ -11,3 +11,6 @@ local/
 .gitmodules
 output
 experiment
+
+# rocprof
+.rocprofv3
