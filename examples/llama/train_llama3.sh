@@ -160,6 +160,7 @@ GPT_ARGS="
     --no-async-tensor-model-parallel-allreduce \
     --bf16 \
     --no-masked-softmax-fusion \
+    --attention-backend fused \
 "
 
 if [ "$RECOMPUTE" -eq 1 ]; then
