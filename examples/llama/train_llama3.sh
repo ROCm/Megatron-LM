@@ -85,7 +85,6 @@ RECOMPUTE="${RECOMPUTE:-0}"
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Meta-Llama-3-8B}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
-LINEAR_CROSS_ENTROPY_LOSS_FUSION="${LINEAR_CROSS_ENTROPY_LOSS_FUSION:-0}"
 LOG_INTERVAL="${LOG_INTERVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
@@ -265,12 +264,9 @@ EXTRA_ARGS="
 "
 
 # NOTE: it may cause performance regression
-if [ "$LINEAR_CROSS_ENTROPY_LOSS_FUSION" -eq 1 ]; then
-    pip install triton==3.2.0
-    EXTRA_ARGS="$EXTRA_ARGS \
-        --linear-cross-entropy-loss-fusion \
-    "
-fi
+# EXTRA_ARGS="$EXTRA_ARGS \
+#     --linear-cross-entropy-loss-fusion \
+# "
 
 if [ "$FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-torch-fsdp2"
@@ -316,8 +312,10 @@ if [ "$TE_FP8" -eq 1 ]; then
 "
     if [ "$FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
-            --no-fp8-weight-cache \
         " 
+        # NOTE: This option may cause performance regression
+        # EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-cache \
+        # " 
     fi
 fi
 

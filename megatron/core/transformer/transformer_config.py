@@ -379,10 +379,10 @@ class TransformerConfig(ModelParallelConfig):
     moe_router_force_load_balancing: bool = False
     """Enforce token dispatch balancing to MoE routing"""
 
-    fp8_weight_transpose_cache: bool = False
+    fp8_weight_transpose_cache: bool = True
     """cache fp8 weight transpose"""
 
-    fp8_weight_cache: bool = False
+    fp8_weight_cache: bool = True
     """cache fp8 weight"""
 
     ##################

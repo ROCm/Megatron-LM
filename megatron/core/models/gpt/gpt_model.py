@@ -268,7 +268,7 @@ class GPTModel(LanguageModule):
         # logits and loss
         output_weight = None
         if self.config.linear_cross_entropy_loss_fusion:
-            assert not self.share_embeddings_and_output_weights, "share_embeddings_and_out_weights is not support when enable --linear-cross-entropy-loss-fusion."
+            assert not self.share_embeddings_and_output_weights, "share embeddings and out weights is not support when enable --linear-cross-entropy-loss-fusion."
             assert labels is not None
 
             loss = self.output_cross_entropy_layer(
