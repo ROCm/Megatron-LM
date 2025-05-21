@@ -135,6 +135,7 @@ NUM_GROUPS=$(( ${NUM_HEADS} / ${GROUP_SIZE} ))
 
 PROFILING_DIR="${LOG_DIR}/trace_${EXP_NAME}"
 
+ATTN_BACKEND="${ATTN_BACKEND:-auto}"
 GPT_ARGS="
     --tensor-model-parallel-size ${TP} \
     --pipeline-model-parallel-size ${PP} \
@@ -160,7 +161,7 @@ GPT_ARGS="
     --no-async-tensor-model-parallel-allreduce \
     --bf16 \
     --no-masked-softmax-fusion \
-    --attention-backend fused \
+    --attention-backend $ATTN_BACKEND \
 "
 
 if [ "$RECOMPUTE" -eq 1 ]; then
