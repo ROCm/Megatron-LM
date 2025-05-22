@@ -533,7 +533,7 @@ def pretrain(
     maybe_finalize_async_save(blocking=True)
 
     mlflow_writer = get_mlflow_writer()
-    if wandb_writer:
+    if mlflow_writer:
         mlflow_writer.end_run()
 
     one_logger and one_logger.log_metrics({
