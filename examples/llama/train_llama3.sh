@@ -75,6 +75,7 @@ MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
 FSDP="${FSDP:-0}"
 RECOMPUTE="${RECOMPUTE:-0}"
+RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-0}"
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Meta-Llama-3-8B}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
@@ -163,7 +164,7 @@ GPT_ARGS="
 "
 
 if [ "$RECOMPUTE" -eq 1 ]; then
-    GPT_ARGS="$GPT_ARGS --recompute-num-layers $NUM_LAYERS \
+    GPT_ARGS="$GPT_ARGS --recompute-num-layers $RECOMPUTE_NUM_LAYERS \
         --recompute-granularity full \
         --recompute-method block \
         "
