@@ -212,7 +212,7 @@ class MoeAttnNode(TransformerLayerNode):
         # detached here
         self.common_state.probs = self.detach(probs)
         self.common_state.residual = self.detach(hidden_states)
-        self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
+        # self.common_state.pre_mlp_layernorm_output = self.detach(pre_mlp_layernorm_output)
 
         return permutated_local_input_tokens
 
@@ -235,10 +235,10 @@ class MoeDispatchNode(TransformerLayerNode):
 
 class MoeMlPNode(TransformerLayerNode):
     def forward_impl(self, dispatched_input):
-        pre_mlp_layernorm_output = self.common_state.pre_mlp_layernorm_output
+        pre_mlp_layernorm_output = None
         token_dispatcher = self.layer.mlp.token_dispatcher
         with token_dispatcher.per_batch_state_context(self.common_state):
-            expert_output, shared_expert_output, mlp_bias = self.layer._submodule_moe_forward(
+            expert_output, mlp_bias = self.layer._submodule_moe_forward(
                 dispatched_input, self.common_state.tokens_per_expert, pre_mlp_layernorm_output
             )
             assert mlp_bias is None
@@ -246,7 +246,7 @@ class MoeMlPNode(TransformerLayerNode):
 
         # pre_mlp_layernorm_output  used
         self.common_state.pre_mlp_layernorm_output = None
-        return expert_output, shared_expert_output
+        return expert_output
 
     def dw(self):
         with torch.cuda.nvtx.range(f"{self.name} wgrad"):
@@ -254,7 +254,7 @@ class MoeMlPNode(TransformerLayerNode):
 
 
 class MoeCombineNode(TransformerLayerNode):
-    def forward_impl(self, expert_output, shared_expert_output):
+    def forward_impl(self, expert_output):
         # TODO(lhb): if dw use grad of residual and probs, necessary synchronization should be add
         residual = self.common_state.residual
         token_dispatcher = self.layer.mlp.token_dispatcher
@@ -263,7 +263,7 @@ class MoeCombineNode(TransformerLayerNode):
                 expert_output
             )
             output = self.layer._submodule_post_combine_forward(
-                permutated_local_input_tokens, shared_expert_output, None, residual
+                permutated_local_input_tokens, None, residual
             )
         cur_stream = torch.cuda.current_stream()
         self.common_state.residual.record_stream(cur_stream)

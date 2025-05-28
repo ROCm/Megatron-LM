@@ -75,7 +75,7 @@ srun bash -c '${container_command} run --rm \
  DATA_DIR=${DATA_DIR} \
  NCCL_SOCKET_IFNAME=${NETWORK_INTERFACE} GLOO_SOCKET_IFNAME=${NETWORK_INTERFACE} \
  RECOMPUTE_NUM_LAYERS=0 \
- TEE_OUTPUT=1 MBS=2 GBS=${GBS} TP_SIZE=1 PP_SIZE=1 AC=none \
+ TEE_OUTPUT=1 MBS=2 GBS=${GBS} TP_SIZE=1 PP_SIZE=8 AC=none \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=4096 FORCE_BALANCE=true \
  RUN_ENV=slurm MODEL_SIZE=8x7B bash examples/mixtral/train_mixtral_moe.sh 2>&1 | tee result_8X7B.log; \
  echo $(date)"'

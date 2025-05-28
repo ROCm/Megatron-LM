@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-8}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
@@ -116,7 +116,7 @@ if [ $PROFILE = true ]; then
 
     EXTRA_ARGS+=(
             --profile 
-            --profile-ranks 0 
+            --profile-ranks 0 63
             --use-pytorch-profiler 
             --profile-step-start ${PROFILE_START} 
             --profile-step-end ${PROFILE_END} 
@@ -332,6 +332,11 @@ MOE_ARGS=(
     --moe-token-dispatcher-type alltoall
     --overlap-grad-reduce
     --overlap-param-gather
+    # Yuankai
+    --combined-1f1b
+    --combined-1f1b-recipe ep_a2a
+    # --split-bw
+    --num-layers-per-virtual-pipeline-stage 2
 )
 
 MOCK_DATA="${MOCK_DATA:-1}" # 1: use mock data, 0: use real data

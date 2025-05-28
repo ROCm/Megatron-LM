@@ -96,8 +96,9 @@ class ScheduleNode:
 
         if self.free_inputs:
             for input in inputs:
-                input.record_stream(self.stream)
-                input.untyped_storage().resize_(0)
+                if input is not None:
+                    input.record_stream(self.stream)
+                    input.untyped_storage().resize_(0)
 
         return self.output
 
@@ -129,7 +130,8 @@ class ScheduleNode:
 
         # output_grad maybe from another stream
         for g in output_grad:
-            g.record_stream(self.stream)
+            if g is not None:
+                g.record_stream(self.stream)
 
         return self.get_grad()
 

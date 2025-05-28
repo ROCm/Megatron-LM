@@ -543,27 +543,22 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         Performs a forward pass for the MLP submodule, including both expert-based
         and optional shared-expert computations.
         """
-        shared_expert_output = None
         dispatched_input = self.mlp.token_dispatcher.dispatch_postprocess(dispatched_input)
         expert_output, mlp_bias = self.mlp.experts(dispatched_input, tokens_per_expert)
         expert_output = self.mlp.token_dispatcher.combine_preprocess(expert_output)
-        if self.mlp.use_shared_expert and not self.mlp.shared_expert_overlap:
-            shared_expert_output = self.mlp.shared_experts(hidden_states)
-        return expert_output, shared_expert_output, mlp_bias
+        return expert_output, mlp_bias
 
     def _submodule_combine_forward(self, hidden_states):
         return [self.mlp.token_dispatcher.combine_all_to_all(hidden_states)]
 
     def _submodule_post_combine_forward(
-        self, expert_output, shared_expert_output, mlp_bias, residual
+        self, expert_output, mlp_bias, residual
     ):
         """
         Re-combines the expert outputs (and optional shared_expert_output) into the same order
         as the original input tokens, applying any required bias.
         """
         output = self.mlp.token_dispatcher.combine_postprocess(expert_output)
-        if shared_expert_output is not None:
-            output += shared_expert_output
         mlp_output_with_bias = (output, mlp_bias)
         with self.bias_dropout_add_exec_handler():
             hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
@@ -603,13 +598,11 @@ class TransformerLayer(MegatronModule, BaseTransformerLayer):
         output.backward(detached_inputs[0].grad)
 
     def _submodule_moe_backward(
-        self, expert_output, shared_expert_output, mlp_bias, detached_inputs
+        self, expert_output, mlp_bias, detached_inputs
     ):
         expert_output.backward(detached_inputs[0].grad)
-        if shared_expert_output is not None:
-            shared_expert_output.backward(detached_inputs[1].grad)
         if mlp_bias is not None:
-            mlp_bias.backward(detached_inputs[2].grad)
+            mlp_bias.backward(detached_inputs[1].grad)
 
     def _submodule_combine_backward(self, hidden_states, detached_inputs):
         hidden_states.backward(detached_inputs[0].grad)

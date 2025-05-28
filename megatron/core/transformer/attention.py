@@ -146,6 +146,7 @@ class Attention(MegatronModule, ABC):
             skip_bias_add=True,
             is_expert=False,
             tp_comm_buffer_name='proj',
+            split_bw=self.config.split_bw,
         )
 
     def _checkpointed_attention_forward(
@@ -525,6 +526,7 @@ class SelfAttention(Attention):
             skip_bias_add=False,
             is_expert=False,
             tp_comm_buffer_name='qkv',
+            split_bw=self.config.split_bw,
         )
 
         if submodules.q_layernorm is not None:
@@ -669,6 +671,10 @@ class SelfAttention(Attention):
             self.run_realtime_tests()
 
         return query, key, value
+
+    def backward_dw(self):
+        self.linear_qkv.backward_dw()
+        self.linear_proj.backward_dw()
 
 
 class CrossAttention(Attention):
