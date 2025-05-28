@@ -9,7 +9,7 @@ from transformer_engine.pytorch.cpp_extensions import dswiglu as te_dswiglu
 import transformer_engine_torch as tex
 import os 
 
-use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0")) == "1"
+use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
