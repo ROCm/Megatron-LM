@@ -398,10 +398,10 @@ fi
 
 MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-false}
 if [ $MOE_PERMUTE_FUSION != false ]; then
-    moe_permute_fustion_options=" \
+    moe_permute_fusion_options=" \
             --moe-permute-fusion "
 else
-    moe_permute_fustion_options=""
+    moe_permute_fusion_options=""
 fi
 
 LOGGING_ARGS=(
@@ -427,7 +427,7 @@ command="torchrun ${DISTRIBUTED_ARGS[@]} pretrain_gpt.py \
     ${MODEL_ARGS[@]} \
     ${pr_options[@]} \
     ${activation_checkpoint_options[@]} \
-    ${moe_permute_fustion_options[@]} \
+    ${moe_permute_fusion_options[@]} \
     ${MOE_ARGS[@]} \
     ${DATA_ARGS[@]} \
     ${TRAINING_ARGS[@]} \
