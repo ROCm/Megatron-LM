@@ -116,7 +116,7 @@ if [ $PROFILE = true ]; then
 
     EXTRA_ARGS+=(
             --profile 
-            --profile-ranks 0 63
+            --profile-ranks 0
             --use-pytorch-profiler 
             --profile-step-start ${PROFILE_START} 
             --profile-step-end ${PROFILE_END} 
@@ -163,8 +163,8 @@ fi
 # perf options
 OPTIMIZER_OFFLOAD=false
 GEMM_TUNING="${GEMM_TUNING:-1}"
-USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
+USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-false}"
+MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-false}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 echo "GEMM_TUING: $GEMM_TUNING"
@@ -335,7 +335,7 @@ MOE_ARGS=(
     # Yuankai
     --combined-1f1b
     --combined-1f1b-recipe ep_a2a
-    # --split-bw
+    --split-bw
     --num-layers-per-virtual-pipeline-stage 2
 )
 

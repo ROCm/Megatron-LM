@@ -860,3 +860,7 @@ class SequentialMLP(MegatronModule):
 
             sharded_state_dict.update(expert_state_dict)
         return sharded_state_dict
+
+    def backward_dw(self):
+        for expert in self.local_experts:
+            expert.backward_dw()
