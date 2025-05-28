@@ -5,6 +5,7 @@ export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
+echo $NCCL_IB_HCA
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
@@ -198,6 +199,14 @@ elif [ $AC = none ]; then
     
 fi
 
+MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-false}
+if [ $MOE_PERMUTE_FUSION != false ]; then
+    moe_permute_fustion_options=" \
+            --moe-permute-fusion "
+else
+    moe_permute_fustion_options=""
+fi
+
 if [ $USE_GROUPED_GEMM = true ]; then
     USE_GROUPED_GEMM_OPTION="--moe-grouped-gemm"
 else
@@ -332,6 +341,7 @@ MOE_ARGS=(
     --moe-token-dispatcher-type alltoall
     --overlap-grad-reduce
     --overlap-param-gather
+    $moe_permute_fustion_options
 )
 
 MOCK_DATA="${MOCK_DATA:-1}" # 1: use mock data, 0: use real data
