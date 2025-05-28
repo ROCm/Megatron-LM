@@ -9,7 +9,7 @@ from transformer_engine.pytorch.cpp_extensions import dswiglu as te_dswiglu
 import transformer_engine_torch as tex
 import os 
 
-use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
+use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0")) == "1"
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -78,7 +78,6 @@ class SwiGLUFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp = swiglu_back(grad_output, input)
         if use_te_swiglu:
             tmp = te_dswiglu(grad_output, input, tex.DType.kBFloat16)
         else:
