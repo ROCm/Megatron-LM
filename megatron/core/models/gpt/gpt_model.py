@@ -16,6 +16,7 @@ from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.inference_params import InferenceParams
 
 
 class GPTModel(LanguageModule):
@@ -307,3 +308,36 @@ class GPTModel(LanguageModule):
         ), f'Expected output layer extra state to be empty, got: {output_extra_state}'
 
         return sharded_state_dict
+
+    def get_transformer_callables_by_layer(self, layer_number: int):
+        """
+        Get the callables for the layer at the given transformer layer number.
+        """
+        return self.decoder.get_layer_callables(layer_number)
+
+    def build_schedule_plan(
+        self,
+        input_ids: Tensor,
+        position_ids: Tensor,
+        attention_mask: Tensor,
+        decoder_input: Tensor = None,
+        labels: Tensor = None,
+        inference_params: InferenceParams = None,
+        packed_seq_params: PackedSeqParams = None,
+        extra_block_kwargs: dict = None,
+        runtime_gather_output: Optional[bool] = None,
+    ):
+        from .fine_grained_schedule import build_model_chunk_schedule_plan
+
+        return build_model_chunk_schedule_plan(
+            self,
+            input_ids,
+            position_ids,
+            attention_mask,
+            decoder_input=decoder_input,
+            labels=labels,
+            inference_params=inference_params,
+            packed_seq_params=packed_seq_params,
+            extra_block_kwargs=extra_block_kwargs,
+            runtime_gather_output=runtime_gather_output,
+        )

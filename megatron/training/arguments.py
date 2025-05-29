@@ -2698,4 +2698,12 @@ def _add_experimental_args(parser):
                        help = 'Config file to add additional arguments')
     group.add_argument('--moe-router-force-load-balancing',action='store_true',
                        help = 'Enforce token dispatch balancing to MoE routing')
+    group.add_argument('--combined-1f1b', action='store_true',
+                       help='Batch-level overlapping in 1f1b stage.')
+    group.add_argument('--combined-1f1b-recipe', type=str,
+                       choices=['ep_a2a', 'golden'],
+                       default='golden',
+                       help='Options are "ep_a2a" and "golden".')
+    group.add_argument('--split-bw', action='store_true',
+                       help='Split dgrad and wgrad for batch-level overlapping')
     return parser

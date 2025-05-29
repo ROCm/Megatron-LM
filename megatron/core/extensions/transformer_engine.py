@@ -123,6 +123,7 @@ class TELinear(te.pytorch.Linear):
         skip_weight_param_allocation: bool,
         tp_comm_buffer_name: Optional[str] = None,
         is_expert: bool = False,
+        split_bw: bool = False,
     ):
         self.config = config
 
@@ -140,6 +141,10 @@ class TELinear(te.pytorch.Linear):
             )
 
         extra_kwargs = _get_extra_te_kwargs(config)
+        self.split_bw = False
+        if split_bw:
+            extra_kwargs["split_bw"] = split_bw
+            self.split_bw = True
 
         if is_te_min_version("0.8.0"):
             if self.config.tp_comm_overlap:
@@ -258,6 +263,10 @@ class TELinear(te.pytorch.Linear):
             return out
         return out, None
 
+    def backward_dw(self):
+        if self.split_bw:
+            super().wgrad_comp()
+
 
 class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
     """
@@ -278,6 +287,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         is_expert: bool,
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
+        split_bw: bool = False,
     ):
         self.config = config
 
@@ -310,6 +320,11 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             raise ValueError(
                 f"Transformer Engine v{te_version} does not support {self.config.normalization}."
             )
+
+        self.split_bw = False
+        if split_bw:
+            extra_kwargs["split_bw"] = split_bw
+            self.split_bw = True
 
         if is_te_min_version("0.8.0"):
             if self.config.tp_comm_overlap:
@@ -417,6 +432,10 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             state_dict, prefix, {'weight': 0, 'bias': 0}, sharded_offsets
         )
 
+    def backward_dw(self):
+        if self.split_bw:
+            super().wgrad_comp()
+
 
 class TEColumnParallelLinear(TELinear):
     """
@@ -437,6 +456,7 @@ class TEColumnParallelLinear(TELinear):
         is_expert: bool,
         skip_weight_param_allocation: bool = False,
         tp_comm_buffer_name: Optional[str] = None,
+        split_bw: bool = False,
     ):
         if gather_output:
             raise ValueError('Transformer Engine linear layers do not support gather_output = True')
@@ -456,6 +476,7 @@ class TEColumnParallelLinear(TELinear):
             is_expert=is_expert,
             skip_weight_param_allocation=skip_weight_param_allocation,
             tp_comm_buffer_name=tp_comm_buffer_name,
+            split_bw=split_bw,
         )
 
         if config.use_cpu_initialization:
@@ -514,6 +535,7 @@ class TERowParallelLinear(TELinear):
         skip_bias_add: bool,
         is_expert: bool,
         tp_comm_buffer_name: Optional[str] = None,
+        split_bw: bool = False,
     ):
         if not input_is_parallel:
             raise ValueError(
@@ -535,6 +557,7 @@ class TERowParallelLinear(TELinear):
             skip_weight_param_allocation=False,  # We don't currently use this for row parallel layers # pylint: disable=line-too-long
             is_expert=is_expert,
             tp_comm_buffer_name=tp_comm_buffer_name,
+            split_bw=split_bw,
         )
         if config.use_cpu_initialization:
             if is_expert:
@@ -822,6 +845,7 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool = False,
             tp_comm_buffer_name: Optional[str] = None,
+            split_bw: bool = False,
         ):
             self.config = config
 
@@ -836,6 +860,10 @@ if is_te_min_version("1.9.0.dev0"):
 
             extra_kwargs = _get_extra_te_kwargs(config)
             extra_kwargs["ub_name"] = tp_comm_buffer_name
+            self.split_bw = False
+            if split_bw:
+                extra_kwargs["split_bw"] = split_bw
+                self.split_bw = True
 
             self.expert_parallel = self.config.expert_model_parallel_size > 1
             if is_expert:
@@ -1041,6 +1069,10 @@ if is_te_min_version("1.9.0.dev0"):
                 sh_ten.replica_id = (*replica_id[:2], get_expert_data_parallel_rank())
             return sharded_state_dict
 
+        def backward_dw(self):
+            if self.split_bw:
+                super().wgrad_comp()
+
     class TEColumnParallelGroupedLinear(TEGroupedLinear):
         """
         Wrapper for the Transformer-Engine's `GroupedLinear` layer but specialized
@@ -1059,6 +1091,7 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool,
             tp_comm_buffer_name: Optional[str] = None,
+            split_bw: bool = False,
         ):
 
             super().__init__(
@@ -1072,6 +1105,7 @@ if is_te_min_version("1.9.0.dev0"):
                 skip_bias_add=skip_bias_add,
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
+                split_bw=split_bw,
             )
 
         def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
@@ -1104,6 +1138,7 @@ if is_te_min_version("1.9.0.dev0"):
             skip_bias_add: bool,
             is_expert: bool,
             tp_comm_buffer_name: Optional[str] = None,
+            split_bw: bool = False,
         ):
 
             super().__init__(
@@ -1117,6 +1152,7 @@ if is_te_min_version("1.9.0.dev0"):
                 skip_bias_add=skip_bias_add,
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
+                split_bw=split_bw,
             )
 
         def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):

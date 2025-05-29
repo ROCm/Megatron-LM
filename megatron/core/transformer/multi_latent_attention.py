@@ -160,6 +160,7 @@ class MultiLatentAttention(Attention):
             skip_bias_add=True,
             is_expert=False,
             tp_comm_buffer_name='proj',
+            split_bw=self.config.split_bw,
         )
 
     def forward(
@@ -294,6 +295,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                split_bw=self.config.split_bw,
             )
 
         else:
@@ -308,6 +310,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 skip_weight_param_allocation=False,
+                split_bw=self.config.split_bw,
             )
             # W_UQ [q_lora_rank, NumAttentionHeads * q_head_dim] for up projection
             self.linear_q_up_proj = build_module(
@@ -320,6 +323,7 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                split_bw=self.config.split_bw,
             )
         # W_DKV [HiddenSize, kv_lora_rank + qk_pos_emb_head_dim] for down projection
         self.linear_kv_down_proj = build_module(
@@ -332,6 +336,7 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             skip_weight_param_allocation=False,
+            split_bw=self.config.split_bw,
         )
         # W_UKV [kv_lora_rank, NumAttentionHeads * (qk_head_dim + v_head_dim)] for up projection
         self.linear_kv_up_proj = build_module(
@@ -344,6 +349,7 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             is_expert=False,
+            split_bw=self.config.split_bw,
         )
 
         if self.config.q_lora_rank is not None:
@@ -467,3 +473,13 @@ class MLASelfAttention(MultiLatentAttention):
         value = value.contiguous()
 
         return query, key, value
+
+    def backward_dw(self):
+        self.linear_kv_up_proj.backward_dw()
+        self.linear_kv_down_proj.backward_dw()
+        if self.config.q_lora_rank is None:
+            self.linear_q_proj.backward_dw()
+        else:
+            self.linear_q_down_proj.backward_dw()
+            self.linear_q_up_proj.backward_dw()
+        self.linear_proj.backward_dw()

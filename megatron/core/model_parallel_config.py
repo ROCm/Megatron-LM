@@ -302,6 +302,15 @@ class ModelParallelConfig:
        rank 1 |   0 1 2 0 1 2 3 4 3 4
     """
 
+    combined_1f1b: bool = False
+    """If true, use combined 1F1B for communication hiding."""
+
+    combined_1f1b_recipe: str = 'ep_a2a'
+    """Recipe to use for combined 1F1B. Currently only 'ep_a2a' and 'golden' are supported."""
+
+    split_bw: bool = False
+    """If true, split dgrad and wgrad for better overlapping in combined 1F1B."""
+
     ###################
     # CPU Offloading
     ###################
