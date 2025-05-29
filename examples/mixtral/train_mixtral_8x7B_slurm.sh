@@ -108,6 +108,12 @@ export MEGATRON_DIR=${MEGATRON_DIR:-"${MEGATRON_DIR}"} # change the path to Mega
 export TOKENIZER_MODEL=${TOKENIZER_MODEL:-"${CONTAINER_MOUNT}/tokenizer/tokenizer.model"}   # change the tokenizer path accordingly
 export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/dataset"}                # change the path to dataset location
 export WANDB_API_KEY=${WANDB_API_KEY:-}
+export OVERLAP_MOE_A2A=${OVERLAP_MOE_A2A:-false}
+export PP_SIZE=1
+if [ $OVERLAP_MOE_A2A != false ]; then
+    echo "Setting OVERLAP_MOE_A2A to true enables pipeline parallelism, with default PP_SIZE=2"
+    PP_SIZE=2
+fi
 
 # Run the Docker container with the script
 srun bash -c '${container_command} run --rm \
@@ -134,7 +140,8 @@ srun bash -c '${container_command} run --rm \
  DATA_DIR=${DATA_DIR} \
  NCCL_SOCKET_IFNAME=${NETWORK_INTERFACE} GLOO_SOCKET_IFNAME=${NETWORK_INTERFACE} \
  RECOMPUTE_NUM_LAYERS=0 \
- TEE_OUTPUT=1 MBS=2 GBS=${GBS} TP_SIZE=1 PP_SIZE=1 AC=none MOE_PERMUTE_FUSION=true \
+ TEE_OUTPUT=1 MBS=2 GBS=${GBS} TP_SIZE=1 PP_SIZE=${PP_SIZE} AC=none \
+ MOE_PERMUTE_FUSION=true OVERLAP_MOE_A2A=${OVERLAP_MOE_A2A} \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=4096 FORCE_BALANCE=true \
  RUN_ENV=slurm MODEL_SIZE=8x7B bash examples/mixtral/train_mixtral_moe.sh 2>&1 | tee result_8X7B.log; \
  echo $(date)"'

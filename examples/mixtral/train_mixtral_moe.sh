@@ -330,6 +330,23 @@ else
     exit 1
 fi
 
+OVERLAP_MOE_A2A=${OVERLAP_MOE_A2A:-false}
+if [ $OVERLAP_MOE_A2A != false ]; then
+    overlap_moe_a2a_options=" \
+        --combined-1f1b \
+        --combined-1f1b-recipe ep_a2a \
+        --split-bw \
+        --num-layers-per-virtual-pipeline-stage 2
+    "
+    if [ $EP_SIZE = 8 ]; then
+        echo "disabling Grouped GEMM since each worker has only one expert."
+        USE_GROUPED_GEMM_OPTION=""
+        USE_LEGACY_GROUPED_GEMM_OPTION=""
+    fi
+else
+    overlap_moe_a2a_options=""
+fi
+
 MOE_ARGS=(
     --num-experts 8
     --moe-router-topk 2
@@ -342,6 +359,7 @@ MOE_ARGS=(
     --overlap-grad-reduce
     --overlap-param-gather
     $moe_permute_fustion_options
+    $overlap_moe_a2a_options
 )
 
 MOCK_DATA="${MOCK_DATA:-1}" # 1: use mock data, 0: use real data
