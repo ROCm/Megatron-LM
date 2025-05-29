@@ -338,11 +338,6 @@ if [ $OVERLAP_MOE_A2A != false ]; then
         --split-bw \
         --num-layers-per-virtual-pipeline-stage 2
     "
-    if [ $EP_SIZE = 8 ]; then
-        echo "disabling Grouped GEMM since each worker has only one expert."
-        USE_GROUPED_GEMM_OPTION=""
-        USE_LEGACY_GROUPED_GEMM_OPTION=""
-    fi
 else
     overlap_moe_a2a_options=""
 fi

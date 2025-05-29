@@ -333,7 +333,7 @@ def build_layer_schedule_plan(layer, event, chunk_state, comp_stream, com_stream
     attn.name = "attn"
     dispatch = MoeDispatchNode(chunk_state, common_state, layer, com_stream, event, True)
     dispatch.name = "dispatch"
-    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event, True)
+    mlp = MoeMlPNode(chunk_state, common_state, layer, comp_stream, event, False)
     mlp.name = "mlp"
     combine = MoeCombineNode(chunk_state, common_state, layer, com_stream, event, True)
     combine.name = "combine"
