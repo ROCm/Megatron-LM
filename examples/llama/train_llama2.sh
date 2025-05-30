@@ -20,7 +20,7 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
-
+export HIPBLASLT_TUNING_OVERRIDE_FILE=gemm_tuning_results/gemm_tune_result.txt
 # parsing input arguments
 for ARGUMENT in "$@"
 do
@@ -76,6 +76,7 @@ MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
 FSDP="${FSDP:-0}"
 RECOMPUTE="${RECOMPUTE:-0}"
+RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-0}"
 ROPE_FUSION="${ROPE_FUSION:-1}" # 1: use rope-fusion, 0: no-rope-fusion
 LOG_INTERVAL="${LOG_INTERVAL:-1}"
 EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
@@ -83,6 +84,18 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
+
+if [ "$NVTE_CK_USES_BWD_V3" -eq 1 ]; then
+    echo "Using BWD FAv3"
+    export NVTE_CK_USES_BWD_V3=1    #by default 0, if set to 1, some cases will call the bwd v3 dqdkdv kernel;
+    export NVTE_CK_V3_ATOMIC_FP32=0 #by default 1, if set to 0 will use atomic fp16/bf16(w/o convert_dq kernel) when NVTE_CK_USES_BWD_V3 is set to 1;
+    export NVTE_CK_V3_SPEC=1        #by default 0, if set to 1 will call the specialized v3 kernel when NVTE_CK_USES_BWD_V3 is set to 1;
+else
+    echo "Disabling BWD FAv3"
+    export NVTE_CK_USES_BWD_V3=0
+    export NVTE_CK_V3_ATOMIC_FP32=1
+    export NVTE_CK_V3_SPEC=0
+fi
 
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 if [ "$TOKENIZER_TYPE" == "Llama2Tokenizer" ]; then
@@ -179,7 +192,7 @@ GPT_ARGS="
     --no-masked-softmax-fusion \
 "
 if [ "$RECOMPUTE" -eq 1 ]; then
-    GPT_ARGS="$GPT_ARGS --recompute-num-layers $NUM_LAYERS \
+    GPT_ARGS="$GPT_ARGS --recompute-num-layers $RECOMPUTE_NUM_LAYERS \
         --recompute-granularity full \
         --recompute-method block \
         "

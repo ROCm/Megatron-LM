@@ -14,7 +14,7 @@ export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
-
+export HIPBLASLT_TUNING_OVERRIDE_FILE=gemm_tuning_results/gemm_tune_result.txt
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
@@ -450,7 +450,7 @@ if __name__ == "__main__":
 
     with open(args.filename) as f:
         lines = f.readlines()
-    lines = lines[1:-1]
+    lines = lines[-5:-1]
     lines = [float(a) for a in lines]
     mean = np.mean(np.array(lines))
     print(mean)' > mean_log_value.py
