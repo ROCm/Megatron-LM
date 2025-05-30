@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mixtral-8X22B-train
 #SBATCH --output=logs/slurm/mixtral-8X22B-job.%j.out
-#SBATCH --nodes=4                            # Number of nodes, Adjust as necessary
+#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
 #SBATCH --cpus-per-task=384
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
@@ -27,7 +27,7 @@ export SLURM_MASTER_PORT="${SLURM_MASTER_PORT:-29475}"
 echo "MASTER_ADDR=$SLURM_MASTER_ADDR"
 echo "MASTER_PORT=$SLURM_MASTER_PORT"
 # Define the Docker image
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"rocm/megatron-lm:v25.5_py310"}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.5_py310"}
 
 
 echo "Trying 'docker ps'..."
@@ -80,7 +80,7 @@ srun bash -c '${container_command} run --rm \
  DATA_DIR=${DATA_DIR} \
  TRAIN_ITERS=20 \
  NCCL_SOCKET_IFNAME=${NETWORK_INTERFACE} GLOO_SOCKET_IFNAME=${NETWORK_INTERFACE} \
- RECOMPUTE_NUM_LAYERS=56 \
+ RECOMPUTE_NUM_LAYERS=50 \
  GEMM_TUNING=0 USE_GROUPED_GEMM=true MOE_USE_LEGACY_GROUPED_GEMM=true \
  TEE_OUTPUT=1 CP_SIZE=1 MBS=1 GBS=${GBS} TP_SIZE=1 PP_SIZE=1 AC=full MOE_PERMUTE_FUSION=true \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=8192 FORCE_BALANCE=true \

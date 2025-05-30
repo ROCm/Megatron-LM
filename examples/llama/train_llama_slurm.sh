@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=llama-train
 #SBATCH --output=logs/slurm/multinode-job.%j.out
-#SBATCH --nodes=4                            # Number of nodes, Adjust as necessary
+#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
 #SBATCH --cpus-per-task=384                  # assign all CPUs to the job
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=mixtral-8X7B-train
 #SBATCH --output=logs/slurm/mixtral-8X7B-job.%j.out
-#SBATCH --nodes=4                            # Number of nodes, Adjust as necessary
+#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
 #SBATCH --cpus-per-task=384 
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
@@ -26,7 +26,7 @@ export SLURM_MASTER_PORT="${SLURM_MASTER_PORT:-29475}"
 echo "MASTER_ADDR=$SLURM_MASTER_ADDR"
 echo "MASTER_PORT=$SLURM_MASTER_PORT"
 # Define the Docker image
-export DOCKER_IMAGE=${DOCKER_IMAGE:-"rocm/megatron-lm:v25.5_py310"}
+export DOCKER_IMAGE=${DOCKER_IMAGE:-"docker.io/rocm/megatron-lm:v25.5_py310"}
 
 echo "Trying 'docker ps'..."
 if docker ps; then
