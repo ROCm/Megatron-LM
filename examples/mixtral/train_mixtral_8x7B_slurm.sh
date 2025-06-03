@@ -3,10 +3,10 @@
 #SBATCH --output=logs/slurm/mixtral-8X7B-job.%j.out
 #SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
-#SBATCH --cpus-per-task=384 
+#SBATCH --cpus-per-task=128 
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
-#SBATCH --time=01:00:00                      # Adjust as necessary
-#SBATCH --reservation=gpu-40_gpu-41_gpu-43_gpu-44_gpu-46_gpu-47_gpu-50_gpu-55_reservation # modify based on your reservation settings
+#SBATCH --time=02:00:00                      # Adjust as necessary
+#SBATCH --partition=<your_partition_name> # modify based on your reservation settings
 BATCH_SIZE_PER_NODE=$1
 export batch_size_per_node=$BATCH_SIZE_PER_NODE # Set the batch size per node, change it to your own value
 export GBS=$(( SLURM_NNODES * batch_size_per_node ))
@@ -58,7 +58,19 @@ export DATA_DIR=${DATA_DIR:-"${CONTAINER_MOUNT}/dataset"}                # chang
 export WANDB_API_KEY=${WANDB_API_KEY:-}
 # if using broadcom network, uncomment the following line to mount the necessary directories
 # -v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib \
+if [ -d "/etc/libibverbs.d" ]; then
+  echo "/etc/libibverbs.d exists and using broadcom."
+  export IB_MOUNT_OPTIONS="-v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib"
+  
+else
+  echo "/etc/libibverbs.d does not exist not using ."
+  export IB_MOUNT_OPTIONS=""
+fi
 
+
+sudo amd-smi set -g all -p 1
+echo 0 | sudo tee /proc/sys/kernel/numa_balancing
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # Run the Docker container with the script
 srun bash -c '${container_command} run --rm \
  --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \
@@ -69,6 +81,7 @@ srun bash -c '${container_command} run --rm \
  --env WANDB_API_KEY=${WANDB_API_KEY} \
  --ipc=host --network=host --device=/dev/kfd --device=/dev/dri  --cap-add=SYS_PTRACE  --cap-add=CAP_SYS_ADMIN  \
  --security-opt seccomp=unconfined --group-add video --privileged --device=/dev/infiniband \
+ ${IB_MOUNT_OPTIONS} \
  -v $HOST_MOUNT:$CONTAINER_MOUNT \
  $DOCKER_IMAGE /bin/bash -c \
  "echo $(date); \

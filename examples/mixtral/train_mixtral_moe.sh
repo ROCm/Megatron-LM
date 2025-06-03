@@ -3,7 +3,7 @@
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
-NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+NCCL_IB_HCA_LIST=$(ibv_devices | awk 'NR>2 {print $1}' | sort | head -n 8 | paste -sd,)
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 echo $NCCL_IB_HCA
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
@@ -14,7 +14,7 @@ export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
-export HIPBLASLT_TUNING_OVERRIDE_FILE=gemm_tuning_results/gemm_tune_result.txt
+#export HIPBLASLT_TUNING_OVERRIDE_FILE=gemm_tuning_results/gemm_tune_result.txt
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 

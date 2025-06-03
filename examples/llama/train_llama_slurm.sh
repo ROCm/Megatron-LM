@@ -1,12 +1,12 @@
 #!/bin/bash
 #SBATCH --job-name=llama-train
-#SBATCH --output=logs/slurm/multinode-job.%j.out
-#SBATCH --nodes=8                            # Number of nodes, Adjust as necessary
+#SBATCH --output=logs/slurm/llama2.%j.out
+#SBATCH --nodes=2                            # Number of nodes, Adjust as necessary
 #SBATCH --ntasks-per-node=1                  # One task per GPU -> total 8 tasks per node
-#SBATCH --cpus-per-task=384                  # assign all CPUs to the job
+#SBATCH --cpus-per-task=128                  # assign all CPUs to the job
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
 #SBATCH --time=01:00:00                      # Adjust as necessary
-#SBATCH --reservation=gpu-40_gpu-41_gpu-43_gpu-44_gpu-46_gpu-47_gpu-50_gpu-55_reservation # modify based on your reservation settings
+#SBATCH --partition=<your_partition_name> # modify based on your reservation settings
 
 # Determine MASTER_ADDR and MASTER_PORT
 MASTER_ADDR=$(srun --ntasks=1 hostname | head -n 1)
@@ -43,8 +43,17 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 # if using broadcom network, uncomment the following line to mount the necessary directories
 # -v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib \
-# Build and launch the Docker container, change podmand command to docker command if the system is using docker instead of podman
+if [ -d "/etc/libibverbs.d" ]; then
+  echo "/etc/libibverbs.d exists and using broadcom."
+  export IB_MOUNT_OPTIONS="-v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib"
+  
+else
+  echo "/etc/libibverbs.d does not exist not using ."
+  export IB_MOUNT_OPTIONS=""
+fi
+
 srun bash -c '
+    ${container_command} stop $( ${container_command} ps -q )
     ${container_command} pull $IMAGE
     ${container_command} stop $CONTAINER_NAME
     ${container_command} rm $CONTAINER_NAME
@@ -52,6 +61,7 @@ srun bash -c '
     ibdev2netdev
     ${container_command} run -d --network host --device /dev/dri --device /dev/kfd --device /dev/infiniband \
       --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged  \
+      ${IB_MOUNT_OPTIONS} \
       -v $HOST_MOUNT:$CONTAINER_MOUNT --shm-size 128G --name $CONTAINER_NAME $IMAGE tail -f /dev/null
 '
 
@@ -74,7 +84,9 @@ echo "FSDP: $FSDP"
 echo "RECOMPUTE: $RECOMPUTE"
 echo "RECOMPUTE_NUM_LAYERS: $RECOMPUTE_NUM_LAYERS"
 
-
+sudo amd-smi set -g all -p 1
+echo 0 | sudo tee /proc/sys/kernel/numa_balancing
+echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # Execute the training inside the Docker container
 srun bash -c '
   ${container_command} exec \
