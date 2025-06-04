@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=128 
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
 #SBATCH --time=02:00:00                      # Adjust as necessary
-#SBATCH --partition=<your_partition_name> # modify based on your reservation settings
+#SBATCH --partition=<your_slurm_partiton_name> # modify based on your reservation settings
 BATCH_SIZE_PER_NODE=$1
 export batch_size_per_node=$BATCH_SIZE_PER_NODE # Set the batch size per node, change it to your own value
 export GBS=$(( SLURM_NNODES * batch_size_per_node ))

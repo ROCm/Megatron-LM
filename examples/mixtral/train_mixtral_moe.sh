@@ -3,7 +3,7 @@
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
-NCCL_IB_HCA_LIST=$(ibv_devices | awk 'NR>2 {print $1}' | sort | head -n 8 | paste -sd,)
+NCCL_IB_HCA_LIST=$(bash "get_nccl_ib_hca.sh")
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 echo $NCCL_IB_HCA
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
