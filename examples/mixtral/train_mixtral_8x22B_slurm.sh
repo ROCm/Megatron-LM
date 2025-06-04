@@ -6,7 +6,8 @@
 #SBATCH --cpus-per-task=128
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
 #SBATCH --time=02:00:00                      # Adjust as necessary
-#SBATCH --partition=<your_slurm_partiton_name> # modify based on your reservation settings
+#SBATCH --partition=byte # modify based on your reservation settings
+##SBATCH --reservation=gpu-40_gpu-41_gpu-43_gpu-44_gpu-46_gpu-47_gpu-50_gpu-55_reservation # modify based on your reservation settings
 
 BATCH_SIZE_PER_NODE=$1
 export batch_size_per_node=$BATCH_SIZE_PER_NODE # Set the batch size per node, change it to your own value
@@ -64,7 +65,7 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 # if using broadcom network, uncomment the following line to mount the necessary directories
 # -v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib \
-if [ -d "/etc/libibverbs.d" ]; then
+if [ -e "/etc/libibverbs.d/bnxt_re.driver" ]; then
   echo "/etc/libibverbs.d exists and using broadcom."
   export IB_MOUNT_OPTIONS="-v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib"
   
@@ -97,5 +98,5 @@ srun bash -c '${container_command} run --rm \
  TEE_OUTPUT=1 CP_SIZE=1 MBS=1 GBS=${GBS} TP_SIZE=1 PP_SIZE=1 AC=full MOE_PERMUTE_FUSION=true \
  PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=8192 FORCE_BALANCE=true \
  NVTE_CK_USES_BWD_V3=1 \
- RUN_ENV=slurm MODEL_SIZE=8x22B bash examples/mixtral/train_mixtral_moe.sh 2>&1 | tee result_8X22B.log; \
+ RUN_ENV=slurm MODEL_SIZE=8x22B bash examples/mixtral/train_mixtral_moe.sh; \
  echo $(date)"'

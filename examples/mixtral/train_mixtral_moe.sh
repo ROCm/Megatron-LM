@@ -470,5 +470,5 @@ TIME_PER_ITER=$(python mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6
 PERFORMANCE=$(awk -v bs="$GBS" -v sl="$SEQLEN" -v tpi="$TIME_PER_ITER" -v ws="$((NNODES * GPUS_PER_NODE))" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
 echo "tokens/GPU/s: $PERFORMANCE" |& tee -a $TRAIN_LOG
 rm tmp.txt
-
+rm  mean_log_value.py
 fi

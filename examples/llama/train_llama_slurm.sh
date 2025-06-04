@@ -6,7 +6,8 @@
 #SBATCH --cpus-per-task=128                  # assign all CPUs to the job
 #SBATCH --gres=gpu:8                         # Request 8 GPUs per node
 #SBATCH --time=01:00:00                      # Adjust as necessary
-#SBATCH --partition=<your_slurm_partiton_name> # modify based on your reservation settings
+#SBATCH --partition=byte # modify based on your reservation settings
+##SBATCH --reservation=gpu-40_gpu-41_gpu-43_gpu-44_gpu-46_gpu-47_gpu-50_gpu-55_reservation # modify based on your reservation settings
 
 # Determine MASTER_ADDR and MASTER_PORT
 MASTER_ADDR=$(srun --ntasks=1 hostname | head -n 1)
@@ -43,7 +44,7 @@ export WANDB_API_KEY=${WANDB_API_KEY:-}
 
 # if using broadcom network, uncomment the following line to mount the necessary directories
 # -v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib \
-if [ -d "/etc/libibverbs.d" ]; then
+if [ -e "/etc/libibverbs.d/bnxt_re.driver" ]; then
   echo "/etc/libibverbs.d exists and using broadcom."
   export IB_MOUNT_OPTIONS="-v /usr/bin:/usr/bin -v /etc/libibverbs.d/:/etc/libibverbs.d -v /usr/lib/x86_64-linux-gnu/:/usr/lib/x86_64-linux-gnu/ -v /usr/local/lib:/usr/local/lib"
   
@@ -57,7 +58,6 @@ srun bash -c '
     ${container_command} pull $DOCKER_IMAGE
     ${container_command} stop $CONTAINER_NAME
     ${container_command} rm $CONTAINER_NAME
-    ${container_command} images
     ibdev2netdev
     ${container_command} run -d --network host --device /dev/dri --device /dev/kfd --device /dev/infiniband \
       --group-add video --cap-add SYS_PTRACE --security-opt seccomp=unconfined --privileged  \

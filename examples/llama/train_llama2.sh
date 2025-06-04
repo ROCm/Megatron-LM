@@ -225,10 +225,9 @@ DATA_ARGS="
     --split 99990,8,2 \
     --dataloader-type cyclic \
     --save-interval 200000 \
-    --tensorboard-dir $LOG_DIR \
     --log-interval 1 \
     --eval-interval 320000 \
-    --eval-iters 10 \
+    --eval-iters -1 \
     --num-workers $ds_works \
 "
 if [ -z ${DATA_PATH+x} ]; then
@@ -361,7 +360,7 @@ if [ "$NO_TRAINING" -eq 0 ]; then
     eval $run_cmd
 fi
 
-
+if [ "$RUN_ENV" = "cluster" ] || ( [ "$RUN_ENV" = "slurm" ] && [ "$SLURM_NODEID" = "$((NNODES - 1))" ] ); then
 echo 'import argparse
 import numpy as np
 
@@ -373,30 +372,25 @@ if __name__ == "__main__":
 
     with open(args.filename) as f:
         lines = f.readlines()
-    lines = lines[2:-1]
+    lines = lines[-5:-1]
     lines = [float(a) for a in lines]
     mean = np.mean(np.array(lines))
     print(mean)' > mean_log_value.py
 
 
-# echo '============================================================================================================'
+echo '============================================================================================================'
 grep -Eo 'throughput per GPU [^|]*' $TRAIN_LOG | sed -E 's/.*throughput per GPU \(TFLOP\/s\/GPU\): ([0-9\.]+).*/\1/' > tmp.txt
-PERFORMANCE=$(python3 mean_log_value.py tmp.txt)
-echo "throughput per GPU: $PERFORMANCE" |& tee -a $TRAIN_LOG
+echo "throughput per GPU: $(python mean_log_value.py tmp.txt)" |& tee -a $TRAIN_LOG
+THROUGHPUT=$(python mean_log_value.py tmp.txt)
 rm tmp.txt
 
-# echo '============================================================================================================'
+echo '============================================================================================================'
 grep -Eo 'elapsed time per iteration [^|]*' $TRAIN_LOG | sed -E 's/.*elapsed time per iteration \(ms\): ([0-9\.]+).*/\1/' > tmp.txt
-ETPI=$(python3 mean_log_value.py tmp.txt)
-echo "elapsed time per iteration: $ETPI" |& tee -a $TRAIN_LOG
+echo "elapsed time per iteration: $(python mean_log_value.py tmp.txt)" |& tee -a $TRAIN_LOG
 
-TIME_PER_ITER=$(python3 mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
-TGS=$(awk -v bs="$BS" -v sl="$SEQ_LENGTH" -v tpi="$TIME_PER_ITER" -v ws="$WORLD_SIZE" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
-echo "tokens/GPU/s: $TGS" |& tee -a $TRAIN_LOG
-
-# Extract memory usage
-grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*/\1/' > tmp.txt
-MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
-echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
+TIME_PER_ITER=$(python mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
+PERFORMANCE=$(awk -v bs="$GBS" -v sl="$SEQLEN" -v tpi="$TIME_PER_ITER" -v ws="$((NNODES * GPUS_PER_NODE))" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
+echo "tokens/GPU/s: $PERFORMANCE" |& tee -a $TRAIN_LOG
 rm tmp.txt
-
+rm  mean_log_value.py
+fi
