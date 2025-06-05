@@ -740,7 +740,12 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         # WAR for peak memory usage.
         # See https://gitlab-master.nvidia.com/ADLR/megatron-lm/-/merge_requests/2388
         if self.config.apply_rope_fusion and qkv_format == 'bshd':
-            query, key, value = [x.contiguous().transpose(0, 1) for x in (query, key, value)]
+            # In PyTorch, operations like transpose create a view of the original tensor.
+            # Taking a view of a tensor (through a transpose operation) that is contiguous in memory
+            # could potentially produce a tensor which is non-contiguous in memory leading to performance impacts.
+            # To eliminate this possibility, we apply transpose operation followed by contiguous()
+            # to ensure that the resulting tensor is contiguous in memory.
+            query, key, value = [x.transpose(0, 1).contiguous() for x in (query, key, value)]                
             # In PyTorch, the following two tensors are in fact the same:
             #   Tensor with shape (1, S, H, D) and stride (S*H*D, H*D, D, 1)
             #   Tensor with shape (1, S, H, D) and stride (H*D, H*D, D, 1)
