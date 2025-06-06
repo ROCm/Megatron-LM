@@ -1321,9 +1321,9 @@ def _add_training_args(parser):
                        '-o <path/to/output_file> --force-overwrite true '
                        '--capture-range=cudaProfilerApi '
                        '--capture-range-end=stop`.')
-    group.add_argument('--profile-step-start', type=int, default=10,
+    group.add_argument('--profile-step-start', type=int, default=3,
                        help='Global step to start profiling.')
-    group.add_argument('--profile-step-end', type=int, default=12,
+    group.add_argument('--profile-step-end', type=int, default=4,
                        help='Global step to stop profiling.')
     group.add_argument('--use-pytorch-profiler', action='store_true',
                        help='Use the built-in pytorch profiler. '
