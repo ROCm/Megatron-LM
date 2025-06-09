@@ -1,8 +1,11 @@
 ARG BASE_DOCKER=rocm/pytorch:rocm6.3_ubuntu22.04_py3.10_pytorch_release_2.5.1_preview
 FROM $BASE_DOCKER
+
 ARG PYTORCH_ROCM_ARCH_OVERRIDE="gfx942"
 ENV WORKSPACE_DIR=/workspace
 ENV STAGE_DIR=/workspace/installs
+ARG MAX_JOBS=128
+ENV MAX_JOBS=${MAX_JOBS}
 RUN mkdir -p $WORKSPACE_DIR
 RUN mkdir -p ${STAGE_DIR}
 WORKDIR $WORKSPACE_DIR

@@ -47,10 +47,11 @@ pipeline {
 
                     // Generate a unique UUID for the Docker image name
                     def uuid = sh(script: 'uuidgen', returnStdout: true).trim()
+                    def nproc = sh(script: 'nproc', returnStdout: true).trim()
                     env.DOCKER_IMAGE = "${REPO_NAME}:${uuid}"
 
                     // Build Docker image
-                    sh "docker build --no-cache -f Dockerfile_rocm.ci --build-arg PYTORCH_ROCM_ARCH_OVERRIDE=${params.GPU_ARCH} -t ${env.DOCKER_IMAGE} ."
+                    sh "docker build --no-cache -f Dockerfile_rocm.ci --build-arg MAX_JOBS=${nproc} --build-arg PYTORCH_ROCM_ARCH_OVERRIDE=${params.GPU_ARCH} -t ${env.DOCKER_IMAGE} ."
 
                     withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
                         sh "docker push ${env.DOCKER_IMAGE}"  
