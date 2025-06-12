@@ -23,9 +23,9 @@ from torch.futures import Future
 try:
     # This PR https://github.com/pytorch/pytorch/pull/143359 introduced breaking change to saving checkpoints 
     # in torch_dist format. This is a workaround to fix the issue.
-    from torch.distributed.checkpoint.filesystem import _StorageWriterTransforms
+    from torch.distributed.checkpoint.filesystem import _StorageWriterTransforms, SerializationFormat
     from functools import partial
-    _write_item = partial(_write_item, _StorageWriterTransforms())
+    _write_item = partial(_write_item, _StorageWriterTransforms(), serialization_format=SerializationFormat.TORCH_SAVE)
 except ImportError:
     pass
 
