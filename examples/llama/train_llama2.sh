@@ -308,14 +308,16 @@ if [ "$MCORE" -eq 1 ]; then
 fi
 
 if [ "$TE_FP8" -eq 1 ]; then
-EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
-    --fp8-margin=0 \
-    --fp8-format=hybrid \
-    --fp8-interval=1 \
-    --fp8-amax-history-len=1024 \
-    --fp8-amax-compute-algo=max \
-    --attention-softmax-in-fp32 \
-"
+    # cast transpose optimization for fp8
+    export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+    EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
+        --fp8-margin=0 \
+        --fp8-format=hybrid \
+        --fp8-interval=1 \
+        --fp8-amax-history-len=1024 \
+        --fp8-amax-compute-algo=max \
+        --attention-softmax-in-fp32 \
+    "
     if [ "$FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
         " 

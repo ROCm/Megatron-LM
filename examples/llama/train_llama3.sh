@@ -20,13 +20,6 @@ export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
-# cast transpose optimization for fp8
-export NVTE_USE_CAST_TRANSPOSE_TRITON=1
-# export NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=1
-
-# critical: avoid memory fragment
-export PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:2048
-
 # parsing input arguments
 for ARGUMENT in "$@"
 do
@@ -302,6 +295,9 @@ if [ "$MCORE" -eq 1 ]; then
 fi
 
 if [ "$TE_FP8" -eq 1 ]; then
+    # cast transpose optimization for fp8
+    export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+    
     EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
         --fp8-margin=0 \
         --fp8-format=hybrid \
