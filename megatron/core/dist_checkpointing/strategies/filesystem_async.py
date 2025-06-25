@@ -25,7 +25,12 @@ try:
     # in torch_dist format. This is a workaround to fix the issue.
     from torch.distributed.checkpoint.filesystem import _StorageWriterTransforms
     from functools import partial
-    _write_item = partial(_write_item, _StorageWriterTransforms())
+    import inspect
+    if "serialization_format" in inspect.signature(_write_item).parameters:
+         from torch.distributed.checkpoint.filesystem import SerializationFormat
+         _write_item = partial(_write_item, _StorageWriterTransforms(), serialization_format=SerializationFormat.TORCH_SAVE)
+    else:
+        _write_item = partial(_write_item, _StorageWriterTransforms())
 except ImportError:
     pass
 
