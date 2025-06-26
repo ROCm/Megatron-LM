@@ -246,6 +246,9 @@ class TransformerConfig(ModelParallelConfig):
     tp_only_amax_red: bool = False
     """When set to True, reduce the FP8 AMAX only in the TP or TP-CP domain"""
 
+    fp8_reduce_amax: bool = True
+    """When set to True, the amax value for FP8 tensors is reduced across the fp8_group"""
+
     ####################
     # MoE related
     ####################

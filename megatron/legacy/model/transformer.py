@@ -1439,6 +1439,7 @@ class ParallelTransformer(MegatronModule):
                 amax_history_len=args.fp8_amax_history_len,
                 amax_compute_algo=args.fp8_amax_compute_algo,
                 override_linear_precision=(False, False, not args.fp8_wgrad),
+                reduce_amax=args.fp8_reduce_amax,
             )
 
         self.num_microbatches_in_previous_step = -1

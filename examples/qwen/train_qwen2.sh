@@ -10,7 +10,8 @@
 export GPU_MAX_HW_QUEUES=2
 export TORCH_NCCL_HIGH_PRIORITY=1
 export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 
+NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=3
 export NCCL_CROSS_NIC=0
 export CUDA_DEVICE_MAX_CONNECTIONS=1
@@ -53,8 +54,8 @@ NODE_RANK="${NODE_RANK:-0}"
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 if [ "${NNODES:-1}" -gt 1 ]; then
-    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens5}"
-    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-ens50f0}"
+    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens51np0}"
+    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-ens51np0}"
     echo "NCCL and GLOO socket interfaces set."
 else
     echo "Single node setup, skipping NCCL and GLOO socket interface settings."
@@ -73,12 +74,20 @@ SEQ_PARALLEL="${SEQ_PARALLEL:-1}"
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
 GEMM_TUNING="${GEMM_TUNING:-1}"
-MOCK_DATA="${MOCK_DATA:-0}"
+MOCK_DATA="${MOCK_DATA:-1}"
 MCORE="${MCORE:-1}"
+FSDP="${FSDP:-0}"
 RECOMPUTE_ACTIVATIONS="${RECOMPUTE_ACTIVATIONS:-none}" # full or sel
-RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-8}" # only work with full recomputation
-DIST_OPTIM="${DIST_OPTIM:-1}" # 0: disable distributed optimizer, 1: enable distributed optimizer
+RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-80}" # only work with full recomputation
 OPTIMIZER="${OPTIMIZER:-adam}" # adam or sgd, by default adam 
+
+if [ "$FSDP" -eq 1 ]; then
+    if [ "$TP" -gt 1 ]; then
+        echo "It is not recommended to use FSDP and TP together. Disabling TP."
+        TP=1
+        echo "Resetting TP=$TP"
+    fi
+fi
 
 if [ "$TOTAL_ITERS" -lt 4 ]; then
     echo "Must give number of iteration greater than 3 to generate peformance data. Exiting..."
@@ -241,17 +250,28 @@ EXTRA_ARGS="
     --no-gradient-accumulation-fusion \
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
+    --overlap-grad-reduce \
 "
 
+if [ "$FSDP" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --use-torch-fsdp2"
+    if [ "$SEQ_PARALLEL" -eq 1 ]; then
+        echo "Warning: Sequence Parallelism and FSDP2 have conflicting CUDA_MAX_CONNECTIONS requirements. It is recommended not to use them together."
+        echo "FSDP2 and sequence parallel are on. Disabling sequence parallel."
+        SEQ_PARALLEL=0
+    fi
+else
+    if [ "$OPTIMIZER" == "adam" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --use-distributed-optimizer --overlap-param-gather"
+    fi
+fi
+
 if [ $RECOMPUTE_ACTIVATIONS = full ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --recompute-method uniform --recompute-granularity full --recompute-num-layers ${RECOMPUTE_NUM_LAYERS}"
+    EXTRA_ARGS="$EXTRA_ARGS --recompute-method block --recompute-granularity full --recompute-num-layers ${RECOMPUTE_NUM_LAYERS}"
 elif [ $RECOMPUTE_ACTIVATIONS = sel ]; then
     EXTRA_ARGS="$EXTRA_ARGS --recompute-activations"
 fi
 
-if [ $DIST_OPTIM -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-distributed-optimizer --overlap-param-gather --overlap-grad-reduce"
-fi
 
 if [ "$ENABLE_PROFILING" -eq 1 ]; then
 EXTRA_ARGS="$EXTRA_ARGS --profile --use-pytorch-profiler --tensorboard-dir $LOG_DIR"
@@ -278,14 +298,24 @@ EXTRA_ARGS="$EXTRA_ARGS --position-embedding-type rope"
 fi
 
 if [ "$TE_FP8" -eq 1 ]; then
-EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
-    --fp8-margin=0 \
-    --fp8-format=hybrid \
-    --fp8-interval=1 \
-    --fp8-amax-history-len=1024 \
-    --fp8-amax-compute-algo=max \
-    --attention-softmax-in-fp32 \
-"
+    # cast transpose optimization for fp8
+    export NVTE_USE_CAST_TRANSPOSE_TRITON=1
+    EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
+        --fp8-margin=0 \
+        --fp8-format=hybrid \
+        --fp8-interval=1 \
+        --fp8-amax-history-len=1024 \
+        --fp8-amax-compute-algo=max \
+        --attention-softmax-in-fp32 \
+    "
+    if [ "$FSDP" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
+        --no-fp8-reduce-amax\
+        " 
+        # NOTE: This option may cause performance regression
+        # EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-cache \
+        # " 
+    fi
 fi
 
 run_cmd="

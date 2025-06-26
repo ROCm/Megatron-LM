@@ -906,6 +906,10 @@ def _add_transformer_engine_args(parser):
     group.add_argument('--fp8-param-gather', action='store_true',
                        help='Keep the compute param in fp8 (do not use any other intermediate '
                             'dtype) and perform the param all-gather in fp8.')
+    group.add_argument('--no-fp8-reduce-amax', action='store_false',
+                       help='Reduce amax value for FP8 tensors across the fp8_group',
+                       dest='fp8_reduce_amax')
+
     return parser
 
 def _add_inference_args(parser):

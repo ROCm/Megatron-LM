@@ -320,6 +320,7 @@ if [ "$TE_FP8" -eq 1 ]; then
     "
     if [ "$FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
+        --no-fp8-reduce-amax\
         " 
     fi
 fi

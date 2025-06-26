@@ -1187,7 +1187,7 @@ class TEDelayedScaling(te.common.recipe.DelayedScaling):
             amax_history_len=config.fp8_amax_history_len,
             override_linear_precision=override_linear_precision,
             # TODO(wenx)
-            reduce_amax=False,
+            reduce_amax=config.fp8_reduce_amax,
             **extra_kwargs,
         )
 
