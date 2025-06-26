@@ -79,7 +79,11 @@ MCORE="${MCORE:-1}"
 FSDP="${FSDP:-0}"
 RECOMPUTE_ACTIVATIONS="${RECOMPUTE_ACTIVATIONS:-none}" # full or sel
 RECOMPUTE_NUM_LAYERS="${RECOMPUTE_NUM_LAYERS:-80}" # only work with full recomputation
-OPTIMIZER="${OPTIMIZER:-adam}" # adam or sgd, by default adam 
+OPTIMIZER="${OPTIMIZER:-adam}" # adam or sgd, by default adam
+EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
+SAVE_INTERVAL="${SAVE_INTERVAL:-5000}" 
+EVAL_ITERS="${EVAL_ITERS:-'-1'}"
+CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 
 if [ "$FSDP" -eq 1 ]; then
     if [ "$TP" -gt 1 ]; then
@@ -224,10 +228,10 @@ fi
 
 OUTPUT_ARGS="
     --log-interval 1 \
-    --save-interval 5000 \
     --log-throughput \
     --no-save-optim \
-    --eval-iters -1   
+    --no-save-rng \
+    --eval-iters $EVAL_ITERS   
 "
 
 DISTRIBUTED_ARGS="
@@ -238,10 +242,24 @@ DISTRIBUTED_ARGS="
     --master_port $MASTER_PORT \
 "
 
-CKPT_LOAD_ARGS="--exit-on-missing-checkpoint \
+if [ -n "$SAVE_CKPT_PATH" ]; then
+    OUTPUT_ARGS="$OUTPUT_ARGS \
+        --save-interval $SAVE_INTERVAL \
+        --eval-interval $EVAL_INTERVAL \
+        --ckpt-format $CKPT_FORMAT \
+        --save $SAVE_CKPT_PATH
+    "
+fi
+
+CKPT_LOAD_ARGS=""
+if [ -n "$LOAD_CKPT_PATH" ]; then
+    CKPT_LOAD_ARGS="$CKPT_LOAD_ARGS \
+        --exit-on-missing-checkpoint \
         --no-load-optim \
+        --no-load-rng \
         --use-checkpoint-args \
-        --no-load-rng"
+        --load ${LOAD_CKPT_PATH}"
+fi
 
 
 EXTRA_ARGS="
