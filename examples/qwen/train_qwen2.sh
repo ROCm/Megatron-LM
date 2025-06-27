@@ -344,6 +344,7 @@ run_cmd="
         $OUTPUT_ARGS \
         $EXTRA_ARGS \
         $TRAIN_ARGS \
+        $CKPT_LOAD_ARGS \
 "
 
 if [ "$TEE_OUTPUT" -eq 0 ]; then 
