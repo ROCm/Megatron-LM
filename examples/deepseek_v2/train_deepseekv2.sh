@@ -4,7 +4,7 @@
 #
 # See LICENSE for license information.
 #################################################################################
-# set -e
+set -e
 
 TOKENIZER_MODEL="deepseek-ai/DeepSeek-V2-Lite"
 
@@ -19,8 +19,6 @@ echo $CURRENT_DIR
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
-NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
-export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1} # Reducing to 1 ensures no PCIE traffic (even on single node)
@@ -124,6 +122,9 @@ if [ "${NNODES:-1}" -gt 1 ]; then
     export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens51np0}"
     export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-ens51np0}"
     echo "NCCL and GLOO socket interfaces set."
+    NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+    export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
+    echo "NCCL_IB_HCA set for multinode."
 else
     echo "Single node setup, skipping NCCL and GLOO socket interface settings."
 fi
