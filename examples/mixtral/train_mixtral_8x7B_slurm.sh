@@ -75,7 +75,8 @@ sudo amd-smi set -g all -p 1
 echo 0 | sudo tee /proc/sys/kernel/numa_balancing
 echo performance | sudo tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 # Run the Docker container with the script
-srun bash -c '${container_command} run --rm \
+srun bash -c '${container_command} stop $( ${container_command} ps -q ) ;\
+  ${container_command} run --rm \
  --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \
  --env SLURM_MASTER_PORT=$SLURM_MASTER_PORT \
  --env "SLURM_PROCID=$SLURM_PROCID" \

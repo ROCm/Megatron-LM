@@ -1,6 +1,6 @@
 #!/bin/bash
 
-export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-1}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
 NCCL_IB_HCA_LIST=$(bash "get_nccl_ib_hca.sh")
@@ -13,8 +13,10 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
-
-#export HIPBLASLT_TUNING_OVERRIDE_FILE=gemm_tuning_results/gemm_tune_result.txt
+# export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-1}
+export NCCL_MIN_NCHANNELS=${NCCL_MIN_NCHANNELS:-112}
+# export HIPBLASLT_LOG_LEVEL=4
+export HIPBLASLT_TUNING_OVERRIDE_FILE=gemm_tuning_results/gemmtune_mixtral8x22-mbs1seq4096.txt
 CURRENT_DIR="$( cd "$( dirname "$0" )" && pwd )"
 MEGATRON_PATH=$( dirname $( dirname ${CURRENT_DIR}))
 
@@ -72,11 +74,16 @@ DATA_DIR=${DATA_DIR:-"/workspace/dev/data"}
 DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
 VALID_DATASET_PATH=${DATA_DIR}/wudao_mistralbpe_content_document
 
-
+# export HIPBLASLT_LOG_MASK=32 
+# export HIPBLASLT_LOG_FILE=mixtral_${MODEL_SIZE}_dump_gemm_shapes_${NODE_RANK}_gbs${GBS}_mbs${MBS}.txt 
+# unset HIPBLASLT_LOG_MASK
+# unset HIPBLASLT_LOG_FILE
+# export HIPBLASLT_TUNING_OVERRIDE_FILE=mixtral8x22b_mbs1_result.log
+# unset HIPBLASLT_TUNING_OVERRIDE_FILE
 
 EXTRA_ARGS=(
     --use-flash-attn
-    --no-gradient-accumulation-fusion
+    # --no-gradient-accumulation-fusion # disable gradient accumulation fusion
     --moe-layer-freq 1
 )
 
@@ -340,6 +347,8 @@ MOE_ARGS=(
     $USE_LEGACY_GROUPED_GEMM_OPTION 
     --moe-token-dispatcher-type alltoall
     --overlap-grad-reduce
+    --ddp-bucket-size 629145600 
+    --num-layers-per-virtual-pipeline-stage 7 # add mem  
     --overlap-param-gather
     $moe_permute_fustion_options
 )

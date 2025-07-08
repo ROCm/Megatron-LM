@@ -75,7 +75,8 @@ else
 fi
 
 # Run the Docker container with the script
-srun bash -c '${container_command} run --rm \
+srun bash -c '${container_command} stop $( ${container_command} ps -q ) ;\
+${container_command} run --rm --name training_env\
  --env SLURM_MASTER_ADDR=$SLURM_MASTER_ADDR \
  --env SLURM_MASTER_PORT=$SLURM_MASTER_PORT \
  --env "SLURM_PROCID=$SLURM_PROCID" \
@@ -91,12 +92,13 @@ srun bash -c '${container_command} run --rm \
  cd $MEGATRON_DIR; \
  TOKENIZER_MODEL=${TOKENIZER_MODEL} \
  DATA_DIR=${DATA_DIR} \
- TRAIN_ITERS=20 \
+ TRAIN_ITERS=30 \
+ PROFILE=false \
  NCCL_SOCKET_IFNAME=${NETWORK_INTERFACE} GLOO_SOCKET_IFNAME=${NETWORK_INTERFACE} \
- RECOMPUTE_NUM_LAYERS=50 \
- GEMM_TUNING=0 USE_GROUPED_GEMM=true MOE_USE_LEGACY_GROUPED_GEMM=true \
- TEE_OUTPUT=1 CP_SIZE=1 MBS=1 GBS=${GBS} TP_SIZE=1 PP_SIZE=1 AC=full MOE_PERMUTE_FUSION=true \
- PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=8192 FORCE_BALANCE=true \
+ RECOMPUTE_NUM_LAYERS=0 \
+ GEMM_TUNING=0 USE_GROUPED_GEMM=false MOE_USE_LEGACY_GROUPED_GEMM=false \
+ TEE_OUTPUT=1 CP_SIZE=1 MBS=1 GBS=${GBS} TP_SIZE=1 PP_SIZE=4 AC=none MOE_PERMUTE_FUSION=false \
+ PR=bf16 EP_SIZE=8 ETP_SIZE=1 SEQLEN=4096 FORCE_BALANCE=true \
  NVTE_CK_USES_BWD_V3=1 \
  RUN_ENV=slurm MODEL_SIZE=8x22B bash examples/mixtral/train_mixtral_moe.sh; \
  echo $(date)"'
