@@ -84,6 +84,7 @@ EVAL_INTERVAL="${EVAL_INTERVAL:-5000}"
 SAVE_INTERVAL="${SAVE_INTERVAL:-5000}" 
 EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
+DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 
 if [ "$FSDP" -eq 1 ]; then
     if [ "$TP" -gt 1 ]; then
@@ -224,6 +225,12 @@ if [ "$MOCK_DATA" -eq 1 ]; then
 else
     echo Using data from $DATA_PATH
     DATA_ARGS="$DATA_ARGS --data-path $DATA_PATH"
+fi
+
+if [ "$NNODES" -gt 1 ]; then
+    # For multi-node runs DATA_CACHE_PATH should exist and should point to a common
+    # path accessible by all the nodes (for example, a NFS directory)"
+    DATA_ARGS="$DATA_ARGS --data-cache-path $DATA_CACHE_PATH"
 fi
 
 OUTPUT_ARGS="
