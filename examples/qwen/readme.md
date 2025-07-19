@@ -55,6 +55,10 @@ To run the training on a single node, go to Megatron-LM folder, use the followin
 TEE_OUTPUT=1 MBS=2 BS=64 TP=8 TE_FP8=0 SEQ_LENGTH=4096 bash examples/qwen/train_qwen2.sh
 ```
 
+To run QWEN MOE MODEL, use the following command:
+```bash
+TOKENIZER_MODEL=Qwen/Qwen1.5-MoE-A2.7B MBS=8 BS=64 TP=1 EP=4 SEQLEN=2048 TE_FP8=0 MODEL_SIZE=1.5 bash examples/qwen/train_qwen_moe.sh
+```
 
 ###    Multi-node Training
 To run training on multiple nodes, launch the Docker container on each node. Follow these steps:

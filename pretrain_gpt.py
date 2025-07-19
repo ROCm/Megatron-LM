@@ -292,6 +292,8 @@ def train_valid_test_datasets_provider(train_val_test_num_samples):
     return train_ds, valid_ds, test_ds
 
 
+from megatron.training.arguments import get_patch_args
+
 if __name__ == "__main__":
 
     # Temporary for transition to core datasets
@@ -302,5 +304,5 @@ if __name__ == "__main__":
         model_provider,
         ModelType.encoder_or_decoder,
         forward_step,
-        args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
+        extra_args_provider=get_patch_args,
     )
