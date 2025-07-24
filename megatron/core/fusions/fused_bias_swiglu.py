@@ -4,8 +4,6 @@ import torch
 import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
-from transformer_engine.pytorch.cpp_extensions import swiglu as te_swiglu
-from transformer_engine.pytorch.cpp_extensions import dswiglu as te_dswiglu
 import transformer_engine_torch as tex
 import os 
 
@@ -70,7 +68,7 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
         if use_te_swiglu:
-            return te_swiglu(input, None, tex.FP8FwdTensors.GEMM1_INPUT, tex.DType.kBFloat16)
+            return tex.swiglu(input, None, tex.FP8FwdTensors.GEMM1_INPUT, tex.DType.kBFloat16)
         else:
             return swiglu(input)
 
@@ -79,7 +77,7 @@ class SwiGLUFunction(torch.autograd.Function):
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
         if use_te_swiglu:
-            tmp = te_dswiglu(grad_output, input, tex.DType.kBFloat16)
+            tmp = tex.dswiglu(grad_output, input, tex.DType.kBFloat16)
         else:
             tmp = swiglu_back(grad_output, input)
 
