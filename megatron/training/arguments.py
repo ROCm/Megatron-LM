@@ -710,9 +710,9 @@ def validate_args(args, defaults={}):
     if args.num_experts is not None:
         assert args.spec is None, "Model Spec must be None when using MoEs"
     
-    if args.tensor_model_parallel_size > 1:
-            assert args.sequence_parallel, \
-                "When using MoE and tensor parallelism, sequence parallelism must be used."
+        if args.tensor_model_parallel_size > 1:
+                assert args.sequence_parallel, \
+                    "When using MoE and tensor parallelism, sequence parallelism must be used."
                 
     if args.moe_ffn_hidden_size is None:
         args.moe_ffn_hidden_size = args.ffn_hidden_size
