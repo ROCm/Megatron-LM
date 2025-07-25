@@ -12,10 +12,10 @@ NNODES=${SLURM_NNODES:-"1"}
 NODE_RANK=${RANK:-"0"}
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
-CHECKPOINT_PATH=$1
-TOKENIZER_MODEL=$2
-DATA_PATH=$3
+CHECKPOINT_PATH='./'
 
+TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
+TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Meta-Llama-3-8B}"
 DISTRIBUTED_ARGS=(
     --nproc_per_node $GPUS_PER_NODE
     --nnodes $NNODES
@@ -59,15 +59,16 @@ MOE_ARGS=(
 )
 
 DATA_ARGS=(
-    --tokenizer-type Llama2Tokenizer
+    --tokenizer-type ${TOKENIZER_TYPE}
     --tokenizer-model ${TOKENIZER_MODEL}
-    --data-path $DATA_PATH
+    --mock-data
     --split 99990,8,2
 )
 
+    #--data-path $DATA_PATH
 TRAINING_ARGS=(
-    --micro-batch-size 1
-    --global-batch-size 256
+    --micro-batch-size 3
+    --global-batch-size 264
     --lr 1e-4
     --train-iters 500000
     --lr-decay-iters 320000
@@ -80,15 +81,16 @@ TRAINING_ARGS=(
 )
 
 MODEL_PARALLEL_ARGS=(
-    --tensor-model-parallel-size 1
-    --pipeline-model-parallel-size 4
-    --expert-model-parallel-size 8
+    --tensor-model-parallel-size 4
+    --pipeline-model-parallel-size 1
+    --expert-model-parallel-size 1
     --use-distributed-optimizer
     --sequence-parallel
 )
 
 LOGGING_ARGS=(
     --log-interval 1 \
+    --log-throughput \
     --save-interval 10000 \
     --eval-interval 1000 \
     --eval-iters 10 \
