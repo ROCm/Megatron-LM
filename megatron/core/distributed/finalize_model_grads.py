@@ -18,6 +18,14 @@ from ..transformer.transformer_config import TransformerConfig
 from ..utils import get_attr_wrapped_model, get_model_config
 
 
+def _get_main_grad_attr(param: torch.nn.Parameter, use_custom_fsdp: bool = False):
+    if use_custom_fsdp:
+        return "fsdp_managed_main_grad"
+    if hasattr(param, "main_grad"):
+        return "main_grad"
+    return "grad"
+
+
 def _unshard_if_dtensor(tensor: Union[torch.Tensor, "DTensor"]) -> torch.Tensor:
     """
     Unshards the input tensor if it is a DTensor and otherwise returns the
@@ -118,7 +126,7 @@ def _allreduce_word_embedding_grads(model: List[torch.nn.Module], config: Transf
 
     if (
         parallel_state.is_rank_in_embedding_group(ignore_virtual=True)
-        and torch.distributed.get_world_size(parallel_state.get_embedding_group()) > 1
+        and parallel_state.get_embedding_group().size() > 1
     ):
         if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
             model_module = model[0]
@@ -127,12 +135,21 @@ def _allreduce_word_embedding_grads(model: List[torch.nn.Module], config: Transf
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
 
+        ddp_config = model_module.ddp_config
         model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
-        if model_module.share_embeddings_and_output_weights:
+
+        # If share_embeddings_and_output_weights is True, we need to maintain duplicated
+        # embedding weights in post processing stage. If use Multi-Token Prediction (MTP),
+        # we also need to maintain duplicated embedding weights in mtp process stage.
+        # So we need to allreduce grads of embedding in the embedding group in these cases.
+        if model_module.share_embeddings_and_output_weights or getattr(config, 'mtp_num_layers', 0):
             weight = model_module.shared_embedding_or_output_weight()
-            grad_attr = "main_grad" if hasattr(weight, "main_grad") else "grad"
+            grad_attr = _get_main_grad_attr(weight, ddp_config.use_custom_fsdp)
             orig_grad = getattr(weight, grad_attr)
             grad = _unshard_if_dtensor(orig_grad)
+            # When the embedding is frozen, the grad is None.
+            if grad is None:
+                return
             torch.distributed.all_reduce(grad, group=parallel_state.get_embedding_group())
             setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
 
@@ -144,7 +161,7 @@ def _allreduce_position_embedding_grads(model: List[torch.nn.Module], config: Tr
     """
     if (
         parallel_state.is_rank_in_position_embedding_group()
-        and torch.distributed.get_world_size(parallel_state.get_position_embedding_group()) > 1
+        and parallel_state.get_position_embedding_group().size() > 1
     ):
         if parallel_state.is_pipeline_first_stage(ignore_virtual=True):
             model_module = model[0]
@@ -153,10 +170,11 @@ def _allreduce_position_embedding_grads(model: List[torch.nn.Module], config: Tr
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
 
+        ddp_config = model_module.ddp_config
         model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
         assert hasattr(model_module, 'position_embeddings')
         weight = model_module.position_embeddings.weight
-        grad_attr = "main_grad" if hasattr(weight, "main_grad") else "grad"
+        grad_attr = _get_main_grad_attr(weight, ddp_config.use_custom_fsdp)
         orig_grad = getattr(weight, grad_attr)
         grad = _unshard_if_dtensor(orig_grad)
         torch.distributed.all_reduce(grad, group=parallel_state.get_position_embedding_group())
@@ -171,45 +189,6 @@ def _allreduce_embedding_grads(model: List[torch.nn.Module], config: Transformer
     _allreduce_position_embedding_grads(model, config)
 
 
-def _allreduce_layernorm_grads(model: List[torch.nn.Module], config: TransformerConfig):
-    """
-    All-reduce layernorm grads (for sequence parallelism).
-    """
-
-    # All-reduce layernorm parameters across model parallel nodes
-    # when sequence parallelism is used
-    if parallel_state.get_tensor_model_parallel_world_size() > 1 and (
-        config.sequence_parallel or config.qk_layernorm
-    ):
-        params = []
-        grads = []
-        for model_chunk in model:
-            for name, param in get_attr_wrapped_model(model_chunk, 'named_parameters')():
-                if (
-                    param.requires_grad
-                    and getattr(param, 'sequence_parallel', False)
-                    or 'q_layernorm' in name
-                    or 'k_layernorm' in name
-                ):
-                    params.append(param)
-                    grad_attr = "main_grad" if hasattr(param, "main_grad") else "grad"
-                    grad = getattr(param, grad_attr)
-                    grad = _unshard_if_dtensor(grad)
-                    grads.append(grad.data)
-        if grads:
-            coalesced = _flatten_dense_tensors(grads)
-            torch.distributed.all_reduce(
-                coalesced, group=parallel_state.get_tensor_model_parallel_group()
-            )
-            for param, buf, synced in zip(
-                params, grads, _unflatten_dense_tensors(coalesced, grads)
-            ):
-                buf.copy_(synced)
-                grad_attr = "main_grad" if hasattr(param, "main_grad") else "grad"
-                orig_grad = getattr(param, grad_attr)
-                setattr(param, grad_attr, _reshard_if_dtensor(buf, orig_grad))
-
-
 def _update_router_expert_bias(model: List[torch.nn.Module], config: TransformerConfig):
     """
     Update the expert bias of the router for a global batch.
@@ -222,7 +201,6 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
             if hasattr(module, 'expert_bias'):
                 tokens_per_expert_list.append(module.local_tokens_per_expert)
                 expert_bias_list.append(module.expert_bias)
-
     # For hybrid models with both MoE and Dense layers, this list can be empty.
     if len(expert_bias_list) == 0:
         return
@@ -237,6 +215,70 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
     ):
         tokens_per_expert.zero_()
         expert_bias.copy_(updated_expert_bias)
+
+
+def _allreduce_non_tensor_model_parallel_grads(
+    model: List[torch.nn.Module], config: TransformerConfig
+):
+    """
+    All-reduce both layernorm grads (for sequence parallelism) and
+    gradients from modules with average_gradients_across_tp_domain=True
+    across tensor-model-parallel ranks.
+    """
+    if parallel_state.get_tensor_model_parallel_world_size() <= 1:
+        return
+
+    params_sum = []
+    grads_sum = []
+    params_avg = []
+    grads_avg = []
+
+    for model_chunk in model:
+        ddp_config = model_chunk.ddp_config
+        for name, param in get_attr_wrapped_model(model_chunk, 'named_parameters')():
+            if param.requires_grad:
+                # Check if this param needs average reduction (average_gradients_across_tp_domain)
+                if getattr(param, "average_gradients_across_tp_domain", False):
+                    params_avg.append(param)
+                    grad_attr = _get_main_grad_attr(param, ddp_config.use_custom_fsdp)
+                    grad = getattr(param, grad_attr)
+                    grad = _unshard_if_dtensor(grad)
+                    grads_avg.append(grad.data)
+                # Check if this param needs sum reduction (sequence parallel or qk_layernorm)
+                elif (config.sequence_parallel and getattr(param, "sequence_parallel", False)) or (
+                    config.qk_layernorm and ("q_layernorm" in name or "k_layernorm" in name)
+                ):
+                    params_sum.append(param)
+                    grad_attr = _get_main_grad_attr(param, ddp_config.use_custom_fsdp)
+                    grad = getattr(param, grad_attr)
+                    grad = _unshard_if_dtensor(grad)
+                    grads_sum.append(grad.data)
+
+    # Loop grads and perform correct all-reduce
+    for params, grads, all_reduce_op in zip(
+        [params_sum, params_avg],
+        [grads_sum, grads_avg],
+        [torch.distributed.ReduceOp.SUM, torch.distributed.ReduceOp.AVG],
+    ):
+        if grads:
+            coalesced = _flatten_dense_tensors(grads)
+            torch.distributed.all_reduce(
+                coalesced, op=all_reduce_op, group=parallel_state.get_tensor_model_parallel_group()
+            )
+            for param, buf, synced in zip(
+                params, grads, _unflatten_dense_tensors(coalesced, grads)
+            ):
+                buf.copy_(synced)
+                grad_attr = _get_main_grad_attr(param, ddp_config.use_custom_fsdp)
+                orig_grad = getattr(param, grad_attr)
+                setattr(param, grad_attr, _reshard_if_dtensor(buf, orig_grad))
+
+
+"""
+This is an alias to _allreduce_non_tensor_model_parallel_grads that we must
+maintain for legacy tests. We can remove this proxy in mcore 0.14.
+"""
+_allreduce_layernorm_grads = _allreduce_non_tensor_model_parallel_grads
 
 
 def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torch.Tensor] = None):
@@ -265,14 +307,14 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
     if config.timers is not None:
         config.timers('conditional-embedder-grads-all-reduce').stop()
 
-    # All-reduce layer-norm grads (for sequence parallelism).
+    # All-reduce layer-norm grads (for sequence parallelism) and non-tensor parallel modules.
     if config.timers is not None:
-        config.timers('layernorm-grads-all-reduce', log_level=1).start(
+        config.timers('non-tensor-parallel-grads-all-reduce', log_level=1).start(
             barrier=config.barrier_with_L1_time
         )
-    _allreduce_layernorm_grads(model, config)
+    _allreduce_non_tensor_model_parallel_grads(model, config)
     if config.timers is not None:
-        config.timers('layernorm-grads-all-reduce').stop()
+        config.timers('non-tensor-parallel-grads-all-reduce').stop()
 
     # All-reduce embedding grads (for pipeline parallelism).
     if config.timers is not None:
@@ -310,7 +352,9 @@ def finalize_model_grads(model: List[torch.nn.Module], num_tokens: Optional[torc
         assert all(x.item() == num_tokens_list[0] for x in num_tokens_list)
 
         # all-reduce across DP ranks.
-        torch.distributed.all_reduce(num_tokens, group=parallel_state.get_data_parallel_group())
+        torch.distributed.all_reduce(
+            num_tokens, group=parallel_state.get_data_parallel_group(with_context_parallel=True)
+        )
         for model_chunk in model:
             if num_tokens > 0:
                 scaling = 1.0 / num_tokens

@@ -15,22 +15,49 @@
 
 import math
 from dataclasses import dataclass
-from typing import Union
+from typing import NoReturn, Optional, Union
 
 import torch
 import torch.nn.functional as F
 
-from megatron.core import parallel_state
+from megatron.core import parallel_state, tensor_parallel
 from megatron.core.models.common.embeddings import (
+    RotaryEmbedding,
     YarnRotaryEmbedding,
     _yarn_get_mscale,
     apply_rotary_pos_emb,
 )
-from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
+from megatron.core.process_groups_config import ModelCommProcessGroups
+from megatron.core.tensor_parallel.layers import ColumnParallelLinear
+from megatron.core.tensor_parallel.mappings import (
+    gather_from_sequence_parallel_region,
+    gather_from_tensor_model_parallel_region,
+    scatter_to_sequence_parallel_region,
+)
 from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import MLATransformerConfig
+from megatron.core.utils import deprecate_inference_params
+
+try:
+    from megatron.core.fusions.fused_mla_yarn_rope_apply import (
+        fused_apply_mla_rope_for_kv,
+        fused_apply_mla_rope_for_q,
+    )
+except:
+    fused_apply_mla_rope_for_kv = None
+    fused_apply_mla_rope_for_q = None
+
+
+try:
+    from megatron.core.extensions.transformer_engine import TEColumnParallelLinear, TELinear
+    from megatron.core.post_training.modelopt.layers import Linear
+
+    HAVE_TE = True
+except ImportError:
+    TEColumnParallelLinear, TELinear, Linear = None, None, None
+    HAVE_TE = False
 
 
 @dataclass
@@ -96,9 +123,9 @@ class MultiLatentAttention(Attention):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
-        cp_comm_type: str = None,
+        cp_comm_type: Optional[str] = None,
+        model_comm_pgs: ModelCommProcessGroups = None,
     ) -> None:
-
 
         super().__init__(
             config=config,
@@ -106,33 +133,52 @@ class MultiLatentAttention(Attention):
             layer_number=layer_number,
             attention_type=attention_type,
             attn_mask_type=attn_mask_type,
+            model_comm_pgs=model_comm_pgs,
         )
 
         self.query_projection_size = self.config.v_head_dim * self.config.num_attention_heads
 
         self.q_head_dim = self.config.qk_head_dim + self.config.qk_pos_emb_head_dim
 
-        mscale = _yarn_get_mscale(self.config.rotary_scaling_factor, self.config.mscale)
+        # Overwrite the base class kv shape to support MLA inference
+        self.key_hidden_size = self.q_head_dim
+        self.val_hidden_size = self.config.v_head_dim
+
+        self.recompute_up_proj = (
+            self.config.recompute_granularity == 'selective'
+            and "mla_up_proj" in self.config.recompute_modules
+        )
+        self.qkv_up_checkpoint = None
+
+        mscale = _yarn_get_mscale(self.config.rotary_scaling_factor, self.config.mscale_all_dim)
         self.softmax_scale = mscale * mscale / math.sqrt(self.q_head_dim)
 
-        self.rotary_pos_emb = YarnRotaryEmbedding(
-            self.config.qk_pos_emb_head_dim,
-            rotary_base=self.config.rotary_base,
-            scaling_factor=self.config.rotary_scaling_factor,
-            original_max_position_embeddings=self.config.max_position_embeddings,
-            beta_fast=self.config.beta_fast,
-            beta_slow=self.config.beta_slow,
-            mscale=self.config.mscale,
-            mscale_all_dim=self.config.mscale_all_dim,
-        )
-        # Add kv channels as kwargs for DotProductAttention 
-        if self.config.fused_padded_mla_attention:
-            assert self.q_head_dim > self.config.v_head_dim
-            kwargs = {"k_channels": self.q_head_dim,
-                    "v_channels": self.q_head_dim}
+        if self.config.rope_type == "rope":
+            self.rotary_pos_emb = RotaryEmbedding(
+                self.config.qk_pos_emb_head_dim,
+                rotary_percent=self.config.rotary_percent,
+                rotary_base=self.config.rotary_base,
+                cp_group=self.model_comm_pgs.cp,
+            )
+        elif self.config.rope_type == "yarn":
+
+            self.rotary_pos_emb = YarnRotaryEmbedding(
+                self.config.qk_pos_emb_head_dim,
+                rotary_base=self.config.rotary_base,
+                scaling_factor=self.config.rotary_scaling_factor,
+                original_max_position_embeddings=self.config.original_max_position_embeddings,
+                beta_fast=self.config.beta_fast,
+                beta_slow=self.config.beta_slow,
+                mscale=self.config.mscale,
+                mscale_all_dim=self.config.mscale_all_dim,
+                cp_group=self.model_comm_pgs.cp,
+            )
         else:
-            kwargs = {"k_channels": self.q_head_dim,
-                    "v_channels": self.config.v_head_dim}
+            raise ValueError(
+                f"Unsupported RoPE type: {self.config.rope_type}, supported types are "
+                "'rope' and 'yarn'"
+            )
+
         self.core_attention = build_module(
             submodules.core_attention,
             config=self.config,
@@ -141,8 +187,7 @@ class MultiLatentAttention(Attention):
             attention_type=self.attention_type,
             softmax_scale=self.softmax_scale,
             cp_comm_type=cp_comm_type,
-            **kwargs
-            
+            model_comm_pgs=self.model_comm_pgs,
         )
 
         self.attention_bias_seq_length = None
@@ -167,13 +212,16 @@ class MultiLatentAttention(Attention):
         hidden_states,
         attention_mask,
         key_value_states=None,
-        inference_params=None,
+        inference_context=None,
         rotary_pos_emb=None,
         rotary_pos_cos=None,
         rotary_pos_sin=None,
         attention_bias=None,
         packed_seq_params=None,
         position_ids=None,
+        sequence_len_offset=None,
+        *,
+        inference_params=None,
     ):
         """Forward pass for multi-latent attention"""
         assert rotary_pos_emb is None, "Rotary position embeddings should not be passed into MLA."
@@ -183,6 +231,8 @@ class MultiLatentAttention(Attention):
         ), "MLA does not support Flash Decoding"
 
         # hidden_states: [sq, b, h]
+
+        inference_context = deprecate_inference_params(inference_context, inference_params)
 
         # =====================
         # Query, Key, and Value
@@ -195,20 +245,21 @@ class MultiLatentAttention(Attention):
             key_value_states,
             position_ids,
             packed_seq_params,
-            inference_params=inference_params,
+            inference_context=inference_context,
         )
 
         # ===================================================
         # Adjust key, value for inference
         # ===================================================
         # rotary_pos_emb = None
-        query, key, value, _, attn_mask_type = self._adjust_key_value_for_inference(
-            inference_params, query, key, value, rotary_pos_emb=None
+        query, key, value, _, attn_mask_type, _ = self._adjust_key_value_for_inference(
+            inference_context, query, key, value, rotary_pos_emb=None
         )
-        
-        seq_length = query.shape[0]
-        batch_size = query.shape[1]
-        num_heads = query.shape[2]
+
+        # TODO: Currently, TE can only accept contiguous tensors for MLA
+        query = query.contiguous()
+        key = key.contiguous()
+        value = value.contiguous()
 
         # ==================================
         # core attention computation
@@ -244,12 +295,17 @@ class MultiLatentAttention(Attention):
             core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[..., :self.config.v_head_dim]
             core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
 
-        if packed_seq_params is not None:
+        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
             # (t, np, hn) -> (t, b=1, h=np*hn)
             # t is the pack size = sum (sq_i)
             # note that batch is a dummy dimension in the packed case
             core_attn_out = core_attn_out.reshape(core_attn_out.size(0), 1, -1)
+
+        if self.recompute_up_proj:
+            assert self.qkv_up_checkpoint is not None
+            self.qkv_up_checkpoint.discard_output_and_register_recompute(core_attn_out)
+            self.qkv_up_checkpoint = None
 
         # =================
         # Output. [sq, b, h]
@@ -272,7 +328,8 @@ class MLASelfAttention(MultiLatentAttention):
         submodules: MLASelfAttentionSubmodules,
         layer_number: int,
         attn_mask_type=AttnMaskType.padding,
-        cp_comm_type: str = None,
+        cp_comm_type: Optional[str] = None,
+        model_comm_pgs: ModelCommProcessGroups = None,
     ):
         super().__init__(
             config=config,
@@ -280,6 +337,8 @@ class MLASelfAttention(MultiLatentAttention):
             layer_number=layer_number,
             attn_mask_type=attn_mask_type,
             attention_type="self",
+            cp_comm_type=cp_comm_type,
+            model_comm_pgs=model_comm_pgs,
         )
 
         if self.config.q_lora_rank is None:
@@ -294,10 +353,22 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                tp_comm_buffer_name='q_proj',
             )
 
         else:
-            # W_DQ, [HiddenSize, q_lora_rank] for down projection 
+            q_down_proj_kwargs = {}
+            if submodules.linear_q_down_proj in [TELinear]:
+                q_down_proj_kwargs['parallel_mode'] = 'duplicated'
+            elif submodules.linear_q_down_proj in [
+                Linear,
+                TEColumnParallelLinear,
+                ColumnParallelLinear,
+            ]:
+                q_down_proj_kwargs['gather_output'] = False
+            else:
+                raise ValueError(f"Unsupported linear_q_down_proj: {submodules.linear_q_down_proj}")
+
             self.linear_q_down_proj = build_module(
                 submodules.linear_q_down_proj,
                 self.config.hidden_size,
@@ -307,7 +378,10 @@ class MLASelfAttention(MultiLatentAttention):
                 init_method=self.config.init_method,
                 bias=False,
                 skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name='q_down_proj',
                 skip_weight_param_allocation=False,
+                **q_down_proj_kwargs,
             )
             # W_UQ [q_lora_rank, NumAttentionHeads * q_head_dim] for up projection
             self.linear_q_up_proj = build_module(
@@ -320,8 +394,21 @@ class MLASelfAttention(MultiLatentAttention):
                 bias=False,
                 skip_bias_add=False,
                 is_expert=False,
+                tp_comm_buffer_name='q_up_proj',
             )
-        # W_DKV [HiddenSize, kv_lora_rank + qk_pos_emb_head_dim] for down projection
+
+        kv_down_proj_kwargs = {}
+        if submodules.linear_kv_down_proj in [TELinear]:
+            kv_down_proj_kwargs['parallel_mode'] = 'duplicated'
+        elif submodules.linear_kv_down_proj in [
+            Linear,
+            TEColumnParallelLinear,
+            ColumnParallelLinear,
+        ]:
+            kv_down_proj_kwargs['gather_output'] = False
+        else:
+            raise ValueError(f"Unsupported linear_kv_down_proj: {submodules.linear_kv_down_proj}")
+
         self.linear_kv_down_proj = build_module(
             submodules.linear_kv_down_proj,
             self.config.hidden_size,
@@ -331,7 +418,10 @@ class MLASelfAttention(MultiLatentAttention):
             init_method=self.config.init_method,
             bias=False,
             skip_bias_add=False,
+            is_expert=False,
+            tp_comm_buffer_name='kv_down_proj',
             skip_weight_param_allocation=False,
+            **kv_down_proj_kwargs,
         )
         # W_UKV [kv_lora_rank, NumAttentionHeads * (qk_head_dim + v_head_dim)] for up projection
         self.linear_kv_up_proj = build_module(
@@ -344,6 +434,7 @@ class MLASelfAttention(MultiLatentAttention):
             bias=False,
             skip_bias_add=False,
             is_expert=False,
+            tp_comm_buffer_name='kv_up_proj',
         )
 
         if self.config.q_lora_rank is not None:
@@ -367,6 +458,8 @@ class MLASelfAttention(MultiLatentAttention):
         key_value_states=None,
         position_ids=None,
         packed_seq_params=None,
+        inference_context=None,
+        *,
         inference_params=None,
     ):
         """
@@ -377,93 +470,265 @@ class MLASelfAttention(MultiLatentAttention):
         # Note hidden_size != n * head_dim for MLA 
         assert (
             hidden_states.ndim == 3
-        ), f"hidden_states should be 3D, [s, b, hidden_size], got {hidden_states.ndim}D"
+        ), f"hidden_states should be 3D, [s, b, n*h], got {hidden_states.ndim}D"
 
-        if self.config.q_lora_rank is not None:
-            q_compressed, _ = self.linear_q_down_proj(hidden_states) # [s, b, hidden_size] * [hidden_size, q_lora_rank] -> [s, b, q_lora_rank]
-            q_compressed = self.q_layernorm(q_compressed) # [s, b, q_lora_rank]
-            q, _ = self.linear_q_up_proj(q_compressed) # [s, b, q_lora_rank] * [q_lora_rank, n * q_head_dim] -> [s, b, n * q_head_dim]
-            # Note that self.q_head_dim = self.config.qk_head_dim + self.config.qk_pos_emb_head_dim
-        else:
-            # hidden_states:[s, b, 2048], q: [s, b, n * 192]
-            q, _ = self.linear_q_proj(hidden_states)
-        
-        q_len, bsz, _ = q.size()
-        # q: [s, b, n, 192]
-        q = q.view(q_len, bsz, self.num_attention_heads_per_partition, self.q_head_dim) 
+        inference_context = deprecate_inference_params(inference_context, inference_params)
 
-        # q: [s, b, n, 128], q_pos_emb: [s, b, n, 64]
-        q_no_pe, q_pos_emb = torch.split(
-            q, [self.config.qk_head_dim, self.config.qk_pos_emb_head_dim], dim=-1
+        # =========================================
+        # Prepare RoPE and seqlen related params
+        # =========================================
+        rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
+            inference_context, None, hidden_states, self.config, packed_seq_params
         )
-
-        # kv_combined: [s, b, 576]
-        kv_combined, _ = self.linear_kv_down_proj(hidden_states) # [s, b, hidden_size] * [hidden_size, kv_lora_rank + qk_head_dim] -> [s, b, 576]
-
-        # kv_compressed:[s, b, 512], k_pos_emb: [s, b, 64]
-        kv_compressed, k_pos_emb = torch.split(
-            kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
-        )
-
-        # Gather the input from sequence parallel region
-        if parallel_state.get_tensor_model_parallel_world_size() > 1:
-            k_pos_emb = gather_from_sequence_parallel_region(k_pos_emb)
-
-        # kv: [s, b, 2048]
-        kv, _ = self.linear_kv_up_proj(self.kv_layernorm(kv_compressed)) # [s, b, kv_lora_rank] * [kv_lora_rank, n * (qk_head_dim + v_head_dim)] -> [s, b, n * (qk_head_dim + v_head_dim)]
-
-        # kv: [s, b, n, 256]
-        kv = kv.view(
-            q_len,
-            bsz,
-            self.num_attention_heads_per_partition,
-            self.config.qk_head_dim + self.config.v_head_dim,
-        )
-
-        # k_no_pe: [s, b, n, 128], value: [s, b, n, 128]
-        k_no_pe, value = torch.split(kv, [self.config.qk_head_dim, self.config.v_head_dim], dim=-1)
 
         # rotary_pos_emb:[s, b, 1, 64]
-        rotary_pos_emb = self.rotary_pos_emb(max_seq_len=self.config.max_position_embeddings)
-
-        if len(rotary_pos_emb) == 2:
-            mscale = rotary_pos_emb[1]
-            rotary_pos_emb = rotary_pos_emb[0]
+        mscale = 1.0
+        rotary_pos_cos = None
+        rotary_pos_sin = None
+        packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == 'thd'
+        if self.config.rope_type == "rope":
+            rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len, packed_seq=packed_seq)
         else:
-            mscale = 1.0
-
-        if inference_params is not None:
-            # add offset to the sequence start for inference
-            sequence_start = inference_params.sequence_len_offset
-            sequence_end = sequence_start + q_len
-            rotary_pos_emb = rotary_pos_emb[sequence_start:sequence_end]
-
-        # [s, b, 64] -> [s, b, 1, 64]
-        k_pos_emb = torch.unsqueeze(k_pos_emb, 2)
+            if self.config.apply_rope_fusion:
+                rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cached_cos_sin(
+                    rotary_seq_len, dtype=hidden_states.dtype, packed_seq=packed_seq
+                )
+                rotary_pos_emb = None
+                assert inference_context is None, "Inference with MLA RoPE fusion is not supported"
+                assert (
+                    fused_apply_mla_rope_for_q is not None
+                    and fused_apply_mla_rope_for_kv is not None
+                ), "Fused MLA RoPE apply is not imported successfully"
+            else:
+                rotary_pos_emb, mscale = self.rotary_pos_emb(rotary_seq_len, packed_seq=packed_seq)
 
         if packed_seq_params is not None:
-            cu_seqlens_q = packed_seq_params.cu_seqlens_q
-            cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
+            if packed_seq_params.cu_seqlens_q_padded is not None:
+                cu_seqlens_q = packed_seq_params.cu_seqlens_q_padded
+            else:
+                cu_seqlens_q = packed_seq_params.cu_seqlens_q
+            if packed_seq_params.cu_seqlens_kv_padded is not None:
+                cu_seqlens_kv = packed_seq_params.cu_seqlens_kv_padded
+            else:
+                cu_seqlens_kv = packed_seq_params.cu_seqlens_kv
         else:
             cu_seqlens_q = cu_seqlens_kv = None
 
-        # q_pos_emb: [s, b, n, 64], k_pos_emb:[s, b, 1, 64]
-        q_pos_emb = apply_rotary_pos_emb(
-            q_pos_emb, rotary_pos_emb, config=self.config, cu_seqlens=cu_seqlens_q, mscale=mscale
-        )
-        k_pos_emb = apply_rotary_pos_emb(
-            k_pos_emb, rotary_pos_emb, config=self.config, cu_seqlens=cu_seqlens_kv, mscale=mscale
-        )
+        # =========================================
+        # QKV down projection and layernorm
+        # =========================================
+        if self.config.q_lora_rank is not None:
+            # if linear_q_down_proj is ColumnParallelLinear:
+            #     q_compressed: [s, b, q_lora_rank / TP]
+            # elif linear_q_down_proj is Linear:
+            #     q_compressed: [s / TP, b, q_lora_rank]
+            q_compressed, _ = self.linear_q_down_proj(hidden_states)
 
-        # query: [s, b, n, 192]
-        query = torch.cat([q_no_pe, q_pos_emb], dim=-1)
+            # When output is sharded (ColumnParallelLinear), two things are needed to be
+            # identical to a normal Linear.
+            #   1. Manually gather output to restore output dim q_lora_rank;
+            #   2. Scatter sequence back to s / TP if sequence-parallel since it was
+            #      gathered by ColumnParallelLinear.
+            if q_compressed.size(-1) != self.config.q_lora_rank:
+                q_compressed = gather_from_tensor_model_parallel_region(q_compressed)
+                if self.config.sequence_parallel:
+                    q_compressed = scatter_to_sequence_parallel_region(q_compressed)
+        else:
+            q_compressed = hidden_states
 
-        # key: [s, b, n, 192]
-        k_pos_emb = k_pos_emb.expand(-1, -1, self.num_attention_heads_per_partition, -1)
-        key = torch.cat([k_no_pe, k_pos_emb], dim=-1)
+        # if linear_kv_down_proj is ColumnParallelLinear:
+        #     kv_combined: [s, b, (kv_lora_rank + qk_pos_emb_head_dim) / TP]
+        # elif linear_kv_down_proj is Linear:
+        #     kv_combined: [s / TP, b, (kv_lora_rank + qk_pos_emb_head_dim)]
+        kv_combined, _ = self.linear_kv_down_proj(hidden_states)
+        if kv_combined.size(-1) != self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim:
+            # kv_combined: [s, b, (kv_lora_rank + qk_pos_emb_head_dim)]
+            kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
+            # kv_compressed:[s, b, kv_lora_rank], k_pos_emb: [s, b, qk_pos_emb_head_dim]
+            kv_compressed, k_pos_emb = torch.split(
+                kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
+            )
+            if self.config.sequence_parallel:
+                # kv_compressed:[s / TP, b, kv_lora_rank]
+                kv_compressed = scatter_to_sequence_parallel_region(kv_compressed)
+        else:
+            # kv_compressed:[s / TP, b, kv_lora_rank], k_pos_emb: [s / TP, b, qk_pos_emb_head_dim]
+            kv_compressed, k_pos_emb = torch.split(
+                kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
+            )
+            if (
+                parallel_state.get_tensor_model_parallel_world_size() > 1
+                and self.config.sequence_parallel
+            ):
+                # k_pos_emb: [s, b, qk_pos_emb_head_dim]
+                k_pos_emb = gather_from_sequence_parallel_region(k_pos_emb)
 
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
+        if packed_seq_params is not None:
+            # If sequence packing, TE expect [t, h, d] shaped qkv input.
+            # In Megatron-Core, the qkv shape is [t, 1, h, d].
+            # So we need to reshape qkv from [t, 1, h, d] to [t, h, d].
+            q_compressed = q_compressed.squeeze(1)
+            kv_compressed = kv_compressed.squeeze(1)
+            k_pos_emb = k_pos_emb.squeeze(1)
+
+        # =========================================
+        # QKV up projection and RoPE apply
+        # =========================================
+        def qkv_up_proj_and_rope_apply(q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb):
+            """
+            Apply the up projection and RoPE to the query and key.
+            When sequence packing enabled, the input tensors adopt a packed shape of [t, ...];
+            otherwise, they maintain the unpacked shape [s, b, ...]. In subsequent code comments,
+            we uniformly use [num_tokens, ...] to denote [s, b, ...] or [t, ...] for two cases.
+            """
+            if self.config.q_lora_rank is not None:
+                # q_compressed: [num_tokens, q_lora_rank]
+                # q: [num_tokens, n * (qk_head_dim + qk_pos_emb_head_dim)]
+                q_compressed = self.q_layernorm(q_compressed)
+                q, _ = self.linear_q_up_proj(q_compressed)
+            else:
+                # q_compressed: [num_tokens, hidden_size]
+                # q: [num_tokens, n * (qk_head_dim + qk_pos_emb_head_dim)]
+                q, _ = self.linear_q_proj(q_compressed)
+
+            # q: [num_tokens, n, q_head_dim]
+            q = q.view(*q.size()[:-1], self.num_attention_heads_per_partition, self.q_head_dim)
+
+            kv_compressed = self.kv_layernorm(kv_compressed)
+            # kv: [num_tokens, n * (qk_head_dim + v_head_dim)]
+            kv, _ = self.linear_kv_up_proj(kv_compressed)
+
+            # kv: [num_tokens, n, (qk_head_dim + v_head_dim)]
+            kv = kv.view(
+                *kv.size()[:-1],
+                self.num_attention_heads_per_partition,
+                self.config.qk_head_dim + self.config.v_head_dim,
+            )
+
+            # [num_tokens, qk_pos_emb_head_dim] -> [num_tokens, 1, qk_pos_emb_head_dim]
+            k_pos_emb = torch.unsqueeze(k_pos_emb, -2)
+
+            if self.config.apply_rope_fusion:
+                cp_rank = self.model_comm_pgs.cp.rank()
+                cp_size = self.model_comm_pgs.cp.size()
+                query = fused_apply_mla_rope_for_q(
+                    q,
+                    rotary_pos_cos,
+                    rotary_pos_sin,
+                    self.config.qk_head_dim,
+                    self.config.qk_pos_emb_head_dim,
+                    cu_seqlens_q,
+                    cp_rank,
+                    cp_size,
+                )
+                key, value = fused_apply_mla_rope_for_kv(
+                    kv,
+                    k_pos_emb,
+                    rotary_pos_cos,
+                    rotary_pos_sin,
+                    self.config.qk_pos_emb_head_dim,
+                    self.config.qk_head_dim,
+                    self.config.v_head_dim,
+                    cu_seqlens_kv,
+                    cp_rank,
+                    cp_size,
+                )
+            else:
+                q_len = q.size()[0]
+                if inference_context is not None:
+                    # add offset to the sequence start for inference
+                    sequence_start = inference_context.sequence_len_offset
+                    sequence_end = sequence_start + q_len
+                    rotary_pos_emb = rotary_pos_emb[sequence_start:sequence_end]
+                elif packed_seq_params is None or self.config.context_parallel_size == 1:
+                    # Shorten rotary_pos_emb to the sequence length when inference_params
+                    # is not provided. This makes sure we can run forward directly with
+                    # any sequence length. During training, the sequence length is always
+                    # the full rotary_pos_emb length, except for sequence packing + CP.
+                    # When sequence packing and context parallel are both enabled, the
+                    # position embedding will not split rotary_pos_emb, so it may exceed
+                    # the sequence length on this CP rank, but we need the full rotary_pos_emb
+                    # to cover the full sequence, so we do not shorten it here.
+                    rotary_pos_emb = rotary_pos_emb[0:q_len]
+
+                # q_no_pe: [num_tokens, n, qk_head_dim]
+                # q_pos_emb: [num_tokens, n, qk_pos_emb_head_dim]
+                q_no_pe, q_pos_emb = torch.split(
+                    q, [self.config.qk_head_dim, self.config.qk_pos_emb_head_dim], dim=-1
+                )
+
+                # k_no_pe: [num_tokens, n, qk_head_dim]
+                # value: [num_tokens, n, v_head_dim]
+                k_no_pe, value = torch.split(
+                    kv, [self.config.qk_head_dim, self.config.v_head_dim], dim=-1
+                )
+
+                # q_pos_emb: [num_tokens, n, qk_pos_emb_head_dim]
+                q_pos_emb = apply_rotary_pos_emb(
+                    q_pos_emb,
+                    rotary_pos_emb,
+                    config=self.config,
+                    cu_seqlens=cu_seqlens_q,
+                    mscale=mscale,
+                    cp_group=self.model_comm_pgs.cp,
+                )
+                # k_pos_emb:[num_tokens, 1, qk_pos_emb_head_dim]
+                k_pos_emb = apply_rotary_pos_emb(
+                    k_pos_emb,
+                    rotary_pos_emb,
+                    config=self.config,
+                    cu_seqlens=cu_seqlens_kv,
+                    mscale=mscale,
+                    cp_group=self.model_comm_pgs.cp,
+                )
+
+                # query: [num_tokens, n, (qk_head_dim + v_head_dim)]
+                query = torch.cat([q_no_pe, q_pos_emb], dim=-1)
+
+                # key: [num_tokens, n, (qk_head_dim + v_head_dim)]
+                if k_pos_emb.ndim == 4:
+                    k_pos_emb = k_pos_emb.expand(-1, -1, self.num_attention_heads_per_partition, -1)
+                else:
+                    assert k_pos_emb.ndim == 3
+                    k_pos_emb = k_pos_emb.expand(-1, self.num_attention_heads_per_partition, -1)
+                key = torch.cat([k_no_pe, k_pos_emb], dim=-1)
+
+            query = query.contiguous()
+            key = key.contiguous()
+            value = value.contiguous()
+            return query, key, value
+
+        if self.recompute_up_proj:
+            self.qkv_up_checkpoint = tensor_parallel.CheckpointWithoutOutput(fp8=self.config.fp8)
+            query, key, value = self.qkv_up_checkpoint.checkpoint(
+                qkv_up_proj_and_rope_apply, q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
+            )
+        else:
+            query, key, value = qkv_up_proj_and_rope_apply(
+                q_compressed, kv_compressed, k_pos_emb, rotary_pos_emb
+            )
 
         return query, key, value
+
+    def backward_dw(self) -> NoReturn:
+        """Execute weight gradient computation"""
+        self._backward_kv_proj()
+        self._backward_q_proj()
+        self._backward_output_proj()
+
+    def _backward_kv_proj(self):
+        """Computes weight gradients of KV projection layers"""
+        self.linear_kv_up_proj.backward_dw()
+        self.linear_kv_down_proj.backward_dw()
+
+    def _backward_q_proj(self):
+        """Computes weight gradients of Q projection layers"""
+        if self.config.q_lora_rank is None:
+            self.linear_q_proj.backward_dw()
+        else:
+            self.linear_q_down_proj.backward_dw()
+            self.linear_q_up_proj.backward_dw()
+
+    def _backward_output_proj(self):
+        """Computes weight gradients of output projection layer"""
+        self.linear_proj.backward_dw()
