@@ -116,11 +116,11 @@ def build_tokenizer(args, **kwargs):
         tokenizer = _NullMultimodalTokenizer(args.vocab_size)
     
     elif args.tokenizer_type == 'DeepSeekV2Tokenizer':
-        tokenizer = _DeepSeekV2Tokenizer(args.tokenizer_model,args.extra_vocab_size)
+        tokenizer = _DeepSeekV2Tokenizer(args.tokenizer_model,getattr(args, 'extra_vocab_size',0))
         args.padded_vocab_size = tokenizer.vocab_size
 
     elif args.tokenizer_type == 'DeepSeekV3Tokenizer':
-        tokenizer = _DeepSeekV3Tokenizer(args.tokenizer_model,args.extra_vocab_size)
+        tokenizer = _DeepSeekV3Tokenizer(args.tokenizer_model, getattr(args, 'extra_vocab_size',0))
         args.padded_vocab_size = tokenizer.vocab_size
         
     else:

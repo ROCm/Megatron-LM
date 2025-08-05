@@ -186,12 +186,11 @@ class MultiLatentAttention(Attention):
             attn_mask_type=self.attn_mask_type,
             attention_type=self.attention_type,
             softmax_scale=self.softmax_scale,
+            k_channels=self.q_head_dim,
+            v_channels=self.config.v_head_dim,
             cp_comm_type=cp_comm_type,
             model_comm_pgs=self.model_comm_pgs,
         )
-
-        self.attention_bias_seq_length = None
-        self.attention_bias = None
 
         # Output.
         self.linear_proj = build_module(
@@ -265,16 +264,6 @@ class MultiLatentAttention(Attention):
         # core attention computation
         # ==================================
         # Need corresponding TE change
-        if self.config.fused_padded_mla_attention:
-            padded_dim = self.q_head_dim - self.config.v_head_dim
-            # pad value to q_head_dim
-            value = F.pad(value, (0, padded_dim))
-        
-        if self.attention_bias_seq_length != seq_length and self.config.attention_sink_k > 0:
-            with torch.no_grad():
-                self.attention_bias = get_attention_sink_bias(batch_size, num_heads, seq_length,
-                    self.config.window_size, self.config.attention_sink_k, query.dtype)
-            self.attention_bias_seq_length = seq_length
         
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
@@ -288,12 +277,7 @@ class MultiLatentAttention(Attention):
                 attention_mask,
                 packed_seq_params=packed_seq_params,
                 attn_mask_type=attn_mask_type,
-                attention_bias=self.attention_bias,
             )
-        if self.config.fused_padded_mla_attention:
-            # [s, b, n * dim] -> [s, b, n, dim=192] -> [s, b, n, dim=128] -> [s, b, n*dim]
-            core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[..., :self.config.v_head_dim]
-            core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
@@ -342,7 +326,7 @@ class MLASelfAttention(MultiLatentAttention):
         )
 
         if self.config.q_lora_rank is None:
-            # Not projectiing query (not MLA)
+            # Not projectiing query
             self.linear_q_proj = build_module(
                 submodules.linear_q_proj,
                 self.config.hidden_size,
@@ -373,7 +357,6 @@ class MLASelfAttention(MultiLatentAttention):
                 submodules.linear_q_down_proj,
                 self.config.hidden_size,
                 self.config.q_lora_rank,
-                parallel_mode="duplicated",
                 config=self.config,
                 init_method=self.config.init_method,
                 bias=False,
@@ -383,11 +366,11 @@ class MLASelfAttention(MultiLatentAttention):
                 skip_weight_param_allocation=False,
                 **q_down_proj_kwargs,
             )
-            # W_UQ [q_lora_rank, NumAttentionHeads * q_head_dim] for up projection
+
             self.linear_q_up_proj = build_module(
                 submodules.linear_q_up_proj,
                 self.config.q_lora_rank,
-                self.config.num_attention_heads * self.q_head_dim, # TODO use num_head and num_kv_head instead of num_attention_heads
+                self.config.num_attention_heads * self.q_head_dim,
                 config=self.config,
                 init_method=self.config.init_method,
                 gather_output=False,
@@ -413,7 +396,6 @@ class MLASelfAttention(MultiLatentAttention):
             submodules.linear_kv_down_proj,
             self.config.hidden_size,
             self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
-            parallel_mode="duplicated",
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -423,7 +405,7 @@ class MLASelfAttention(MultiLatentAttention):
             skip_weight_param_allocation=False,
             **kv_down_proj_kwargs,
         )
-        # W_UKV [kv_lora_rank, NumAttentionHeads * (qk_head_dim + v_head_dim)] for up projection
+
         self.linear_kv_up_proj = build_module(
             submodules.linear_kv_up_proj,
             self.config.kv_lora_rank,
@@ -466,8 +448,7 @@ class MLASelfAttention(MultiLatentAttention):
         Derives `query`, `key` and `value` tensors from `hidden_states`.
         """
         # s = sequence length, b = batch size, h = hidden size, n = num attention heads
-        # Attention heads [s, b, n * head_dim], 
-        # Note hidden_size != n * head_dim for MLA 
+        # Attention heads [s, b, n*h]
         assert (
             hidden_states.ndim == 3
         ), f"hidden_states should be 3D, [s, b, n*h], got {hidden_states.ndim}D"
