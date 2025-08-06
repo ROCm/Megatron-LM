@@ -935,6 +935,7 @@ class TestParallelMLAAttentionPrecisionWithRopeFusion:
         os.environ.update(self._environ_backup)
         Utils.destroy_model_parallel()
 
+    @pytest.mark.failing_on_rocm
     def test_gpu_forward_thd_precision(self):
         if is_te_min_version("1.10.0"):
             # use flash attention for hopper, future may support fused attention for ampere

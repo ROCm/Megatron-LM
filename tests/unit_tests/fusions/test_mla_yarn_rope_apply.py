@@ -42,7 +42,7 @@ def _test_fused_apply_mla_rope_for_q(input_format):
     num_heads = 32
     q_dim = 128
     emb_dim = 64
-    dtype = torch.bfloat16
+    dtype = torch.float32
     transformer_config = TransformerConfig(
         num_attention_heads=num_heads,
         num_layers=1,

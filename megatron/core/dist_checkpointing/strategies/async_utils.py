@@ -96,11 +96,6 @@ class AsyncRequest(NamedTuple):
         """
         return self._replace(is_frozen=True)
 
-def initialize_and_run(async_fn: Callable, save_args: Tuple) -> None:
-    """Initialize the process group and run the async function."""
-    torch.distributed.init_process_group(backend='nccl')
-    async_fn(*save_args)
-
 class AsyncCaller(ABC):
     """Wrapper around mp.Process that ensures correct semantic of distributed finalization.
 
@@ -204,8 +199,9 @@ class TemporalAsyncCaller(AsyncCaller):
 
         ctx = mp.get_context('spawn')
         self.start_time = time()
-        target_function = partial(initialize_and_run, async_fn, save_args)
-        self.process = ctx.Process(target=target_function)
+        self.process = ctx.Process(
+            target=async_req.async_fn, args=async_fn_args, kwargs=async_req.async_fn_kwargs
+        )
         self.process.start()
         init_time = time()
         logger.debug(f"rank: {rank}, takes {init_time - self.start_time} to schedule async ckpt ")

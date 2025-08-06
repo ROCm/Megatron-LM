@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from typing import NoReturn, Optional, Union
 
 import torch
-import torch.nn.functional as F
 
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.models.common.embeddings import (
@@ -74,40 +73,6 @@ class MLASelfAttentionSubmodules:
     q_layernorm: Union[ModuleSpec, type] = None
     kv_layernorm: Union[ModuleSpec, type] = None
 
-def get_attention_sink_bias(batch_size, num_heads, seq_len, window_size=None, sink_k=1, dtype=torch.bfloat16):
-    """
-    Generate attention bias with shape [batch, num_heads, seq, seq].
-
-    Args:
-    - batch_size (int): Number of sequences in a batch.
-    - num_heads (int): Number of attention heads.
-    - seq_len (int): Sequence length.
-    - window_size tupe(int): Sliding window size (each token attends to its local window).
-    - sink_k (int): Number of initial tokens that act as attention sinks.
-
-    Returns:
-    - attention_bias (Tensor): Shape [batch, num_heads, seq, seq], used to mask attention scores.
-    """
-    # Initialize bias with -inf (default masked)
-    attention_bias = torch.full((seq_len, seq_len), float('-inf'), dtype=dtype, device="cuda")
-
-    # Allow each token to attend to its sliding window neighbors
-    if window_size is not None:
-        for i in range(seq_len):
-            left = max(0, i - window_size[0])
-            right = min(seq_len, i + window_size[1] + 1)  # Exclusive upper bound
-            attention_bias[i, left:right] = 0  # Allow attention
-
-    # Allow all tokens to attend to the first `sink_k` tokens
-    attention_bias[:, :sink_k] = 0  # Enable global attention to sink tokens
-
-    # Shape [1, 1, seq, seq]
-    attention_bias = attention_bias.unsqueeze(0).unsqueeze(0)
-    # Expand to [batch, num_heads, seq, seq]
-    attention_bias = attention_bias.expand(batch_size, num_heads, seq_len, seq_len)
-
-    # incontiguous attention bias will led core dump of fused attention
-    return attention_bias.contiguous()
 
 class MultiLatentAttention(Attention):
     """Multi-Latent Attention layer abstract class.
@@ -264,10 +229,9 @@ class MultiLatentAttention(Attention):
         # core attention computation
         # ==================================
         # Need corresponding TE change
-        
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
-                query, key, value, attention_mask, attention_bias=self.attention_bias, packed_seq_params=packed_seq_params
+                query, key, value, attention_mask, packed_seq_params=packed_seq_params
             )
         else:
             core_attn_out = self.core_attention(
