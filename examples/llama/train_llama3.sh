@@ -38,7 +38,7 @@ EXP_NAME="${EXP_NAME:-perf}"
 TEE_OUTPUT="${TEE_OUTPUT:-1}"
 USE_FLASH_ATTN="${USE_FLASH_ATTN:-1}"
 NO_TRAINING="${NO_TRAINING:-0}" # NO_TRAINING=1: for computing metrics only
-ENABLE_PROFILING="${ENABLE_PROFILING:-0}" #enable pytorch profiling
+ENABLE_PROFILING="${ENABLE_PROFILING:-1}" #enable pytorch profiling
 echo "NO_TRAINING=$NO_TRAINING"
 
 CWD=`pwd`
@@ -52,8 +52,8 @@ NODE_RANK="${NODE_RANK:-0}"
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 if [ "${NNODES:-1}" -gt 1 ]; then
-    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-ens51np0}"
-    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-ens51np0}"
+    export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-enp10s0f4u1}"
+    export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-enp10s0f4u1}"
     echo "NCCL and GLOO socket interfaces set."
 else
     echo "Single node setup, skipping NCCL and GLOO socket interface settings."
@@ -275,7 +275,7 @@ if [ "$ENABLE_PROFILING" -eq 1 ]; then
 fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-flash-attn"
+    EXTRA_ARGS="$EXTRA_ARGS --attention-backend flash"
 fi
 
 if [ "$SEQ_PARALLEL" -eq 1 ]; then

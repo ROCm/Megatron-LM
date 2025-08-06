@@ -258,7 +258,7 @@ EXTRA_ARGS="$EXTRA_ARGS --profile --use-pytorch-profiler --tensorboard-dir $LOG_
 fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
-EXTRA_ARGS="$EXTRA_ARGS --use-flash-attn"
+EXTRA_ARGS="$EXTRA_ARGS --attention-backend fused"
 fi
 
 if [ "$SEQ_PARALLEL" -eq 1 ]; then
