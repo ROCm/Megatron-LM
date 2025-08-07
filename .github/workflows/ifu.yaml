@@ -19,7 +19,7 @@ on:
 
   # Automatic monthly trigger - First Monday of each month at 9 AM UTC
   schedule:
-    - cron: "0 9 1-7 * 1" # First Monday of the month at 9 AM UTC
+    - cron: '0 9 1-7 * 1'  # First Monday of the month at 9 AM UTC
 
 jobs:
   analyze-merge:
@@ -41,20 +41,6 @@ jobs:
             echo "TARGET_VERSION=${{ inputs.target_version }}" >> $GITHUB_OUTPUT
             echo "CONTAINER_IMAGE=${{ inputs.container_image }}" >> $GITHUB_OUTPUT
             echo "RUN_MODE=manual" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Log in to Docker Registry
-        if: env.DOCKER_USERNAME != ''
-        env:
-          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
-          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
-        run: |
-          # Only login if credentials are provided
-          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
-            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
-            echo "✅ Successfully logged in to Docker registry"
-          else
-            echo "ℹ️ No Docker credentials provided, attempting to pull as public image"
           fi
 
       - name: Checkout
@@ -107,8 +93,6 @@ jobs:
           "
 
       - name: Analyze merge conflicts in Container
-        env:
-          GIT_PAGER: cat
         run: |
           # Create a script file to run in the container
           cat > /tmp/analyze_conflicts.sh << 'SCRIPT_EOF'
