@@ -19,7 +19,7 @@ on:
 
   # Automatic monthly trigger - First Monday of each month at 9 AM UTC
   schedule:
-    - cron: '0 9 1-7 * 1'  # First Monday of the month at 9 AM UTC
+    - cron: "0 9 1-7 * 1" # First Monday of the month at 9 AM UTC
 
 jobs:
   analyze-merge:
