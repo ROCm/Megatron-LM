@@ -93,6 +93,8 @@ jobs:
           "
 
       - name: Analyze merge conflicts in Container
+        env:
+          GIT_PAGER: cat
         run: |
           # Create a script file to run in the container
           cat > /tmp/analyze_conflicts.sh << 'SCRIPT_EOF'
