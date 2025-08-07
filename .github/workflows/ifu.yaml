@@ -1,0 +1,466 @@
+name: Megatron-LM IFU
+
+on:
+  # Manual trigger with inputs
+  workflow_dispatch:
+    inputs:
+      base_branch:
+        description: "Base branch to merge into (e.g., rocm_dev, main)"
+        required: false
+        default: "rocm_dev"
+      target_version:
+        description: "Target version (e.g., core_v0.13.0)"
+        required: false
+        default: "core_v0.13.0"
+      container_image:
+        description: "Container image to use (e.g., rocm/pytorch-training:v25.3)"
+        required: false
+        default: "rocm/pytorch-training:v25.3"
+
+  # Automatic monthly trigger - First Monday of each month at 9 AM UTC
+  schedule:
+    - cron: "0 9 1-7 * 1" # First Monday of the month at 9 AM UTC
+
+jobs:
+  analyze-merge:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Determine parameters
+        id: params
+        run: |
+          # For scheduled runs, use defaults. For manual runs, use inputs
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "Running scheduled IFU check with defaults"
+            echo "BASE_BRANCH=rocm_dev" >> $GITHUB_OUTPUT
+            echo "TARGET_VERSION=core_v0.13.0" >> $GITHUB_OUTPUT
+            echo "CONTAINER_IMAGE=rocm/pytorch-training:v25.3" >> $GITHUB_OUTPUT
+            echo "RUN_MODE=scheduled" >> $GITHUB_OUTPUT
+          else
+            echo "Running manual IFU check with provided inputs"
+            echo "BASE_BRANCH=${{ inputs.base_branch }}" >> $GITHUB_OUTPUT
+            echo "TARGET_VERSION=${{ inputs.target_version }}" >> $GITHUB_OUTPUT
+            echo "CONTAINER_IMAGE=${{ inputs.container_image }}" >> $GITHUB_OUTPUT
+            echo "RUN_MODE=manual" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Log in to Docker Registry
+        if: env.DOCKER_USERNAME != ''
+        env:
+          DOCKER_USERNAME: ${{ secrets.DOCKER_USERNAME }}
+          DOCKER_PASSWORD: ${{ secrets.DOCKER_PASSWORD }}
+        run: |
+          # Only login if credentials are provided
+          if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+            echo "$DOCKER_PASSWORD" | docker login -u "$DOCKER_USERNAME" --password-stdin
+            echo "✅ Successfully logged in to Docker registry"
+          else
+            echo "ℹ️ No Docker credentials provided, attempting to pull as public image"
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Pull and Run Container
+        id: container
+        run: |
+          IMAGE="${{ steps.params.outputs.CONTAINER_IMAGE }}"
+          echo "Pulling container image: $IMAGE"
+          docker pull "$IMAGE"
+
+          # Start container in background
+          CONTAINER_ID=$(docker run -d \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            --name ifu-container \
+            "$IMAGE" \
+            tail -f /dev/null)
+
+          echo "CONTAINER_ID=$CONTAINER_ID" >> $GITHUB_OUTPUT
+          echo "✅ Container started: $CONTAINER_ID"
+
+      - name: Setup Git in Container
+        run: |
+          docker exec ifu-container bash -c "
+            git config --global user.name 'IFU Bot'
+            git config --global user.email 'ifu-bot@amd.com'
+            git config --global --add safe.directory /workspace
+
+            # Clean up any previous test branches (force checkout main/master first)
+            git checkout ${{ steps.params.outputs.BASE_BRANCH }} 2>/dev/null || git checkout -b ${{ steps.params.outputs.BASE_BRANCH }}
+            git branch -D test-merge 2>/dev/null || true
+            git branch -D ifu/* 2>/dev/null || true
+          "
+
+      - name: Add upstream in Container
+        run: |
+          docker exec ifu-container bash -c "
+            # Add nvidia upstream (remove if exists to start fresh)
+            git remote remove nvidia-upstream 2>/dev/null || true
+            git remote add nvidia-upstream https://github.com/NVIDIA/Megatron-LM.git
+
+            # ONLY fetch the specific version requested (no auto-following tags)
+            VERSION='${{ steps.params.outputs.TARGET_VERSION }}'
+            echo 'Fetching only: \$VERSION'
+            git fetch nvidia-upstream --no-tags refs/tags/\${VERSION}:refs/tags/nvidia/\${VERSION}
+          "
+
+      - name: Analyze merge conflicts in Container
+        env:
+          GIT_PAGER: cat
+        run: |
+          # Create a script file to run in the container
+          cat > /tmp/analyze_conflicts.sh << 'SCRIPT_EOF'
+          #!/bin/bash
+
+          VERSION="${{ steps.params.outputs.TARGET_VERSION }}"
+          BASE_BRANCH="${{ steps.params.outputs.BASE_BRANCH }}"
+
+          # Check if the base branch exists
+          if ! git rev-parse --verify $BASE_BRANCH >/dev/null 2>&1; then
+            echo "❌ Error: Branch '$BASE_BRANCH' does not exist!"
+            echo "Available branches:"
+            git branch -a
+            exit 1
+          fi
+
+          # Ensure we're on base branch and clean up any existing test-merge branch
+          git checkout $BASE_BRANCH
+          git branch -D test-merge 2>/dev/null || true
+
+          # Create fresh test branch from the specified base
+          git checkout -b test-merge
+
+          # Try merge with unrelated histories flag
+          git merge --no-commit --no-ff --allow-unrelated-histories nvidia/${VERSION} 2>&1 || true
+
+          # Count conflicts
+          TOTAL_CONFLICTS=$(git diff --name-only --diff-filter=U | wc -l || echo "0")
+
+          echo "## Conflict Analysis"
+          echo "- Base branch: $BASE_BRANCH"
+          echo "- Target version: $VERSION"
+          echo "- Total conflicts: $TOTAL_CONFLICTS"
+          echo ""
+
+          # Show breakdown by directory
+          echo "### Conflicts by directory:"
+          git diff --name-only --diff-filter=U | cut -d/ -f1-2 | sort | uniq -c | sort -rn || echo "No conflicts"
+          echo ""
+
+          # Show specific subdirectory breakdowns for key areas
+          echo "### Key areas breakdown:"
+          echo -n "Core directory: "
+          git diff --name-only --diff-filter=U | grep -c "^megatron/core/" || echo "0"
+          echo -n "Training directory: "
+          git diff --name-only --diff-filter=U | grep -c "^megatron/training/" || echo "0"
+          echo -n "Tests: "
+          git diff --name-only --diff-filter=U | grep -c "^tests/" || echo "0"
+          echo -n "Tools: "
+          git diff --name-only --diff-filter=U | grep -c "^tools/" || echo "0"
+          echo ""
+
+          # List all conflict files
+          echo "### All conflicted files:"
+          git diff --name-only --diff-filter=U || echo "No conflicts"
+
+          # Save conflict info for PR
+          echo "TOTAL_CONFLICTS=$TOTAL_CONFLICTS" > /workspace/env_vars
+          echo "BASE_BRANCH=$BASE_BRANCH" >> /workspace/env_vars
+          echo "VERSION=$VERSION" >> /workspace/env_vars
+
+          # Save full conflict list
+          git diff --name-only --diff-filter=U > /workspace/all_conflicts.txt 2>/dev/null || echo "" > /workspace/all_conflicts.txt
+
+          # Generate conflict previews for each file
+          echo "### Generating conflict previews..."
+          mkdir -p /workspace/conflict_previews
+
+          # For each conflicted file, extract a preview of the conflicts
+          for file in $(git diff --name-only --diff-filter=U); do
+            echo "Processing: $file"
+            # Create a safe filename for the preview
+            safe_name=$(echo "$file" | tr "/" "_")
+
+            # Extract conflict markers and surrounding context (limited to prevent huge outputs)
+            grep -A 3 -B 3 "^<<<<<<< \|^======= \|^>>>>>>> " "$file" 2>/dev/null | head -50 > "/workspace/conflict_previews/${safe_name}.preview" || true
+
+            # Also count the number of conflict regions in this file
+            conflict_count=$(grep -c "^<<<<<<< " "$file" 2>/dev/null || echo "0")
+            echo "$conflict_count" > "/workspace/conflict_previews/${safe_name}.count"
+          done
+
+          # Cleanup - abort the merge and go back to base branch
+          git merge --abort 2>/dev/null || git reset --hard HEAD
+          git checkout $BASE_BRANCH
+          git branch -D test-merge 2>/dev/null || true
+
+          echo ""
+          echo "Analysis complete. Total conflicts found: $TOTAL_CONFLICTS"
+          exit 0
+          SCRIPT_EOF
+
+          # Copy script to container and execute
+          docker cp /tmp/analyze_conflicts.sh ifu-container:/tmp/analyze_conflicts.sh
+          docker exec ifu-container chmod +x /tmp/analyze_conflicts.sh
+          docker exec ifu-container /tmp/analyze_conflicts.sh
+
+          # Load environment variables from container
+          if [ -f env_vars ]; then
+            cat env_vars >> $GITHUB_ENV
+          fi
+          VERSION="${{ steps.params.outputs.TARGET_VERSION }}"
+          BASE_BRANCH="${{ steps.params.outputs.BASE_BRANCH }}"
+
+          # Check if the base branch exists
+          if ! git rev-parse --verify $BASE_BRANCH >/dev/null 2>&1; then
+            echo "❌ Error: Branch '$BASE_BRANCH' does not exist!"
+            echo "Available branches:"
+            git branch -a
+            exit 1
+          fi
+
+          # Create test branch from the specified base
+          git checkout -b test-merge $BASE_BRANCH
+
+          # Try merge with unrelated histories flag
+          git merge --no-commit --no-ff --allow-unrelated-histories nvidia/${VERSION} 2>&1 || true
+
+          # Count conflicts
+          TOTAL_CONFLICTS=$(git diff --name-only --diff-filter=U | wc -l || echo "0")
+
+          echo "## Conflict Analysis"
+          echo "- Base branch: $BASE_BRANCH"
+          echo "- Target version: $VERSION"
+          echo "- Total conflicts: $TOTAL_CONFLICTS"
+          echo ""
+
+          # Show breakdown by directory
+          echo "### Conflicts by directory:"
+          git diff --name-only --diff-filter=U | cut -d/ -f1-2 | sort | uniq -c | sort -rn || echo "No conflicts"
+          echo ""
+
+          # Show specific subdirectory breakdowns for key areas
+          echo "### Key areas breakdown:"
+          echo -n "Core directory: "
+          git diff --name-only --diff-filter=U | grep -c '^megatron/core/' || echo "0"
+          echo -n "Training directory: "
+          git diff --name-only --diff-filter=U | grep -c '^megatron/training/' || echo "0"
+          echo -n "Tests: "
+          git diff --name-only --diff-filter=U | grep -c '^tests/' || echo "0"
+          echo -n "Tools: "
+          git diff --name-only --diff-filter=U | grep -c '^tools/' || echo "0"
+          echo ""
+
+          # List all conflict files
+          echo "### All conflicted files:"
+          git diff --name-only --diff-filter=U || echo "No conflicts"
+
+          # Save conflict info for PR
+          echo "TOTAL_CONFLICTS=$TOTAL_CONFLICTS" >> $GITHUB_ENV
+          echo "BASE_BRANCH=$BASE_BRANCH" >> $GITHUB_ENV
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+          # Save full conflict list
+          git diff --name-only --diff-filter=U > /tmp/all_conflicts.txt 2>/dev/null || echo "" > /tmp/all_conflicts.txt
+
+          # Generate conflict previews for each file
+          echo "### Generating conflict previews..."
+          mkdir -p /tmp/conflict_previews
+
+          # For each conflicted file, extract a preview of the conflicts
+          for file in $(git diff --name-only --diff-filter=U); do
+            echo "Processing: $file"
+            # Create a safe filename for the preview
+            safe_name=$(echo "$file" | tr '/' '_')
+
+            # Extract conflict markers and surrounding context (limited to prevent huge outputs)
+            grep -A 3 -B 3 "^<<<<<<< \|^======= \|^>>>>>>> " "$file" 2>/dev/null | head -50 > "/tmp/conflict_previews/${safe_name}.preview" || true
+
+            # Also count the number of conflict regions in this file
+            conflict_count=$(grep -c "^<<<<<<< " "$file" 2>/dev/null || echo "0")
+            echo "$conflict_count" > "/tmp/conflict_previews/${safe_name}.count"
+          done
+
+          # Cleanup
+          git merge --abort 2>/dev/null || true
+
+          echo ""
+          echo "Analysis complete. Total conflicts found: $TOTAL_CONFLICTS"
+
+          # Explicit exit to prevent hanging
+          exit 0
+
+      - name: Create IFU branch and draft PR
+        # Only run if we're in GitHub Actions (not act)
+        if: env.TOTAL_CONFLICTS != '0' && github.actor != 'nektos/act'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Check if we have conflicts to handle
+          if [ -z "${{ env.TOTAL_CONFLICTS }}" ] || [ "${{ env.TOTAL_CONFLICTS }}" = "0" ]; then
+            echo "No conflicts found, skipping PR creation"
+            exit 0
+          fi
+
+          VERSION="${{ steps.params.outputs.TARGET_VERSION }}"
+          BASE_BRANCH="${{ steps.params.outputs.BASE_BRANCH }}"
+          IFU_BRANCH="ifu/${VERSION}-to-${BASE_BRANCH}"
+
+          echo "Creating IFU branch: $IFU_BRANCH"
+
+          # Continue work in container
+          docker exec ifu-container bash -c "
+            # Create IFU branch
+            git checkout -b $IFU_BRANCH $BASE_BRANCH
+
+            # Perform the merge again
+            git merge --no-commit --no-ff --allow-unrelated-histories nvidia/${VERSION} || true
+
+            # Stage all non-conflicted files
+            git add -A
+            git reset -- \$(git diff --name-only --diff-filter=U)
+
+            # Create a WIP commit
+            git commit -m 'WIP: IFU merge of ${VERSION} into ${BASE_BRANCH} - conflicts need resolution' || true
+          "
+
+          # Push the branch (from host, not container)
+          git push origin $IFU_BRANCH -f
+
+          # Build conflict preview section for PR body
+          CONFLICT_PREVIEWS=""
+
+          # Process up to 10 files with previews (to avoid making PR body too large)
+          preview_count=0
+          for file in $(head -10 all_conflicts.txt); do
+            safe_name=$(echo "$file" | tr '/' '_')
+            preview_file="conflict_previews/${safe_name}.preview"
+            count_file="conflict_previews/${safe_name}.count"
+
+            if [ -f "$preview_file" ] && [ -s "$preview_file" ]; then
+              conflict_count=$(cat "$count_file" 2>/dev/null || echo "?")
+
+              CONFLICT_PREVIEWS="${CONFLICT_PREVIEWS}
+
+          ### 📄 \`${file}\` (${conflict_count} conflict regions)
+          <details>
+          <summary>Click to see conflict preview</summary>
+
+          \`\`\`diff
+          $(cat "$preview_file")
+          \`\`\`
+
+          </details>"
+              preview_count=$((preview_count + 1))
+            fi
+          done
+
+          # Add note if there are more files
+          remaining=$((TOTAL_CONFLICTS - preview_count))
+          if [ $remaining -gt 0 ]; then
+            CONFLICT_PREVIEWS="${CONFLICT_PREVIEWS}
+
+          _...and ${remaining} more files with conflicts. Check out the branch locally to see all conflicts._"
+          fi
+
+          # Create PR body with conflict details and previews
+          # Add a note about run mode
+          RUN_MODE_NOTE=""
+          if [ "${{ steps.params.outputs.RUN_MODE }}" = "scheduled" ]; then
+            RUN_MODE_NOTE="🤖 _This is a scheduled monthly IFU check_"
+          else
+            RUN_MODE_NOTE="👤 _This is a manually triggered IFU check_"
+          fi
+
+          PR_BODY=$(cat <<EOF
+          # IFU: Merge NVIDIA ${VERSION} into ${BASE_BRANCH}
+
+          ${RUN_MODE_NOTE}
+
+          ## 📊 Summary
+          - **NVIDIA Version**: ${VERSION}
+          - **Target Branch**: ${BASE_BRANCH}
+          - **Total Conflicts**: ${{ env.TOTAL_CONFLICTS }} files
+
+          ## 🔍 Conflict Breakdown
+
+          ### By Directory
+          \`\`\`
+          $(cat /tmp/all_conflicts.txt | cut -d/ -f1-2 | sort | uniq -c | sort -rn)
+          \`\`\`
+
+          ## 👀 Conflict Previews
+
+          Below are previews of the actual conflicts in the first 10 files. This shows the conflict markers and surrounding context to help understand what needs to be resolved.
+
+          ${CONFLICT_PREVIEWS}
+
+          ## 📋 All Conflicted Files
+          <details>
+          <summary>Click to expand full conflict list</summary>
+
+          \`\`\`
+          $(cat /tmp/all_conflicts.txt)
+          \`\`\`
+          </details>
+
+          ## 🛠️ Resolution Steps
+
+          ### Quick Start Commands
+          \`\`\`bash
+          git fetch origin
+          git checkout $IFU_BRANCH
+          git status  # See all conflicted files
+          \`\`\`
+
+          ### For each conflicted file:
+          1. Open the file and look for conflict markers:
+             - \`<<<<<<< HEAD\` - Your changes (AMD/ROCm version)
+             - \`=======\` - Separator
+             - \`>>>>>>> nvidia/${VERSION}\` - NVIDIA's changes
+
+          2. Consider:
+             - **Preserve**: AMD-specific optimizations, ROCm/HIP compatibility
+             - **Integrate**: New NVIDIA features, bug fixes, performance improvements
+             - **Test**: Ensure functionality after resolution
+
+          3. After resolving:
+             \`\`\`bash
+             git add <resolved-file>
+             \`\`\`
+
+          4. When all conflicts are resolved:
+             \`\`\`bash
+             git commit
+             git push
+             \`\`\`
+
+          ## ✅ Checklist
+          - [ ] All conflicts resolved
+          - [ ] AMD optimizations preserved
+          - [ ] ROCm compatibility maintained
+          - [ ] Tests passing
+          - [ ] Code review completed
+
+          ---
+          _This PR was automatically created by the IFU workflow_
+          EOF
+          )
+
+          # Create the draft PR
+          gh pr create \
+            --draft \
+            --title "IFU: Merge NVIDIA ${VERSION} into ${BASE_BRANCH}" \
+            --body "$PR_BODY" \
+            --base "$BASE_BRANCH" \
+            --head "$IFU_BRANCH"
+
+      - name: Cleanup Container
+        if: always()
+        run: |
+          # Stop and remove container
+          docker stop ifu-container 2>/dev/null || true
+          docker rm ifu-container 2>/dev/null || true
+          echo "✅ Container cleaned up"
