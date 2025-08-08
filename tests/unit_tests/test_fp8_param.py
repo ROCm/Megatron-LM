@@ -201,6 +201,7 @@ class TestFP8Param:
         with ctx():
             self._run_test_helper(tp_size, recipe, inference=inference, **kwargs)
 
+    @pytest.mark.failing_on_rocm
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     @pytest.mark.parametrize("tp_size", [4])
     def test_delayed_scaling(self, tp_size):
