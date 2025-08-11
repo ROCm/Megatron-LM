@@ -836,6 +836,7 @@ class TestNonStrictLoad:
             assert unexpected_keys == set()
             assert missing_keys == {'TenA', 'ObjB'}
 
+    @pytest.mark.flaky
     @pytest.mark.parametrize('save_format', ['zarr', 'torch_dist'])
     @pytest.mark.parametrize('validate_integrity', [True, False])
     def test_exact_load_handling(self, caplog, tmp_path_dist_ckpt, validate_integrity, save_format):

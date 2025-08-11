@@ -31,7 +31,7 @@ PRETRAIN_SCRIPT_PATH="pretrain_gpt.py"
 
 # Fixed model and training parameters
 TP_SIZE=1     
-CP_SIZE=1     
+CP_SIZE=2
 PP_SIZE=1     
 MICRO_BATCH_SIZE=1
 GLOBAL_BATCH_SIZE=128
@@ -69,6 +69,7 @@ MODEL_ARGS=(
     --attention-dropout 0.0
     --hidden-dropout 0.0
     --swiglu
+    --normalization RMSNorm
     --init-method-std 0.0134
     --attention-backend fused
     --apply-layernorm-1p 
@@ -165,6 +166,7 @@ EVAL_AND_LOGGING_ARGS=(
     --eval-interval 100
     --save-interval 1000
     --log-throughput
+    --use-pytorch-profiler
     --profile
     --profile-step-start 4
     --profile-step-end 6
