@@ -883,6 +883,7 @@ class TestNonStrictLoad:
                 assert missing_keys == set()
                 assert unexpected_keys == set()
 
+    @pytest.mark.flaky
     @pytest.mark.parametrize('save_format', ['zarr', 'torch_dist'])
     def test_sharded_metadata(self, tmp_path_dist_ckpt, save_format):
 

@@ -40,8 +40,6 @@ from megatron.training.global_vars import get_tokenizer
 from megatron.core.models.deepseekv2.layer_specs import get_gpt_layer_local_spec, get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
-    get_gpt_layer_local_spec,
-    get_gpt_layer_with_transformer_engine_spec,
 )
 from megatron.core.models.deepseekv2.model import GPTModel
 

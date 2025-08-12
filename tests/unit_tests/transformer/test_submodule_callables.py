@@ -114,7 +114,6 @@ class TestTransformerLayerSubmoduleCallables:
     def teardown_method(self, method):
         pass
 
-    @pytest.mark.failing_on_rocm
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
     @pytest.mark.parametrize("grouped_gemm", [True, False])

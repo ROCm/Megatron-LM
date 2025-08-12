@@ -133,7 +133,7 @@ echo ""
 OPTIMIZER_OFFLOAD=false
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
+MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-false}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 echo "GEMM_TUING: $GEMM_TUNING"
@@ -509,6 +509,7 @@ megatron_options="  \
         --position-embedding-type rope \
         --untie-embeddings-and-output-weights \
         --disable-bias-linear \
+        --no-rope-fusion \
         --rotary-base ${ROPE_THETA} \
         --rotary-scaling-factor ${SCALE_FACTOR} \
         --transformer-impl ${TRANSFORMER_IMPL} \

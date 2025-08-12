@@ -246,7 +246,6 @@ class TestMultiTokenPrediction:
             assert f"mtp.layers.{i}.hnorm.weight" in sharded_state_dict.keys()
             assert f"mtp.layers.{i}.eh_proj.weight" in sharded_state_dict.keys()
 
-    @pytest.mark.failing_on_rocm
     @pytest.mark.skipif(not is_te_min_version("1.4.0"), reason="Fused RoPE requires TE >= 1.4.0")
     @pytest.mark.parametrize("tp_size", [1, 2, 4])
     def test_forward_backward(self, tp_size):
