@@ -254,6 +254,7 @@ EXTRA_ARGS="
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
     --overlap-grad-reduce \
+    --rerun-mode disabled \
 "
 
 if [ "$FSDP" -eq 1 ]; then
@@ -290,19 +291,19 @@ if [ "$MCORE" -eq 1 ]; then
 fi
 
 if [ "$TE_FP8" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
-        --fp8-margin=0 \
-        --fp8-format=hybrid \
-        --fp8-interval=1 \
-        --fp8-amax-history-len=1024 \
-        --fp8-amax-compute-algo=max \
+    EXTRA_ARGS="$EXTRA_ARGS --transformer-impl transformer_engine \
+        --fp8-margin 0 \
+        --fp8-format hybrid \
+        --fp8-interval 1 \
+        --fp8-amax-history-len 1024 \
+        --fp8-amax-compute-algo max \
         --attention-softmax-in-fp32 \
 "
 fi
 
 if [ -n "${WANDB_API_KEY}" ]; then
-    LOGGING_ARGS="--wandb-project=LLama \
-        --wandb-exp-name=LLama_${MODEL_SIZE}B \
+    LOGGING_ARGS="--wandb-project LLama \
+        --wandb-exp-name LLama_${MODEL_SIZE}B \
         --wandb-save-dir logs/wandb \
     "
 else
