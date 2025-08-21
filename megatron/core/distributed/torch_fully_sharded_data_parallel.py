@@ -57,6 +57,7 @@ class TorchFullyShardedDataParallel(_BaseDataParallel):
         config: TransformerConfig,
         ddp_config: DistributedDataParallelConfig,
         module: torch.nn.Module,
+        disable_bucketing: bool = False,
         sub_modules_to_wrap: Set[torch.nn.Module] = {
             TransformerLayer,
             LanguageModelEmbedding,
