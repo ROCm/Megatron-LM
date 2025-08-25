@@ -336,7 +336,7 @@ jobs:
 
               CONFLICT_PREVIEWS="${CONFLICT_PREVIEWS}
 
-          ### 📄 \`${file}\` (${conflict_count} conflict regions)
+          ### \`${file}\` (${conflict_count} conflict regions)
           <details>
           <summary>Click to see conflict preview</summary>
 
@@ -358,9 +358,9 @@ jobs:
 
           RUN_MODE_NOTE=""
           if [ "${{ steps.params.outputs.RUN_MODE }}" = "scheduled" ]; then
-            RUN_MODE_NOTE="🤖 _Scheduled monthly IFU check (auto-detected version: ${VERSION})_"
+            RUN_MODE_NOTE="_Scheduled monthly IFU check (auto-detected version: ${VERSION})_"
           else
-            RUN_MODE_NOTE="👤 _Manual IFU check_"
+            RUN_MODE_NOTE="_Manual IFU check_"
           fi
 
           PR_BODY=$(cat <<EOF
@@ -368,25 +368,25 @@ jobs:
 
           ${RUN_MODE_NOTE}
 
-          ## 📊 Summary
+          ## Summary
           - **NVIDIA Version**: ${VERSION}
           - **Target Branch**: ${BASE_BRANCH}
           - **Total Conflicts**: ${{ env.TOTAL_CONFLICTS }} files
 
-          ## 🔍 Conflict Breakdown
+          ## Conflict Breakdown
 
           ### By Directory
           \`\`\`
           $(cat all_conflicts.txt | cut -d/ -f1-2 | sort | uniq -c | sort -rn)
           \`\`\`
 
-          ## 👀 Conflict Previews
+          ## Conflict Previews
 
           Below are previews of the actual conflicts in the first 10 files. This shows the conflict markers and surrounding context to help understand what needs to be resolved.
 
           ${CONFLICT_PREVIEWS}
 
-          ## 📋 All Conflicted Files
+          ## All Conflicted Files
           <details>
           <summary>Click to expand full conflict list</summary>
 
@@ -395,7 +395,7 @@ jobs:
           \`\`\`
           </details>
 
-          ## 🛠️ Resolution Steps
+          ## Resolution Steps
 
           ### Quick Start Commands
           \`\`\`bash
@@ -426,7 +426,7 @@ jobs:
              git push
              \`\`\`
 
-          ## ✅ Checklist
+          ## Checklist
           - [ ] All conflicts resolved
           - [ ] AMD optimizations preserved
           - [ ] ROCm compatibility maintained
