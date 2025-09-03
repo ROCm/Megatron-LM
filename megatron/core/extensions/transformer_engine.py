@@ -602,6 +602,9 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         self.te_forward_mask_type = False
         self.qkv_format: str = 'sbhd'
 
+        attn_mask_type = AttnMaskType.causal_bottom_right
+        assert attn_mask_type == AttnMaskType.causal_bottom_right, f"Expected AttnMaskType.causal_bottom_right, got {attn_mask_type}"
+
         if self.config.apply_query_key_layer_scaling != bool(
             int(os.getenv('NVTE_APPLY_QK_LAYER_SCALING', '0'))
         ):
