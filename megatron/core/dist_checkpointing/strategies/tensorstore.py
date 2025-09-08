@@ -29,7 +29,7 @@ def register_default_tensorstore_strategies():
 class TensorStoreLoadShardedStrategy(LoadShardedStrategy):
     """Load strategy for Zarr backend using `tensorstore` for loading."""
 
-    def __init__(self, load_directly_on_device: bool = False):
+    def __init__(self, load_directly_on_device: bool = True):
         super().__init__()
         self.load_directly_on_device = load_directly_on_device
 
