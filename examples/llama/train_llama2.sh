@@ -83,6 +83,7 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
+FP8_WEIGHT_TRANSPOSE_CACHE="${FP8_WEIGHT_TRANSPOSE_CACHE:-1}"
 
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 if [ "$TOKENIZER_TYPE" == "Llama2Tokenizer" ]; then
@@ -318,7 +319,7 @@ if [ "$TE_FP8" -eq 1 ]; then
         --fp8-amax-compute-algo=max \
         --attention-softmax-in-fp32 \
     "
-    if [ "$FSDP" -eq 1 ]; then
+    if [ "$FSDP" -eq 1 ] && [ "$FP8_WEIGHT_TRANSPOSE_CACHE" -eq 0 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --no-fp8-weight-transpose-cache \
         --no-fp8-reduce-amax\
         " 
