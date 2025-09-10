@@ -1,11 +1,15 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
+import os
 import torch
 import torch.nn.functional as F
-
 from megatron.core.jit import jit_fuser
+import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
+import transformer_engine.common.recipe
 
-###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
+
+use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
 
 
 @jit_fuser
@@ -57,19 +61,44 @@ class BiasSwiGLUFunction(torch.autograd.Function):
 
 class SwiGLUFunction(torch.autograd.Function):
     @staticmethod
-    # bias is an optional argument
     def forward(ctx, input, fp8_input_store):
-        input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input
-        ctx.save_for_backward(input_for_backward)
-        ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
-        return swiglu(input)
+        ctx.ori_input_dtype = input.dtype
+
+        # TODO use the store to cast instead of hardcode to e4m3.
+        input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input 
+        ctx.save_for_backward(input_for_backward)
+        
+        if use_te_swiglu:
+            swiglu_op = te.ops.SwiGLU()
+            if fp8_input_store:
+                recipe = transformer_engine.common.recipe.DelayedScaling(
+                    fp8_format=transformer_engine.common.recipe.Format.E4M3,
+                    amax_history_len=8,
+                    amax_compute_algo="max",
+                    margin=2,
+                    interval=1,
+                )
+                
+                with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+                    output = swiglu_op(input)
+            else:
+                output = swiglu_op(input)
+            
+            return output
+        else:
+            return swiglu(input)
 
     @staticmethod
     def backward(ctx, grad_output):
+        # TODO: do we need to explicity call backward ?
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp = swiglu_back(grad_output, input)
+        if use_te_swiglu:
+            tmp = tex.dswiglu(grad_output, input, None)
+        else:
+            tmp = swiglu_back(grad_output, input)
+
         return tmp, None
 
 
@@ -81,9 +110,4 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False):
         output = BiasSwiGLUFunction.apply(input, bias, fp8_input_store)
     else:
         output = SwiGLUFunction.apply(input, fp8_input_store)
-
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
-
-
-# bias_swiglu_impl = BiasSwiGLUFunction.apply
-# swiglu_impl = SwiGLUFunction.apply
