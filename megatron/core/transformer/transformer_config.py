@@ -143,6 +143,17 @@ class TransformerConfig(ModelParallelConfig):
     """Standard deviation of the zero mean normal for the default initialization method, not used if
     init_method and output_layer_init_method are provided."""
 
+    init_model_with_meta_device: bool = False
+    """
+    If True, initializes the model with the meta device. This is helpful for
+    training of very large models. This feature is only works when megatron fsdp is turned on.
+    """
+
+    if init_model_with_meta_device:
+        raise NotImplementedError(
+            "init_model_with_meta_device is not supported in this version."
+        )
+
     ####################
     # mixed-precision
     ####################
