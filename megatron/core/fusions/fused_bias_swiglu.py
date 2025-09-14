@@ -4,12 +4,16 @@
 # pylint: disable=missing-function-docstring, missing-class-docstring
 
 import torch
+import os
 import torch.nn.functional as F
-
+import transformer_engine.pytorch as te
+import transformer_engine_torch as tex
 from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
+
+use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
 
 
 @jit_fuser
@@ -145,46 +149,45 @@ class BiasSwiGLUFunction(torch.autograd.Function):
 
 
 class SwiGLUFunction(torch.autograd.Function):
-    """Custom autograd function for SwiGLU activation without bias."""
-
     @staticmethod
-    @nvtx_decorator()
-    def forward(ctx, input, fp8_input_store, cpu_offload_input):
-        """Forward pass of SwiGLU activation.
-
-        Args:
-            ctx: Autograd context object for saving tensors for backward pass.
-            input (torch.Tensor): Input tensor to apply SwiGLU to.
-            fp8_input_store (bool): If True, stores intermediate values in FP8 format.
-
-        Returns:
-            torch.Tensor: Result of applying SwiGLU activation.
-        """
-        input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input
-        if cpu_offload_input:
-            input_for_backward.activation_offloading = True
-        ctx.save_for_backward(input_for_backward)
-        ctx.ori_input_dtype = input.dtype
+    def forward(ctx, input, fp8_input_store, cpu_offload_input=False):
         ctx.fp8_input_store = fp8_input_store
-        return swiglu(input)
+        ctx.ori_input_dtype = input.dtype
+
+        # TODO use the store to cast instead of hardcode to e4m3.
+        input_for_backward = input.to(torch.float8_e4m3fn) if fp8_input_store else input 
+        ctx.save_for_backward(input_for_backward)
+        
+        if use_te_swiglu:
+            swiglu_op = te.ops.SwiGLU()
+            if fp8_input_store:
+                recipe = transformer_engine.common.recipe.DelayedScaling(
+                    fp8_format=transformer_engine.common.recipe.Format.E4M3,
+                    amax_history_len=8,
+                    amax_compute_algo="max",
+                    margin=2,
+                    interval=1,
+                )
+                
+                with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+                    output = swiglu_op(input)
+            else:
+                output = swiglu_op(input)
+            
+            return output
+        else:
+            return swiglu(input)
 
     @staticmethod
-    @nvtx_decorator()
     def backward(ctx, grad_output):
-        """Backward pass of SwiGLU activation.
-
-        Args:
-            ctx: Autograd context object containing saved tensors from forward pass.
-            grad_output (torch.Tensor): Gradient of the loss with respect to the output.
-
-        Returns:
-            tuple: Tuple containing:
-                - Gradient with respect to the input tensor
-                - None for fp8_input_store parameter
-        """
+        # TODO: do we need to explicity call backward ?
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp = swiglu_back(grad_output, input)
+        if use_te_swiglu:
+            tmp = tex.dswiglu(grad_output, input, None)
+        else:
+            tmp = swiglu_back(grad_output, input)
+
         return tmp, None, None
 
 
@@ -229,7 +232,7 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
     assert len(ori_shape) in [2, 3]
     input = input.view(-1, ori_shape[-1])
     if bias is not None:
-        output = BiasSwiGLUFunction.apply(input, bias, fp8_input_store, cpu_offload_input)
+        output = BiasSwiGLUFunction.apply(input, bias, fp8_input_store)
     else:
         output = SwiGLUFunction.apply(input, fp8_input_store, cpu_offload_input)
 
