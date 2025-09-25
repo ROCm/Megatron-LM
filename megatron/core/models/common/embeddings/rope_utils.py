@@ -23,7 +23,12 @@ try:
         fused_apply_rotary_pos_emb_thd,
     )
 
-    HAVE_APPLY_ROPE_FUSION = True
+    # Check if they're actually defined (not None)
+    if fused_apply_rotary_pos_emb is not None and fused_apply_rotary_pos_emb_thd is not None:
+        HAVE_APPLY_ROPE_FUSION = True
+    else:
+        raise ImportError("RoPE fusion functions are None, trying Apex fallback")
+
 except ImportError:
     try:
         from apex.transformer.functional import (

@@ -1,12 +1,12 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 import dataclasses
+import inspect
 import io
 import os
 import pickle
 import warnings
 from typing import Any, Callable, Optional
-import inspect
 
 import torch
 import transformer_engine as te
@@ -14,8 +14,8 @@ from packaging.version import Version as PkgVersion
 from torch import Tensor
 from torch.nn.parameter import Parameter
 
-from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
+from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
     get_context_parallel_global_ranks,
@@ -37,7 +37,6 @@ from megatron.core.tensor_parallel.layers import (
     set_tensor_model_parallel_attributes,
 )
 from megatron.core.tensor_parallel.random import get_data_parallel_rng_tracker_name
-
 from megatron.core.tensor_parallel.utils import divide
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -109,7 +108,7 @@ class TELinear(te.pytorch.Linear):
     Note that if Megatron's parallel_state has not been initialized
     yet, the tp_group passed to TE will be None and must be set later
     via set_tensor_parallel_group().
-    
+
     parallel_mode currently supports 3 different values:
         - "column": Split the weight matrix along output dimension (used in TEColumnParallelLinear)
         - "row": Split the weight matrix along input dimension (used in TERowParallelLinear)
@@ -224,8 +223,12 @@ class TELinear(te.pytorch.Linear):
                 tp_group = None
 
         if is_te_min_version("2.2.0.dev0"):
-            assert class_has_init_param(te.pytorch.Linear, "keep_fp8_weight_transpose_cache"), "Transformer Engine v2.2.0 or later is required to use keep_fp8_weight_transpose_cache"
-            extra_kwargs["keep_fp8_weight_transpose_cache"] = self.config.keep_fp8_weight_transpose_cache
+            assert class_has_init_param(
+                te.pytorch.Linear, "keep_fp8_weight_transpose_cache"
+            ), "Transformer Engine v2.2.0 or later is required to use keep_fp8_weight_transpose_cache"
+            extra_kwargs["keep_fp8_weight_transpose_cache"] = (
+                self.config.keep_fp8_weight_transpose_cache
+            )
 
         super().__init__(
             in_features=input_size,
@@ -358,8 +361,12 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
                     extra_kwargs["ub_name"] = tp_comm_buffer_name
 
         if is_te_min_version("2.2.0.dev0"):
-            assert class_has_init_param(te.pytorch.Linear, "keep_fp8_weight_transpose_cache"), "Transformer Engine v2.2.0 or later is required to use keep_fp8_weight_transpose_cache"
-            extra_kwargs["keep_fp8_weight_transpose_cache"] = self.config.keep_fp8_weight_transpose_cache
+            assert class_has_init_param(
+                te.pytorch.Linear, "keep_fp8_weight_transpose_cache"
+            ), "Transformer Engine v2.2.0 or later is required to use keep_fp8_weight_transpose_cache"
+            extra_kwargs["keep_fp8_weight_transpose_cache"] = (
+                self.config.keep_fp8_weight_transpose_cache
+            )
 
         super().__init__(
             in_features=input_size,
@@ -810,9 +817,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         # TE with version>=1.9 introduces an extra state in DotProductAttention Module
         if is_te_min_version("1.9.0.dev0") and ('_extra_state' in state_dict):
             state_dict.pop('_extra_state')
-        return make_sharded_tensors_for_checkpoint(
-            state_dict, prefix, {}, sharded_offsets
-        )
+        return make_sharded_tensors_for_checkpoint(state_dict, prefix, {}, sharded_offsets)
 
 
 if is_te_min_version("1.9.0.dev0"):
@@ -1289,7 +1294,10 @@ class TEDotProductAttentionMLA(te.pytorch.DotProductAttention):
 
         super().__init__(
             num_attention_heads=self.config.num_attention_heads,
-            kv_channels=[self.config.kv_channels+self.config.qk_rope_head_dim, self.config.kv_channels],
+            kv_channels=[
+                self.config.kv_channels + self.config.qk_rope_head_dim,
+                self.config.kv_channels,
+            ],
             attention_dropout=(
                 self.config.attention_dropout if attention_dropout is None else attention_dropout
             ),
@@ -1357,13 +1365,7 @@ class TEDotProductAttentionMLA(te.pytorch.DotProductAttention):
                 **packed_seq_kwargs,
             )
         else:
-            core_attn_out = super().forward(
-                query,
-                key,
-                value,
-                attention_mask,
-                **packed_seq_kwargs,
-            )
+            core_attn_out = super().forward(query, key, value, attention_mask, **packed_seq_kwargs)
 
         if self.config.apply_rope_fusion and qkv_format == 'bshd':
             return core_attn_out.transpose(0, 1)
@@ -1470,8 +1472,39 @@ try:
             return FusedRoPEFunc.apply(t, freqs, "thd", cu_seqlens)
 
 except ImportError:
+    # Fallback to apply_rotary_pos_emb for newer TE versions
+    try:
+        from transformer_engine.pytorch.attention import apply_rotary_pos_emb
 
-    pass
+        def fused_apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+            """Apply rotary positional embedding to input tensor T in `sbhd` format."""
+            return apply_rotary_pos_emb(t, freqs, tensor_format="sbhd", fused=True)
+
+        def fused_apply_rotary_pos_emb_thd(
+            t: torch.Tensor,
+            cu_seqlens: torch.Tensor,
+            freqs: torch.Tensor,
+            cp_size: int = 1,
+            cp_rank: int = 0,
+        ) -> torch.Tensor:
+            """
+            Apply rotary positional embedding to input tensor T in `thd` format with CP support.
+            """
+            return apply_rotary_pos_emb(
+                t,
+                freqs,
+                tensor_format="thd",
+                fused=True,
+                cu_seqlens=cu_seqlens,
+                cp_size=cp_size,
+                cp_rank=cp_rank,
+            )
+
+    except ImportError:
+        # Don't define the functions at all if neither TE implementation is available
+        # This allows rope_utils.py to fall back to Apex
+        pass
+
 
 try:
 
