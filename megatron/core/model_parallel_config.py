@@ -217,7 +217,7 @@ class ModelParallelConfig:
        Defaults to False.
     """
 
-    cross_entropy_fusion_impl: str = 'native'
+    cross_entropy_fusion_impl: str = 'te'
     """If 'native', MCore based CE loss fusion is used, if 'te', Parallel CE loss
        from Transformer Engine library is used. Defaults to 'native'.
     """
