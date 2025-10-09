@@ -44,6 +44,17 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import make_sharded_tensors_for_checkpoint
 from megatron.core.utils import get_te_version, is_te_min_version
 
+try:
+    from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+
+    def te_parallel_cross_entropy(
+        logits: torch.Tensor, labels: torch.Tensor, tp_group: torch.distributed.ProcessGroup
+    ):
+        """Wrapper function for TE's Cross Entropy Loss kernel"""
+        return parallel_cross_entropy(logits, labels, 0.0, False, tp_group)
+
+except ImportError:
+    te_parallel_cross_entropy = None  # type: ignore[assignment, misc]
 
 def _get_extra_te_kwargs(config: TransformerConfig):
     extra_transformer_engine_kwargs = {"params_dtype": config.params_dtype}
