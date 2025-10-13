@@ -220,7 +220,6 @@ class TestParallelMLAAttention:
 
             assert config.apply_rope_fusion == True
     
-    @pytest.mark.failing_on_rocm
     def test_gpu_forward_thd(self):
         if is_te_min_version("1.10.0"):
             # use flash attention for hopper, future may support fused attention for ampere
@@ -254,7 +253,6 @@ class TestParallelMLAAttention:
             os.environ.clear()
             os.environ.update(_environ)
 
-    @pytest.mark.failing_on_rocm
     def test_gpu_forward_thd_padded(self):
         """Test MLA forward pass with cu_seqlens_q_padded and cu_seqlens_kv_padded."""
         if is_te_min_version("1.10.0"):
@@ -645,7 +643,6 @@ class TestParallelMLAAttentionPrecision:
         os.environ.update(self._environ_backup)
         Utils.destroy_model_parallel()
 
-    @pytest.mark.failing_on_rocm
     def test_gpu_forward_thd_precision(self):
         if is_te_min_version("1.10.0"):
             # use flash attention for hopper, future may support fused attention for ampere
@@ -798,7 +795,6 @@ class TestContextParallelMLAAttentionPrecision:
         os.environ.update(self._environ_backup)
         Utils.destroy_model_parallel()
 
-    @pytest.mark.failing_on_rocm
     def test_gpu_forward_thd_precision(self):
         if is_te_min_version("2.5.0", check_equality=True):
             # use flash attention for hopper, future may support fused attention for ampere
@@ -939,7 +935,6 @@ class TestParallelMLAAttentionPrecisionWithRopeFusion:
         os.environ.update(self._environ_backup)
         Utils.destroy_model_parallel()
 
-    @pytest.mark.failing_on_rocm
     def test_gpu_forward_thd_precision(self):
         if is_te_min_version("1.10.0"):
             # use flash attention for hopper, future may support fused attention for ampere
