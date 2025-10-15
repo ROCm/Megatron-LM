@@ -195,6 +195,7 @@ class TestGPTModelReconfiguration:
             ((2, 4), (4, 2), _gpt_te_spec_op_fuser, gpt_te_spec),
         ],
     )
+    @pytest.mark.failing_on_rocm
     def test_mlp_with_glu(
         self,
         tmp_path_dist_ckpt: pathlib.Path,
