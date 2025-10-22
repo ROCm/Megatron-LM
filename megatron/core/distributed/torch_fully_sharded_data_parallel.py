@@ -97,6 +97,9 @@ class TorchFullyShardedDataParallel(_BaseDataParallel):
                     attrs['_fp8_attrs']['transpose_invalid'] = False
                     del attrs['_fp8_attrs']['transpose']
                 custom_attrs[name] = {k: v for k, v in attrs.items()}
+                custom_attrs[name].pop('_data', None)
+                custom_attrs[name].pop('_transpose', None)
+                custom_attrs[name].pop('_module', None)
             return custom_attrs
 
         def restore_custom_attrs(module, custom_attrs):
