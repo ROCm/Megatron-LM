@@ -7,9 +7,8 @@ set -x
 pip install mock
 
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
-echo "Number of GPUs: $NUM_GPUS"
-NUM_GPUS=8
 export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS-1)))
+echo "Number of GPUs: $NUM_GPUS"
 
 OUT_DIR=output
 mkdir -p $OUT_DIR
