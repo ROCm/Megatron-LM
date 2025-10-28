@@ -13,9 +13,9 @@ on:
         required: false
         default: "latest"
       container_image:
-        description: "Container image to use (e.g., rocm/pytorch-training:v25.3)"
+        description: "Container image to use (e.g., rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.7.1)"
         required: false
-        default: "rocm/pytorch-training:v25.3"
+        default: "rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.7.1"
 
   # Every 3 months on the 1st at 9 AM UTC - more or less NVIDIA's schedule
   schedule:
