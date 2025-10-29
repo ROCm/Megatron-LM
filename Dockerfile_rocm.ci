@@ -47,7 +47,7 @@ assert ok, "Failed to download punkt_tab"
 PY
 
 RUN sed -i 's/cmake_minimum_required(VERSION 3.3)/cmake_minimum_required(VERSION 3.5)/' \
-    /opt/rocm/lib/cmake/hiprtc/hiprtc-config.cmake
+    /workspace/installs/TransformerEngine/3rdparty/hipify_torch/cmake/Hipify.cmake
 
 # Install Causal-Conv1d and its dependencies
 WORKDIR ${STAGE_DIR}
