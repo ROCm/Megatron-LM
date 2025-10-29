@@ -7,12 +7,14 @@ This guide provides the steps for setting up the environment and configuring the
 ## 1. Environment Setup
 
 1. **Download Docker Image**  
-   Download the Docker image required for training:  
+   Download the Docker image required for training (e.g. docker images from rocm/megatron-lm):  
    `docker pull <image_name>`
 
 2. **Launch Docker Container**  
    Start the Docker container:  
    `docker run -it <additional flags> <image_name>`
+	 For example
+   `docker run -it --network=host --device=/dev/kfd --device=/dev/dri --group-add=video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined <image_name>`
 
 ---
 
