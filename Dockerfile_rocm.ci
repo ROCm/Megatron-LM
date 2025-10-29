@@ -46,6 +46,9 @@ ok = nltk.download('punkt_tab', download_dir='/usr/share/nltk_data', quiet=True)
 assert ok, "Failed to download punkt_tab"
 PY
 
+RUN sed -i 's/cmake_minimum_required(VERSION 3.3)/cmake_minimum_required(VERSION 3.5)/' \
+    /opt/rocm/lib/cmake/hiprtc/hiprtc-config.cmake
+
 # Install Causal-Conv1d and its dependencies
 WORKDIR ${STAGE_DIR}
 ENV CAUSAL_CONV1D_FORCE_BUILD=TRUE
