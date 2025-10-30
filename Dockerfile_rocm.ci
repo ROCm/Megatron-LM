@@ -88,8 +88,8 @@ RUN git clone --single-branch --depth 1 -b ${TE_BRANCH} https://github.com/ROCm/
     cd TransformerEngine && \
     git submodule update --init --recursive && \
     echo "TransformerEngine at commit:" $(git rev-parse HEAD) && \
-    sed -i 's/cmake_minimum_required(VERSION 3.3)/cmake_minimum_required(VERSION 3.5)/' \
-    /workspace/installs/TransformerEngine/3rdparty/hipify_torch/cmake/Hipify.cmake && \
+    sed -i '1i cmake_minimum_required(VERSION 3.5)' \
+    3rdparty/hipify_torch/cmake/Hipify.cmake && \
     pip install -v .
 
 RUN git clone https://github.com/caaatch22/grouped_gemm.git &&\
