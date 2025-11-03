@@ -1,9 +1,13 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 
+import warnings
 from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+from typing import Callable, List, Optional, Tuple, Union
 
 import torch.nn.functional as F
+
+from megatron.core.transformer.enums import AttnBackend
 
 from ..model_parallel_config import ModelParallelConfig
 from ..utils import get_te_version, init_method_normal, is_te_min_version, scaled_init_method_normal
@@ -17,6 +21,8 @@ class TransformerConfig(ModelParallelConfig):
     including those in ModelParallelConfig.
     """
 
+    moe_ffn_hidden_size: int = None
+    
     ####################
     # model architecture
     ####################
@@ -37,14 +43,20 @@ class TransformerConfig(ModelParallelConfig):
     num_attention_heads: int = 0
     """Number of transformer attention heads."""
 
+    attention_backend: AttnBackend = AttnBackend.auto
+    """Attention backend to run. By default we let transformer engine
+    decide the best backend to run (except in the case of local).
+    If attention backend is local we use the local pytorch implementation in mcore. 
+    Users can specify exact backend by changing this config. """
+
     num_query_groups: int = None
     """Number of query groups for group query attention. If None, normal attention is used."""
 
-    ffn_hidden_size: int = None
+    ffn_hidden_size: Optional[int] = None
     """Transformer Feed-Forward Network hidden size. This is set to 4*hidden_size
     if not provided."""
 
-    kv_channels: int = None
+    kv_channels: Optional[int] = None
     """Projection weights dimension in multi-head attention. This is set to hidden_size //
     num_attention_heads if not provided."""
 
@@ -85,7 +97,7 @@ class TransformerConfig(ModelParallelConfig):
     """Store the input of MLP activation function in FP8 for backprop to save memory.
     The stored input is casted back to the original precision before backprop compuatation."""
 
-    num_moe_experts: int = None
+    num_moe_experts: Optional[int] = None
     """Number of experts to use for MoE layer. When set, it replaces MLP with MoE layer. Set to None
     for no MoE."""
 
@@ -97,7 +109,7 @@ class TransformerConfig(ModelParallelConfig):
     """If not None, then will use sliding window attention. The size of the window is specified by
     the numbers inside the tuple; -1 is special value meaning "infinite window size"."""
 
-    normalization: bool = "LayerNorm"
+    normalization: str = "LayerNorm"
     """Which norm to use for normalization layers, valid options are `LayerNorm` and `RMSNorm`."""
 
     qk_layernorm: bool = False
@@ -116,13 +128,13 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     # initialization
     ####################
-    init_method: Callable = None
+    init_method: Optional[Callable] = None
     """Method to initialize weights. Note that bias is always set to zero. Should be a function that
     takes a single Tensor and initializes it. If None, will be set to
     megatron.core.utils.init_method_normal(init_method_std) which is torch nn init normal with
     mean=0.0 and std=init_method_std."""
 
-    output_layer_init_method: Callable = None
+    output_layer_init_method: Optional[Callable] = None
     """Method to initialize weights of the output layer of both attention and MLP blocks. If None,
     will be set to megatron.core.utils.scaled_init_method_normal(init_method_std) which is torch nn
     init normal with mean=0.0 and std=init_method_std / math.sqrt(2.0 * num_layers)."""
@@ -165,13 +177,10 @@ class TransformerConfig(ModelParallelConfig):
     apply_rope_fusion: bool = False
     """If True, use fused RoPE kernel."""
 
-    disable_te_fused_rope: bool = False
-    """If True, disable fused RoPE kernel from transformer engine"""
-
     ####################
     # activation recomputation
     ####################
-    recompute_granularity: str = None
+    recompute_granularity: Optional[str] = None
     """Determines which type of activation recompute to use.  Megatron-core supports 'selective'
     activation checkpointing where only the memory intensive part of attention is checkpointed.
     These memory intensive activations are also less compute intensive which makes activation
@@ -181,7 +190,7 @@ class TransformerConfig(ModelParallelConfig):
     If set, must be 'selective' or 'full'. 'selective' always uses all layers.
     """
 
-    recompute_method: str = None
+    recompute_method: Optional[str] = None
     """Determines which transformer layers will be recomputed. uniform will uniformly divide the
     total number of transformer layers in a transformer block and recompute the input activation of
     each divided chunk at the specified granularity.  block will recompute the input activations for
@@ -189,19 +198,19 @@ class TransformerConfig(ModelParallelConfig):
     pipeline stage will not have any activations recomputed.  If None, and recompute is enabled, all
     layers will do recomputation. If set, must be 'uniform' or 'block'."""
 
-    recompute_num_layers: int = None
+    recompute_num_layers: Optional[int] = None
     """When recompute_method is uniform, recompute_num_layers is the number of transformer layers in
     each uniformly divided recompute unit.  When recompute_method is block, recompute_num_layers is
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
 
-    distribute_saved_activations: bool = None
+    distribute_saved_activations: Optional[bool] = None
     """If True, distribute recomputed activations across the model parallel group."""
 
     ####################
     # fp8 related
     ####################
-    fp8: str = None
+    fp8: Optional[str] = None
     """If set, enables the use of FP8 precision through Transformer Engine. There are 2 predefined
     choices (1) 'e4m3' uniformly uses e4m3 for all FP8 tensors, (2) 'hybrid' uses e4m3 for all FP8
     activation and weight tensors and e5m2 for all FP8 output activation gradient tensors."""
@@ -240,7 +249,7 @@ class TransformerConfig(ModelParallelConfig):
     ####################
     # MoE related
     ####################
-    moe_shared_expert_intermediate_size: int = None
+    moe_shared_expert_intermediate_size: Optional[int] = None
     """Shared expert total ffn hidden size.
     It should be equal to 'num_shared_experts * ffn_size_of_each_shared_expert' if
     there are multiple shared experts.
@@ -250,17 +259,70 @@ class TransformerConfig(ModelParallelConfig):
     """Enable overlapping between shared expert computations and dispatcher communications.
     Without this, the shared epxerts execute after the routed experts."""
 
+    moe_layer_freq: int = 1
+    """Frequency between MoE layers and Dense layers. Accepts either:
+    - An integer N: Represents a 1:N ratio, meaning one expert layer for every N-1 dense layers.
+    - A string containing a Python list expression that defines a custom pattern, e.g.:
+    "([1]*3+[0]*1)*3" evaluates to [1,1,1,0,1,1,1,0,1,1,1,0]
+    where 1 indicates an expert layer and 0 indicates a dense layer."""
+
+    moe_ffn_hidden_size: Optional[int] = None
+    """MoE Feed-Forward Network hidden size"""
+
     moe_router_load_balancing_type: str = "aux_loss"
-    """Determines the load balancing strategy for the router. "aux_loss" corresponds to the load
-    balancing loss used in GShard and SwitchTransformer, "sinkhorn" corresponds to the balancing
-    algorithm used in S-BASE, and "none" implies no load balancing."""
+    """The load balancing strategy for the router. "aux_loss" corresponds to the load balancing loss 
+    used in GShard and SwitchTransformer; "seq_aux_loss" corresponds to the loss used in DeepSeekV2, 
+    which computes the loss for each individual sample; "sinkhorn" corresponds to the balancing 
+    algorithm used in S-BASE, and "none" implies no load balancing. The default is "aux_loss"."""
 
     moe_router_topk: int = 2
     """Number of experts to route to for each token."""
 
+    moe_router_topk_limited_devices: int = None
+    """Number of EP ranks to consider for each token in group-limited routing, 
+    DEPRECATED and replaced by moe_router_num_groups and moe_router_group_topk.
+    """
+
+    moe_router_num_groups: int = None
+    """Number of groups to divide experts into for group-limited routing.
+    When using group-limited routing:
+    1. Experts are divided into 'moe_router_num_groups' equal-sized groups
+    2. For each token, 'moe_router_group_topk' groups are selected based on routing scores
+    (specifically, the sum of top-2 expert scores within each group)
+    3. From these selected groups, 'moe_router_topk' individual experts are chosen
+    Two common use cases:
+    - Device-limited routing: Set 'moe_router_num_groups' equal to expert parallel size (EP)
+    to limit each token to experts on a subset of devices
+    (See DeepSeek-V2: https://arxiv.org/pdf/2405.04434)
+    - Node-limited routing: Set 'moe_router_num_groups' equal to number of nodes in EP group
+    to limit each token to experts on a subset of nodes
+    (See DeepSeek-V3: https://arxiv.org/pdf/2412.19437)
+    """
+ 
+    moe_router_group_topk: int = None
+    """Number of selected groups for group-limited routing."""
+
     moe_router_pre_softmax: bool = False
     """Enable pre-softmax routing for MoE, which means softmax is before the top-k selection. 
     By default, softmax is done after top-k."""
+
+    moe_router_topk_scaling_factor: Optional[float] = None
+    """Scaling factor for routing score in top-k selection, only works when moe_router_pre_softmax 
+    enabled. Defaults to None, which means no scaling."""
+
+    moe_router_score_function: str = "softmax"
+    """Score function for MoE routing. Can be "softmax" or "sigmoid"."""
+
+    moe_router_enable_expert_bias: bool = False
+    """TopK routing with dynamic per-expert bias in the aux-loss-free load balancing strategy.
+    The routing decision is based on the sum of the routing scores and the expert bias.
+    See https://arxiv.org/abs/2408.15664 for details."""
+
+    moe_router_bias_update_rate: float = 1e-3
+    """The expert bias is updated based on the number of assigned tokens to each expert 
+    in a global batch, where the bias is increased for the experts with less assigned tokens
+    and decreased for the experts with more assigned tokens. 
+    The default value 1e-3 is same as that used in DeepSeekV3."""
 
     moe_grouped_gemm: bool = False
     """When there are multiple experts per rank, compress multiple local (potentially small) gemms
@@ -268,16 +330,20 @@ class TransformerConfig(ModelParallelConfig):
     GEMM feature introduced since CUTLASS 2.8 (https://github.com/fanshiqing/grouped_gemm).
     """
 
+    moe_use_legacy_grouped_gemm: bool = False
+    """Use legacy GroupedMLP rather than TEGroupedMLP.
+    Note: The legacy one will be deprecated soon."""
+
     moe_aux_loss_coeff: float = 0  # 1e-2 would be a good start value for load balance loss.
     """Scaling coefficient for the aux loss. A starting value of 1e-2 is recommended."""
 
-    moe_z_loss_coeff: float = None  # 1e-3 would be a good start value for z-loss
+    moe_z_loss_coeff: Optional[float] = None  # 1e-3 would be a good start value for z-loss
     """Scaling coefficient for the z-loss. A starting value of 1e-3 is recommended."""
 
-    moe_input_jitter_eps: float = None
+    moe_input_jitter_eps: Optional[float] = None
     """Add noise to the input tensor by applying jitter with a specified epsilon value."""
 
-    moe_token_dropping: bool = False  # TODO: Support token dropping.
+    moe_token_dropping: bool = False
     """This feature involves selectively dropping and padding tokens for each expert to achieve a
     specified capacity, similar to GShard, Switch-Transformer, and DeepSpeed-MoE. Note that this is
     currently unsupported so should remain False."""
@@ -289,7 +355,7 @@ class TransformerConfig(ModelParallelConfig):
     moe_per_layer_logging: bool = False
     """Enable per-layer logging for MoE, currently supports auxiliary loss and z loss."""
 
-    moe_expert_capacity_factor: float = None
+    moe_expert_capacity_factor: Optional[float] = None
     """moe_expert_capacity_factor (float): The capacity factor for each expert, None means no token
     will be dropped. The default is None."""
 
@@ -306,6 +372,31 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_layer_recompute: bool = False
     """Memory optimization: checkpointing moe_layer to save actiavtion memory."""
+
+    moe_permute_fusion: bool = False
+    """Fuse token rearrangement ops during token dispatching."""
+    
+    moe_router_force_load_balancing: bool = False
+    """Enforce token dispatch balancing to MoE routing"""
+
+    ##################
+    # Context Parallel
+    ##################
+    cp_comm_type: Optional[Union[str, List[str]]] = None
+    """Inter-gpu communication type for context parallelism.
+    str: all layers share same communication type.
+    List[str]: each layer has its separate communication type.
+    cp_comm_type of each layer can be "p2p" or "all_gather" or "a2a" or "a2a+p2p".
+    "p2p": Exchange KV chunks with P2P communications in ring topology. P2P is async and can be
+    overlapped with attention compute.
+    "all_gather": All-gather to get full sequence of KV before attention. The all-gather is not
+    async, and cannot be overlapped.
+    "a2a": Like DeepSpeed Ulysses, scatter attention heads across the CP group, and gather to get
+    full sequence of QKV.
+    "a2a+p2p": A hierarchical implementation of context parallelism to attention. 
+    It uses A2A communications in low-level CP groups (e.g., via NVLink),
+    and P2P communications in high-level CP groups (e.g., via IBLink).
+    """
 
     ####################
     # miscellaneous
@@ -325,6 +416,12 @@ class TransformerConfig(ModelParallelConfig):
 
     config_logger_dir: str = ""
     """When non-empty, dumps entry-point configs to config_logger_dir"""
+
+    flash_decode: bool = False
+    """ Use the optimized flash decoding kernel during inference. """
+
+    keep_fp8_weight_transpose_cache: bool = False
+    """Don't cache the FP8 weight transposes to save memory"""
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
@@ -367,6 +464,9 @@ class TransformerConfig(ModelParallelConfig):
         if self.num_moe_experts is not None and self.num_moe_experts <= 0:
             raise ValueError('num_moe_experts must be non-negative.')
 
+        if self.moe_ffn_hidden_size is None:
+            self.moe_ffn_hidden_size = self.ffn_hidden_size
+
         if self.moe_shared_expert_intermediate_size is not None:
             if self.moe_shared_expert_intermediate_size <= 0:
                 raise ValueError(
@@ -388,7 +488,7 @@ class TransformerConfig(ModelParallelConfig):
                 )
             if self.moe_expert_capacity_factor < 0:
                 self.moe_expert_capacity_factor = None
-            if self.moe_router_load_balancing_type not in ["aux_loss", "none"]:
+            if self.moe_router_load_balancing_type not in ["aux_loss", "seq_aux_loss", "none"]:
                 raise ValueError(
                     'moe_expert_capacity_factor only works with aux_loss or none load balancing'
                 )
@@ -480,11 +580,24 @@ class TransformerConfig(ModelParallelConfig):
                     "When bias_activation_fusion is True, gated_linear_unit is False, "
                     "and activation function is gelu, add_bias_linear must also be True."
                 )
+
         if self.activation_func_fp8_input_store:
             if self.activation_func != F.silu or not self.gated_linear_unit:
                 raise ValueError("Storing activation input in FP8 is supported only for SwiGLU.")
-        if self.apply_rope_fusion and self.rotary_interleaved:
-            raise ValueError('rotary_interleaved does not work with apply_rope_fusion.')
+
+        if self.apply_rope_fusion:
+            if self.rotary_interleaved:
+                raise ValueError("rotary_interleaved does not work with apply_rope_fusion.")
+
+            from megatron.core.models.common.embeddings.rope_utils import HAVE_APPLY_ROPE_FUSION
+
+            if not HAVE_APPLY_ROPE_FUSION:
+                raise ValueError(
+                    "apply_rope_fusion is not available. Please install TE >= 1.4 or Apex."
+                )
+
+        if self.multi_latent_attention and self.rotary_interleaved:
+            raise ValueError("rotary_interleaved does not work with multi_latent_attention.")
 
         if self.init_method is None:
             self.init_method = init_method_normal(self.init_method_std)
@@ -494,17 +607,19 @@ class TransformerConfig(ModelParallelConfig):
                 self.init_method_std, self.num_layers
             )
 
-        if self.moe_extended_tp:
-            if self.moe_token_dispatcher_type != 'allgather':
-                raise ValueError(
-                    "Moe extended TP parallelism only applies to allgather based token dispatcher."
-                )
-            extended_tp_size = self.tensor_model_parallel_size * self.expert_model_parallel_size
-            if self.ffn_hidden_size % extended_tp_size != 0:
-                raise ValueError(
-                    f'ffn_hidden_size: {self.ffn_hidden_size} must be divisible by '
-                    f'extended_tp_size {extended_tp_size}'
-                )
+        if (
+            self.moe_token_dispatcher_type == "alltoall_seq"
+            and self.tensor_model_parallel_size != self.expert_tensor_parallel_size
+        ):
+            raise ValueError(
+                "alltoall_seq dispatcher not support different TP size for MoE and Dense layer."
+            )
+
+        if self.moe_router_enable_expert_bias and self.moe_router_score_function != "sigmoid":
+            raise ValueError(
+                "Expert bias for aux-loss-free routing only supports sigmoid score function."
+                "Please set --moe-router-score-function sigmoid for sigmoid score function."
+            )
 
         if self.num_moe_experts and self.fp8:
             # TE version below 1.7.0 will raise Error when handle zeros tokens for expert
@@ -514,8 +629,83 @@ class TransformerConfig(ModelParallelConfig):
                     f"but your version is {get_te_version()}."
                 )
 
-            if self.moe_grouped_gemm:
-                raise ValueError("Grouped GEMM of MoE not support fp8 for now.")
+            if self.moe_grouped_gemm and not is_te_min_version("1.11.0"):
+                raise ValueError(
+                    "Only transformer-engine>=1.11.0 supports FP8 grouped gemm, "
+                    f"but your version is {get_te_version()}."
+                )
+
+        if (
+            self.moe_router_topk == 1
+            and self.moe_router_score_function == 'softmax'
+            and not self.moe_router_pre_softmax
+            and self.moe_router_load_balancing_type != 'sinkhorn'
+        ):
+            # Requires applying softmax before selecting the top-k when k is 1,
+            # since softmax on a [num_tokens, 1] would yield a zero gradient.
+            raise ValueError("Please use --moe-router-pre-softmax when topk is 1.")
+
+        if self.moe_router_group_topk:
+            if self.moe_router_topk_limited_devices:
+                raise ValueError(
+                    "moe_router_topk_limited_devices is deprecated and replaced by "
+                    "moe_router_group_topk and moe_router_num_groups."
+                )
+            if not self.moe_router_num_groups:
+                raise ValueError(
+                    "When using group limited routing, moe_router_num_groups must be specified."
+                )
+            else:
+                assert self.num_moe_experts % self.moe_router_num_groups == 0, (
+                    f"num_moe_experts ({self.num_moe_experts}) should be divisible by "
+                    f"moe_router_num_groups ({self.moe_router_num_groups})."
+                )
+                assert self.moe_router_group_topk <= self.moe_router_num_groups, (
+                    f"moe_router_group_topk ({self.moe_router_group_topk}) should be smaller than "
+                    f"moe_router_num_groups ({self.moe_router_num_groups})."
+                )
+        elif self.moe_router_topk_limited_devices:
+            warnings.warn(
+                "moe_router_topk_limited_devices is deprecated. Use moe_router_group_topk and "
+                "moe_router_num_groups instead."
+            )
+            self.moe_router_group_topk = self.moe_router_topk_limited_devices
+            self.moe_router_num_groups = self.expert_model_parallel_size
+
+        if self.flash_decode and self.fp8:
+            raise ValueError("FP8 inference is currently not support with flash decoding.")
+
+        if self.moe_token_dispatcher_type in ['allgather', 'alltoall_seq']:
+            if self.variable_seq_lengths is True:
+                raise ValueError(
+                    f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "
+                    f"variable sequence length, please use alltoall dispatcher instead."
+                )
+
+        if self.moe_permute_fusion:
+            from megatron.core.transformer.moe.moe_utils import (
+                fused_permute,
+                fused_sort_chunks_by_index,
+                fused_unpermute,
+            )
+
+            if (
+                fused_permute is None
+                or fused_sort_chunks_by_index is None
+                or fused_unpermute is None
+            ):
+                raise ValueError("fused permutation is not available. Please install TE >= 2.1.0.")
+
+        if self.cp_comm_type is not None:
+            if isinstance(self.cp_comm_type, list):
+                assert len(self.cp_comm_type) == self.num_layers, (
+                    f"Length of cp_comm_type ({len(self.cp_comm_type)}) should equal to "
+                    f"the total number of transformer layers ({self.num_layers})!"
+                )
+            else:
+                assert isinstance(
+                    self.cp_comm_type, str
+                ), "Unsupported communication type for context parallelism!"
 
 
 @dataclass
@@ -567,3 +757,58 @@ class MLATransformerConfig(TransformerConfig):
 
     mscale_all_dim: float = 0.707
     """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention."""
+
+    qk_nope_head_dim: int = 128
+    
+    fused_padded_mla_attention: bool = False
+    attention_sink_k: int = 0
+
+@dataclass
+class DeepSeekV2TransformerConfig(TransformerConfig):
+
+    moe_ffn_hidden_size: int = None
+
+    enable_shared_expert: bool = False
+
+    q_lora_rank: int = None
+
+    kv_lora_rank: int = None
+
+    qk_nope_head_dim: int = None
+
+    qk_rope_head_dim: int = None
+
+    v_head_dim: int = None
+
+    num_shared_experts: int = None
+
+    moe_layer_freq: int = None
+
+    rotary_base: int = None
+
+    rotary_scaling_factor: int = None
+
+    max_position_embeddings: int = None
+
+    moe_aux_loss_coeff: float = 0.0
+
+    qk_head_dim: int = 128
+    """Dimension of the head in the QK projection. q_head_dim = qk_head_dim + qk_pos_emb_head_dim"""
+
+    qk_pos_emb_head_dim: int = 64
+    """Dimension of the position embedding in the QK projection."""
+
+    beta_fast: float = 32
+    """Beta fast for YaRN RoPE."""
+
+    beta_slow: float = 1
+    """Beta slow for YaRN RoPE."""
+
+    mscale: float = 0.707
+    """Mscale for YaRN RoPE in Multi-Latent Attention."""
+
+    mscale_all_dim: float = 0.707
+    """Mscale all dimensions for YaRN RoPE in Multi-Latent Attention."""
+
+    fused_padded_mla_attention: bool = False
+    attention_sink_k: int = 0

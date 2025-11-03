@@ -10,13 +10,19 @@ def clean_up_docker_images() {
     }
 }
 
-def clean_docker_build_cache() {
-    sh 'docker system prune -f --volumes || true'
+def clean_workspace() {
+    if (env.WORKSPACE) {
+        sh "sudo find ${WORKSPACE} -mindepth 1 -maxdepth 1 -exec rm -rf '{}' \\;"
+    }
 }
 
 pipeline {
     agent {
         label 'build-only'
+    }
+
+    options {
+        disableConcurrentBuilds(abortPrevious: true)
     }
 
     parameters {
@@ -29,15 +35,12 @@ pipeline {
         CONTAINER_NAME = "megatron-lm-container"
         DOCKER_RUN_ARGS = "-v \$(pwd):/workspace/Megatron-LM/output --workdir /workspace/Megatron-LM \
         --entrypoint /workspace/Megatron-LM/run_unit_tests.sh"
-        DOCKER_RUN_CMD = "docker run --rm -t --network host -u root --group-add video --cap-add=SYS_PTRACE \
-        --cap-add SYS_ADMIN --device /dev/fuse --security-opt seccomp=unconfined --security-opt apparmor=unconfined \
-        --ipc=host --device=/dev/kfd --device=/dev/dri"
+        DOCKER_RUN_CMD = "docker run --rm --network=host -u root --device=/dev/kfd --device=/dev/dri --group-add=video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined --security-opt apparmor=unconfined --shm-size 128G"
     }
 
     stages {
         stage('Build Docker Image') {
             steps {
-                clean_docker_build_cache()
                 script {
 
                     // Generate a unique UUID for the Docker image name
@@ -48,6 +51,7 @@ pipeline {
                     sh "docker build --no-cache -f Dockerfile_rocm.ci --build-arg PYTORCH_ROCM_ARCH_OVERRIDE=${params.GPU_ARCH} -t ${env.DOCKER_IMAGE} ."
 
                     withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh "docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}"
                         sh "docker push ${env.DOCKER_IMAGE}"  
                     }
                 }
@@ -70,6 +74,7 @@ pipeline {
                 script {
                     // Pull the Docker image from the repository on the test node
                     withCredentials([usernamePassword(credentialsId: 'docker-hub-credentials', usernameVariable: 'DOCKER_USERNAME', passwordVariable: 'DOCKER_PASSWORD')]) {
+                        sh "docker login -u ${DOCKER_USERNAME} -p ${DOCKER_PASSWORD}"
                         sh "docker pull ${env.DOCKER_IMAGE}"
                     }
 
@@ -80,10 +85,11 @@ pipeline {
             }
             post {
                 always {
-                // Archive test results
-                script {
-                    archiveArtifacts artifacts: 'test_report.csv', allowEmptyArchive: true
-                    clean_up_docker_images()
+                    // Archive test results
+                    script {
+                        archiveArtifacts artifacts: 'unified_test_report.csv', allowEmptyArchive: true
+                        clean_up_docker_images()
+                        clean_workspace()
                     }
                 }
             }

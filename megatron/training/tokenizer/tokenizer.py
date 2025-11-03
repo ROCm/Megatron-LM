@@ -1,4 +1,17 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2023 Alibaba PAI Team.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Megatron tokenizers."""
 
@@ -14,7 +27,13 @@ from megatron.core.datasets.megatron_tokenizer import MegatronTokenizer
 
 from .bert_tokenization import FullTokenizer as FullBertTokenizer
 from .gpt2_tokenization import GPT2Tokenizer
+from megatron.training.tokenizer.multimodal_tokenizer import MultimodalTokenizer
 
+_GLOBAL_TOKENIZER = None
+
+def get_tokenizer():
+    """Return tokenizer."""
+    return _GLOBAL_TOKENIZER
 
 def build_tokenizer(args, **kwargs):
     """Initialize tokenizer."""
@@ -64,6 +83,42 @@ def build_tokenizer(args, **kwargs):
     elif args.tokenizer_type == 'NullTokenizer':
         assert args.vocab_size is not None
         tokenizer = _NullTokenizer(args.vocab_size)
+    elif args.tokenizer_type == "MultimodalTokenizer":
+        try:
+            import transformers
+        except ImportError:
+            raise ImportError(
+                "MultimodalTokenizer currently requires transformers library to be installed"
+            )
+
+        kwargs = dict()
+        if args.tokenizer_prompt_format == "nvlm-yi-34b":
+            kwargs = {
+                "from_slow": True,
+                "legacy": False,
+                "add_bos_token": True,
+            }
+
+        # Currently, only HuggingFace tokenizers are supported.
+        underlying_tokenizer = transformers.AutoTokenizer.from_pretrained(
+            pretrained_model_name_or_path=args.tokenizer_model, **kwargs
+        )
+
+        tokenizer = MultimodalTokenizer(
+            underlying_tokenizer,
+            args.tokenizer_prompt_format,
+            args.special_tokens,
+            args.image_tag_type,
+        )
+    
+    elif args.tokenizer_type == 'DeepSeekV2Tokenizer':
+        tokenizer = _DeepSeekV2Tokenizer(args.tokenizer_model,args.extra_vocab_size)
+        args.padded_vocab_size = tokenizer.vocab_size
+
+    elif args.tokenizer_type == 'DeepSeekV3Tokenizer':
+        tokenizer = _DeepSeekV3Tokenizer(args.tokenizer_model,args.extra_vocab_size)
+        args.padded_vocab_size = tokenizer.vocab_size
+        
     else:
         raise NotImplementedError('{} tokenizer is not ' 'implemented.'.format(args.tokenizer_type))
 
@@ -793,3 +848,113 @@ class _NullTokenizer(MegatronTokenizer):
     @property
     def additional_special_tokens_ids(self):
         return None
+
+
+class _DeepSeekV2Tokenizer(MegatronTokenizer):
+    def __init__(self, tokenizer_path, extra_vocab_size=0):
+        super().__init__(tokenizer_path, extra_vocab_size)
+        try:
+            import transformers
+        except ImportError:
+            raise EnvironmentError(f"The transformers library must be installed to use DeepSeekV2Tokenizer")
+
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=True
+        )
+        self.extra_vocab_size = extra_vocab_size
+
+    def __call__(self, text, return_tensors=None,
+                    padding=None, max_length=None, truncation=None, add_special_tokens=None):
+
+        return self.tokenizer(text, return_tensors=return_tensors, padding=padding,
+                max_length=max_length, truncation=truncation, add_special_tokens=add_special_tokens)
+
+    @property
+    def vocab_size(self):
+        return self.tokenizer.vocab_size + self.extra_vocab_size
+
+    @property
+    def vocab(self):
+        return self.tokenizer.encoder
+
+    @property
+    def inv_vocab(self):
+        return self.tokenizer.decoder
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.decode(token_ids)
+
+    @property
+    def eod(self):
+        return self.tokenizer.eos_token_id
+
+    @property
+    def eos_token(self):
+        return self.tokenizer.eos_token
+
+    @property
+    def pad_token_id(self):
+        return self.tokenizer.pad_token_id
+
+    @property
+    def eos_token_id(self):
+        return self.tokenizer.eos_token_id
+
+class _DeepSeekV3Tokenizer(MegatronTokenizer):
+    def __init__(self, tokenizer_path, extra_vocab_size=0):
+        super().__init__(tokenizer_path, extra_vocab_size)
+        try:
+            import transformers
+        except ImportError:
+            raise EnvironmentError(f"The transformers library must be installed to use DeepSeekV3Tokenizer")
+
+        self.tokenizer = transformers.AutoTokenizer.from_pretrained(
+            tokenizer_path,
+            trust_remote_code=True
+        )
+        self.extra_vocab_size = extra_vocab_size
+
+    def __call__(self, text, return_tensors=None,
+                    padding=None, max_length=None, truncation=None, add_special_tokens=None):
+
+        return self.tokenizer(text, return_tensors=return_tensors, padding=padding,
+                max_length=max_length, truncation=truncation, add_special_tokens=add_special_tokens)
+
+    @property
+    def vocab_size(self):
+        return self.tokenizer.vocab_size + self.extra_vocab_size
+
+    @property
+    def vocab(self):
+        return self.tokenizer.encoder
+
+    @property
+    def inv_vocab(self):
+        return self.tokenizer.decoder
+
+    def tokenize(self, text):
+        return self.tokenizer.encode(text)
+
+    def detokenize(self, token_ids):
+        return self.tokenizer.decode(token_ids)
+
+    @property
+    def eod(self):
+        return self.tokenizer.eos_token_id
+
+    @property
+    def eos_token(self):
+        return self.tokenizer.eos_token
+
+    @property
+    def pad_token_id(self):
+        return self.tokenizer.pad_token_id
+
+    @property
+    def eos_token_id(self):
+        return self.tokenizer.eos_token_id
+
