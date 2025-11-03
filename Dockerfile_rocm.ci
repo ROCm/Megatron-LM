@@ -1,4 +1,4 @@
-ARG BASE_DOCKER=rocm/pytorch:rocm7.0.2_ubuntu24.04_py3.12_pytorch_release_2.8.0
+ARG BASE_DOCKER=rocm/pytorch:rocm7.0_ubuntu24.04_py3.12_pytorch_release_2.7.1
 FROM $BASE_DOCKER
 
 ARG PYTORCH_ROCM_ARCH_OVERRIDE="gfx942"
@@ -79,7 +79,7 @@ fi
 # Clone TE repo and submodules
 WORKDIR ${STAGE_DIR}
 
-ARG TE_COMMIT=c91bac54e9ff4992cdf2dbee9218d039986ebcd7
+ARG TE_COMMIT=release_v2.2_rocm
 ENV NVTE_FRAMEWORK=pytorch
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH_OVERRIDE}
 ENV NVTE_USE_HIPBLASLT=1
