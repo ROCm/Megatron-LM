@@ -62,7 +62,7 @@ RUN git clone https://github.com/sudhu2k/mamba mamba &&\
     cd mamba &&\
     git checkout hipcub_warp_threads_deprecation &&\
     git show --oneline -s &&\
-    pip install --no-build-isolation .
+    pip install --no-build-isolation --no-deps .
 
 # Build flash-attention
 ARG BUILD_FA="1"
