@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+
 
 DEFAULT_NAME="/checkpoints/llama-3_1-8b-nemo_v1.0"
 NAME="${1:-$DEFAULT_NAME}"

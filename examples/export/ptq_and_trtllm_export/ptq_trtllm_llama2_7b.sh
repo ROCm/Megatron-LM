@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+
 
 DEFAULT_NAME="/checkpoints/llama2-text-7b_v0.2.0"
 NAME="${1:-$DEFAULT_NAME}"

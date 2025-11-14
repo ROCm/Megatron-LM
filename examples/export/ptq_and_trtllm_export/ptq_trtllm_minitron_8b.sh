@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+
 
 DEFAULT_NAME="/checkpoints/nemotron3-8b_v0.3.0"
 NAME="${1:-$DEFAULT_NAME}"

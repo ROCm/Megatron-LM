@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e
+
 
 DEFAULT_NAME="/checkpoints/Mistral-NeMo-12B-Base"
 NAME="${1:-$DEFAULT_NAME}"

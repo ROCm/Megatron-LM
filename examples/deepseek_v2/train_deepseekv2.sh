@@ -4,7 +4,7 @@
 #
 # See LICENSE for license information.
 #################################################################################
-#set -e
+#
 
 TOKENIZER_MODEL="deepseek-ai/DeepSeek-V2-Lite"
 
