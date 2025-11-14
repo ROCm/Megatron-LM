@@ -95,6 +95,18 @@ if [ "$FSDP" -eq 1 ]; then
     fi
 fi
 
+if [ "$MEGATRON_FSDP" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
+    unset CUDA_DEVICE_MAX_CONNECTIONS
+    if [ "$TP" -gt 1 ]; then
+        echo "It is not recommended to use FSDP and TP together. Disabling TP."
+        TP=1
+        echo "Resetting TP=$TP"
+    fi
+fi
+
+
+
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
 DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/TE_FP8_${TE_FP8}/${TIME_STAMP}"
@@ -321,6 +333,10 @@ if [ "$TE_FP8" -eq 1 ]; then
 
     if [ "$FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
+    fi
+
+    if [ "$MEGATRON_FSDP" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather --keep_fp8_weight_transpose_cache" 
     fi
 fi
 
