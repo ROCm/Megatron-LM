@@ -93,9 +93,7 @@ if [ "$FSDP" -eq 1 ]; then
         TP=1
         echo "Resetting TP=$TP"
     fi
-fi
-
-if [ "$MEGATRON_FSDP" -eq 1 ]; then
+elif [ "$MEGATRON_FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
     unset CUDA_DEVICE_MAX_CONNECTIONS
     if [ "$TP" -gt 1 ]; then
@@ -104,8 +102,6 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
         echo "Resetting TP=$TP"
     fi
 fi
-
-
 
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
