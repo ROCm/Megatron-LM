@@ -85,11 +85,13 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
+MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
+FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 
 if [ "$FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
     if [ "$TP" -gt 1 ]; then
-        echo "It is not recommended to use FSDP and TP together. Disabling TP."
+        echo "It is not recommended to use PyTorch FSDP and TP together. Disabling TP."
         TP=1
         echo "Resetting TP=$TP"
     fi
@@ -97,7 +99,7 @@ elif [ "$MEGATRON_FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
     unset CUDA_DEVICE_MAX_CONNECTIONS
     if [ "$TP" -gt 1 ]; then
-        echo "It is not recommended to use FSDP and TP together. Disabling TP."
+        echo "It is not recommended to use Megatron FSDP and TP together. Disabling TP."
         TP=1
         echo "Resetting TP=$TP"
     fi
@@ -332,7 +334,10 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$MEGATRON_FSDP" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather --keep_fp8_weight_transpose_cache" 
+        # EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
+        if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather" 
+        fi
     fi
 fi
 
