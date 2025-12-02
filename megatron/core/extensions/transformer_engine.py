@@ -364,7 +364,8 @@ class TELinear(te.pytorch.Linear):
             else:
                 warnings.warn(
                     "Transformer Engine is missing `keep_fp8_weight_transpose_cache`; "
-                    "latest FP8 weight transpose cache optimizations will not be applied.",
+                    "latest FP8 weight transpose cache optimizations will not be applied. "
+                    "Consider upgrading to a newer version of Transformer Engine.",
                     UserWarning,
                 )
         if is_te_min_version("2.4.0"):
@@ -373,7 +374,8 @@ class TELinear(te.pytorch.Linear):
             else:
                 warnings.warn(
                     "Transformer Engine is missing `use_fsdp2`; latest FSDP2 features will "
-                    "not be applied.",
+                    "not be applied. Consider upgrading to a newer version of Transformer "
+                    "Engine.",
                     UserWarning,
                 )
 
@@ -550,7 +552,8 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             else:
                 warnings.warn(
                     "Transformer Engine is missing `keep_fp8_weight_transpose_cache`; "
-                    "latest FP8 weight transpose cache optimizations will not be applied.",
+                    "latest FP8 weight transpose cache optimizations will not be applied. "
+                    "Consider upgrading to a newer version of Transformer Engine.",
                     UserWarning,
                 )
 
@@ -560,7 +563,8 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             else:
                 warnings.warn(
                     "Transformer Engine is missing `use_fsdp2`; latest FSDP2 features will "
-                    "not be applied.",
+                    "not be applied. Consider upgrading to a newer version of Transformer "
+                    "Engine.",
                     UserWarning,
                 )
         if self.config.symmetric_ar_type is not None:
