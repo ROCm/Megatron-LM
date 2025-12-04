@@ -332,10 +332,6 @@ if [ "$TE_FP8" -eq 1 ]; then
         exit
     fi
 
-    if [ "$FSDP" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
-    fi
-
     if [ "$MEGATRON_FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
         if [ "$FP8_PARAM_GATHER" -eq 1 ]; then

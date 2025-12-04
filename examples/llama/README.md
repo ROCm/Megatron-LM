@@ -16,17 +16,13 @@ This guide provides the steps for setting up the environment and configuring the
 	 For example
    `docker run -it --network=host --device=/dev/kfd --device=/dev/dri --group-add=video --ipc=host --cap-add=SYS_PTRACE --security-opt seccomp=unconfined <image_name>`
 
-    **Note** that it is recommended to use `rocm/pytorch-training:latest` like images which
-have most requirements setup, for example `PyTorch >= 2.5.0` is needed for full support
-of FSDP-v2.
+    **Note** that it is recommended to use docker images like `rocm/pytorch-training:latest` which 
+    have most requirements setup (e.g.,  `PyTorch >= 2.5.0`  is needed for full support of FSDP-v2).
 
 3. **Install Megatron-LM**
   Run  `pip install .` in `/workspace/Megatron-LM` to install megatron package.
 
-    **Note** that it is also possible to use `rocm/megatron-lm:latest` like images, which
-have ROCm/Megatron-LM already installed. If doing so, the bind mount is not required,
-there is no need to install anything and please make sure to follow the README inside
-the container to run these examples.
+    **Note** that if you use `rocm/megatron-lm:latest` you also have to install ROCm/Megatron-LM as described above.
 
 ---
 
@@ -81,18 +77,11 @@ You can use either mock data or real data for training.
 When preparing a dataset, a tokenizer is required. The scripts support tokenizers
 which are fully specified with choices of `TOKENIZER_TYPE` and `TOKENIZER_MODEL`. With
 the exception of Llama 2 training script, the default `TOKENIZER_TYPE` is
-`HuggingFaceTokenizer` and for it, only a valid `TOKENIZER_MODEL` is needed. For
-example, after obtaining a [permission](https://huggingface.co/meta-llama/Llama-3.1-8B),
-run
+`HuggingFaceTokenizer` and for it, only a valid `TOKENIZER_MODEL` is needed. When `TOKENIZER_TYPE` is `HuggingFaceTokenizer`, 
+HuggingFace will automatically download the tokenizer files when specifying `TOKENIZER_MODEL` with the 
+model id (e.g. `meta-llama/Llama-3-8B`).
 
-```bash
-wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/special_tokens_map.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/special_tokens_map.json
-wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/tokenizer.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/tokenizer.json
-wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/tokenizer.model https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/original/tokenizer.model
-wget --header="Authorization: Bearer $HF_TOKEN" -O tokenizer/tokenizer_config.json https://huggingface.co/meta-llama/Llama-3.1-8B/resolve/main/tokenizer_config.json
-```
-
-with a valid `HF_TOKEN` to download Llama 3.1 tokenizer and pass the path of
+**Note** You have to use a valid `HF_TOKEN` if it's a restricted tokenzier and pass the path of
 `tokenizer` as `TOKENIZER_MODEL` to use it.
 
 **Note** that while the training scripts support default tokenizers, the user is
