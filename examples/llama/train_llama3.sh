@@ -351,7 +351,6 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
     fi
 fi
 
-echo "EXTRA_ARGS=$EXTRA_ARGS"
 run_cmd="
     torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
         $GPT_ARGS \
