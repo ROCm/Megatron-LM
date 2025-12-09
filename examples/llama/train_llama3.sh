@@ -95,14 +95,6 @@ if [ "$FSDP" -eq 1 ]; then
         TP=1
         echo "Resetting TP=$TP"
     fi
-elif [ "$MEGATRON_FSDP" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
-    unset CUDA_DEVICE_MAX_CONNECTIONS
-    if [ "$TP" -gt 1 ]; then
-        echo "It is not recommended to use Megatron FSDP and TP together. Disabling TP."
-        TP=1
-        echo "Resetting TP=$TP"
-    fi
 fi
 
 EXPERIMENT_DIR="experiment"
@@ -332,11 +324,13 @@ if [ "$TE_FP8" -eq 1 ]; then
         exit
     fi
 
+    if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather" 
+    fi
+
     if [ "$MEGATRON_FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
-        if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather" 
-        fi
+        
     fi
 fi
 
@@ -349,6 +343,16 @@ else
    LOGGING_ARGS=""
 fi
 
+if [ "$MEGATRON_FSDP" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --use-distributed-optimizer --use-nccl-ub --overlap-grad-reduce --overlap-param-gather --sequence-parallel"
+    if [ "$TP" -gt 1 ]; then
+        echo "It is not recommended to use Megatron FSDP and TP together. Disabling TP."
+        TP=1
+        echo "Resetting TP=$TP"
+    fi
+fi
+
+echo "EXTRA_ARGS=$EXTRA_ARGS"
 run_cmd="
     torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
         $GPT_ARGS \

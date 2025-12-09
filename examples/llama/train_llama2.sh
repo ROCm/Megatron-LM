@@ -103,11 +103,6 @@ if [ "$FSDP" -eq 1 ] && [ "$TP" -gt 1 ]; then
     echo "It is not recommended to use FSDP and TP together. Disabling TP."
     TP=1
     echo "Resetting TP=$TP"
-elif [ "$MEGATRON_FSDP" -eq 1 ] && [ "$TP" -gt 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
-    echo "It is not recommended to use FSDP and TP together. Disabling TP."
-    TP=1
-    echo "Resetting TP=$TP"
 fi
 
 EXPERIMENT_DIR="experiment"
@@ -353,6 +348,15 @@ if [ "$TE_FP8" -eq 1 ]; then
         fi
     fi
     
+fi
+
+if [ "$MEGATRON_FSDP" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
+    if [ "$TP" -gt 1 ]; then
+        echo "It is not recommended to use PyTorch FSDP and TP together. Disabling TP."
+        TP=1
+        echo "Resetting TP=$TP"
+    fi
 fi
 
 if [ -n "${WANDB_API_KEY}" ]; then
