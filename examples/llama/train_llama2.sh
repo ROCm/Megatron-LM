@@ -341,11 +341,12 @@ if [ "$TE_FP8" -eq 1 ]; then
         exit
     fi
 
+    if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather" 
+    fi
+
     if [ "$MEGATRON_FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
-        if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather" 
-        fi
     fi
     
 fi

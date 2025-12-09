@@ -330,7 +330,6 @@ if [ "$TE_FP8" -eq 1 ]; then
 
     if [ "$MEGATRON_FSDP" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
-        
     fi
 fi
 
