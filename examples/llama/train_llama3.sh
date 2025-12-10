@@ -88,10 +88,10 @@ DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 
-if [ "$FSDP" -eq 1 ]; then
-    unset CUDA_DEVICE_MAX_CONNECTIONS
+[ "$FSDP" -eq 1 ] && unset CUDA_DEVICE_MAX_CONNECTIONS
+if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     if [ "$TP" -gt 1 ]; then
-        echo "It is not recommended to use PyTorch FSDP and TP together. Disabling TP."
+        echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
         echo "Resetting TP=$TP"
     fi
@@ -343,12 +343,7 @@ else
 fi
 
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --use-distributed-optimizer --use-nccl-ub --overlap-grad-reduce --overlap-param-gather --sequence-parallel"
-    if [ "$TP" -gt 1 ]; then
-        echo "It is not recommended to use Megatron FSDP and TP together. Disabling TP."
-        TP=1
-        echo "Resetting TP=$TP"
-    fi
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
 fi
 
 run_cmd="

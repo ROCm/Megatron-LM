@@ -99,10 +99,12 @@ else
     TOKENIZER_MODEL="${TOKENIZER_MODEL:-NousResearch/Llama-2-7b-chat-hf}"
 fi
 
-if [ "$FSDP" -eq 1 ] && [ "$TP" -gt 1 ]; then
-    echo "It is not recommended to use FSDP and TP together. Disabling TP."
-    TP=1
-    echo "Resetting TP=$TP"
+if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
+    if [ "$TP" -gt 1 ]; then
+        echo "It is not recommended to use FSDP and TP together. Disabling TP."
+        TP=1
+        echo "Resetting TP=$TP"
+    fi
 fi
 
 EXPERIMENT_DIR="experiment"
@@ -352,12 +354,7 @@ if [ "$TE_FP8" -eq 1 ]; then
 fi
 
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor"
-    if [ "$TP" -gt 1 ]; then
-        echo "It is not recommended to use PyTorch FSDP and TP together. Disabling TP."
-        TP=1
-        echo "Resetting TP=$TP"
-    fi
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
 fi
 
 if [ -n "${WANDB_API_KEY}" ]; then
