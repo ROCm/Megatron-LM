@@ -100,6 +100,7 @@ else
 fi
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
+    unset CUDA_DEVICE_MAX_CONNECTIONS
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1

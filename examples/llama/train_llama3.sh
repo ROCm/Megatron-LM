@@ -88,8 +88,8 @@ DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 
-[ "$FSDP" -eq 1 ] && unset CUDA_DEVICE_MAX_CONNECTIONS
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
+    unset CUDA_DEVICE_MAX_CONNECTIONS
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
