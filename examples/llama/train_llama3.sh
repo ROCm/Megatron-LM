@@ -310,7 +310,7 @@ if [ "$TE_FP8" -eq 1 ]; then
     elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
             --fp8-format=e4m3 \
-            --keep_fp8_weight_transpose_cache \
+            --keep-fp8-transpose-cache \
         "
         # Currently we have to keep fp8 weight tranpose cache due to an issue
         # Also, TE does not enable mxfp8 by default
@@ -329,7 +329,7 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$MEGATRON_FSDP" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
+        EXTRA_ARGS="$EXTRA_ARGS --keep-fp8-transpose-cache" 
     fi
 fi
 
