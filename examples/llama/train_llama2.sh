@@ -282,12 +282,17 @@ EXTRA_ARGS="
 "
 
 if [ "$FSDP" -eq 1 ]; then
-    unset CUDA_DEVICE_MAX_CONNECTIONS
     EXTRA_ARGS="$EXTRA_ARGS --use-torch-fsdp2"
     if [ "$SEQ_PARALLEL" -eq 1 ]; then
         echo "Warning: Sequence Parallelism and FSDP2 have conflicting CUDA_MAX_CONNECTIONS requirements. It is recommended not to use them together."
         echo "FSDP2 and sequence parallel are on. Disabling sequence parallel."
         SEQ_PARALLEL=0
+    fi
+
+    if [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
+        echo "Warning: FSDP2 and MXFP8 do not currently work together."
+        echo "FSDP2 and MXFP8 are on. Disabling MXFP8, setting TE_FP8_RECIPE to 'delayed'."
+        TE_FP8_RECIPE="delayed"
     fi
 else
     if [ "$OPTIMIZER" == "adam" ]; then
