@@ -910,6 +910,42 @@ def validate_args(args, defaults={}):
                 "Using tensor model parallelism or context parallelism require setting the environment variable " \
                 "CUDA_DEVICE_MAX_CONNECTIONS to 1"
 
+# is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
+#     if (args.tensor_model_parallel_size > 1 or args.context_parallel_size > 1) \
+#         and get_device_arch_version() < 10:
+#         # CUDA_DEVICE_MAX_CONNECTIONS requirement no longer exists since the Blackwell architecture
+#         if args.use_torch_fsdp2 or args.use_megatron_fsdp:
+#             fsdp_impl = "Torch-FSDP2" if args.use_torch_fsdp2 else "Megatron-FSDP"
+#             warn_rank_0(
+#                 f"Using tensor model parallelism or context parallelism with {fsdp_impl} together. "
+#                 "Try not to using them together since they require different CUDA_MAX_CONNECTIONS "
+#                 "settings for best performance. sequence parallelism requires setting the "
+#                 f"environment variable CUDA_DEVICE_MAX_CONNECTIONS to 1 while {fsdp_impl} "
+#                 "requires not setting CUDA_DEVICE_MAX_CONNECTIONS=1 for better parallelization.",
+#                 args.rank,
+#             )
+#         elif args.overlap_moe_expert_parallel_comm:
+#             warn_rank_0(
+#                 "For Hopper and before, try not to use tensor model parallelism or context parallelism with overlap_moe_expert_parallel_comm. "
+#                 "Using tensor/context model parallelism requires setting the environment "
+#                 "variable CUDA_DEVICE_MAX_CONNECTIONS to 1 to maximize the performance. "
+#                 "While overlap_moe_expert_parallel_comm requires setting a larger CUDA_DEVICE_MAX_CONNECTIONS "
+#                 "for better parallelization. If you want to use both, you can set CUDA_DEVICE_MAX_CONNECTIONS to 1 or 32, "
+#                 "which depends on which parallelization you want to prioritize.",
+#                 args.rank,
+#             )
+#         else:
+#             if is_rocm:
+#                 fsdp_impl = "Torch-FSDP2" if args.use_torch_fsdp2 else "Megatron-FSDP"
+#                 warn_rank_0(
+#                     "Runing on ROCm: CUDA_DEVICE_MAX_CONNECTIONS is not used. "
+#                     "Set it to a ROCm-friendly value (e.g., 8) or leave unset.",
+#                     args.rank,
+#                 )
+#             else:
+#                 assert os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') == "1", \
+#                     "Using tensor model parallelism or context parallelism require setting the environment variable " \
+#                     "CUDA_DEVICE_MAX_CONNECTIONS to 1"
     # Setting FSDP communication groups for high priority streams for Blackwell and later architectures
     # Assigning high priority to communication streams ensures that communication kernels are scheduled
     # with higher priority, minimizing the exposed communication when it is overlapped with other computation kernels.
@@ -1290,9 +1326,11 @@ def _add_transformer_engine_args(parser):
     group.add_argument('--fp8-param-gather', action='store_true',
                        help='Keep the compute param in fp8 (do not use any other intermediate '
                             'dtype) and perform the param all-gather in fp8.')
-    group.add_argument('--keep_fp8_weight_transpose_cache', action='store_true', 
+    group.add_argument('--keep-fp8-weight-transpose-cache-te', action='store_true', dest='keep_fp8_weight_transpose_cache',
                        help='Keep the fp8 weight transpose cache in memory to avoid recomputing it '
                             ' This will use more memory')
+    group.add_argument('--keep_fp8_weight_transpose_cache', action='store_true', dest='deprecated_keep_fp8_weight_transpose_cache',
+                       help='DEPRECATED: Use --keep-fp8-weight-transpose-cache-te instead')
 
     group.add_argument('--first-last-layers-bf16', action='store_true',
                        help='Construct first and last layers in bf16 when doing FP8 training.')
