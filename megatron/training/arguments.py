@@ -1114,6 +1114,15 @@ def validate_args(args, defaults={}):
     if args.load_main_params_from_ckpt:
         assert args.no_load_optim, '--load-main-params-from-ckpt must be used with --no-load-optim.'
 
+    # Training args
+    if getattr(args, "deprecated_keep_fp8_weight_transpose_cache", False):
+        if args.rank == 0:
+            print(
+                "--keep_fp8_weight_transpose_cache is deprecated and has no effect. "
+                "Use --keep-fp8-weight-transpose-cache-te instead."
+            )
+            args.keep_fp8_weight_transpose_cache = True
+
     # Inference args
     if args.inference_batch_times_seqlen_threshold > -1:
         assert args.pipeline_model_parallel_size > 1, \
