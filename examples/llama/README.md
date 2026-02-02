@@ -222,7 +222,9 @@ follow these steps for 2 Node run with Node0 as master node :
   `1` to enable Megatron-LM's custom FSDP with DTensor checkpointing (default: 0). It adds automatically `--use-megatron-fsdp --ckpt-format fsdp_dtensor` in the script. Of note, this disables `TP>1` automatically.
 
 - **FP8_PARAM_GATHER:**
-  Controls FP8 primaries vs FP8 caches when `TE_FP8=1` (default: 0). Set to `1` to add `--fp8-param-gather` (weights kept in FP8, smaller all-gathers). Set to `0` to skip the `--fp8-param-gather` flag (weights stay BF16, FP8 caches are used for compute; FP8 weight transpose cache is still kept). Currently, `FP8_PARAM_GATHER` and `TE_FP8_RECIPE` set to `mxfp8` cannot be used together, resulting in the `FP8_PARAM_GATHER` flag to be ignored.
+  Controls FP8 primaries vs FP8 caches when `TE_FP8=1` (default: 0). Set to `1` to add `--fp8-param-gather` (weights kept in FP8, smaller all-gathers). Set to `0` to skip the `--fp8-param-gather` flag (weights stay BF16, FP8 caches are used for compute; FP8 weight transpose cache is still kept). Currently, `FP8_PARAM_GATHER` and `TE_FP8_RECIPE` set to `mxfp8` cannot be used together, resulting in the `FP8_PARAM_GATHER` flag to be ignored. 
+  
+  Warning: FSDP2 FP8 param gather is not supported yet and it falls back to BF16 `all_gather` instead, turning off `fp8_param_gather`.
 
 - **ENABLE_PROFILING:**  
   `1` to enable PyTorch profiling for performance analysis (default: 0).
