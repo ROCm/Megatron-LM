@@ -337,7 +337,6 @@ if [ "$TE_FP8" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
             --fp8-format=e4m3 \
         "
-        FP8_TRANSPOSE_CACHE=1
         # Currently we have to keep fp8 weight tranpose cache due to an issue
         # Also, TE does not enable mxfp8 by default
         export NVTE_ROCM_ENABLE_MXFP8=1
