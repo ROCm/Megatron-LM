@@ -334,12 +334,17 @@ if [ "$TE_FP8" -eq 1 ]; then
             --attention-softmax-in-fp32 \
         "
     elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
-            --fp8-format=e4m3 \
-        "
-        # Currently we have to keep fp8 weight tranpose cache due to an issue
-        # Also, TE does not enable mxfp8 by default
-        export NVTE_ROCM_ENABLE_MXFP8=1
+        if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
+                --fp8-format=e4m3 \
+            "
+            # Also, TE does not enable mxfp8 by default
+            export NVTE_ROCM_ENABLE_MXFP8=1
+        else 
+            echo "Llama2 supports MXFP8 only for FSDP and MEGATRON_FSDP."
+            exit
+        fi
+        
     elif [ "$TE_FP8_RECIPE" == "tensorwise" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=tensorwise \
             --fp8-format=hybrid \
@@ -353,7 +358,11 @@ if [ "$TE_FP8" -eq 1 ]; then
         if [[ "$TE_FP8_RECIPE" != "mxfp8" ]]; then
             EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
         else
-            echo "Warning: FP8_PARAM_GATHER and MXFP8 cannot be currently used together. Ignoring FP8_PARAM_GATHER flag."
+            if [[ "$FSDP" -eq 1 ]]; then
+                EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+            else
+                echo "Warning: FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1. Ignoring FP8_PARAM_GATHER flag."
+            fi
         fi
     fi
 
