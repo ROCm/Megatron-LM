@@ -289,11 +289,11 @@ if [ "$FSDP" -eq 1 ]; then
         SEQ_PARALLEL=0
     fi
 
-    if [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
-        echo "Warning: FSDP2 and MXFP8 do not currently work together."
-        echo "FSDP2 and MXFP8 are on. Disabling MXFP8, setting TE_FP8_RECIPE to 'delayed'."
-        TE_FP8_RECIPE="delayed"
-    fi
+    # if [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
+    #     echo "Warning: FSDP2 and MXFP8 do not currently work together."
+    #     echo "FSDP2 and MXFP8 are on. Disabling MXFP8, setting TE_FP8_RECIPE to 'delayed'."
+    #     TE_FP8_RECIPE="delayed"
+    # fi
 else
     if [ "$OPTIMIZER" == "adam" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --use-distributed-optimizer --overlap-param-gather"
@@ -334,14 +334,14 @@ if [ "$TE_FP8" -eq 1 ]; then
             --attention-softmax-in-fp32 \
         "
     elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
-        if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
+        if [ "$MEGATRON_FSDP" -eq 1 ]; then
             EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
                 --fp8-format=e4m3 \
             "
-            # Also, TE does not enable mxfp8 by default
+        # TE does not enable mxfp8 by default
             export NVTE_ROCM_ENABLE_MXFP8=1
         else 
-            echo "Llama2 supports MXFP8 only for FSDP and MEGATRON_FSDP."
+            echo "Error: Llama2 supports MXFP8 only for MEGATRON_FSDP."
             exit
         fi
         
@@ -354,15 +354,12 @@ if [ "$TE_FP8" -eq 1 ]; then
         exit
     fi
 
-    if [[ "$FP8_PARAM_GATHER" -eq 1 ]]; then
-        if [[ "$TE_FP8_RECIPE" != "mxfp8" ]]; then
+    if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
+        if [ "$TE_FP8_RECIPE" != "mxfp8" ]; then
             EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
         else
-            if [[ "$FSDP" -eq 1 ]]; then
-                EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-            else
-                echo "Warning: FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1. Ignoring FP8_PARAM_GATHER flag."
-            fi
+            echo "Error: For Llama2 FP8_PARAM_GATHER and MXFP8 cannot be currently used together."
+            exit
         fi
     fi
 

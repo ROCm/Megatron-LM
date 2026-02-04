@@ -312,7 +312,7 @@ if [ "$TE_FP8" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
             --fp8-format=e4m3 \
         "
-        # Also, TE does not enable mxfp8 by default
+        # TE does not enable mxfp8 by default
         export NVTE_ROCM_ENABLE_MXFP8=1
     elif [ "$TE_FP8_RECIPE" == "tensorwise" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=tensorwise \
@@ -323,15 +323,12 @@ if [ "$TE_FP8" -eq 1 ]; then
         exit
     fi
 
-    if [[ "$FP8_PARAM_GATHER" -eq 1 ]]; then
-        if [[ "$TE_FP8_RECIPE" != "mxfp8" ]]; then
+    if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ]  && [ "$FSDP" -eq 1 ]; then
             EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
         else
-            if [[ "$FSDP" -eq 1 ]]; then
-                EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-            else
-                echo "Warning: FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1. Ignoring FP8_PARAM_GATHER flag."
-            fi
+            echo "Error: For Llama3 FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1"
+            exit
         fi
     fi
 
