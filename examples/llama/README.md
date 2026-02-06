@@ -164,7 +164,7 @@ distributed optimizer, gradient accumulation fusion and fp16.
 
 #### FP8 options with Megatron-LM FSDP (train_llama3.sh)
   - **FP8 primary weights (fp8_model_init, param gather):** `TE_FP8=1 MEGATRON_FSDP=1 FP8_PARAM_GATHER=1 bash examples/llama/train_llama3.sh`
-  - **BF16 primaries + FP8 caches (fp8_autocast):** `TE_FP8=1 MEGATRON_FSDP=1 FP8_PARAM_GATHER=0 bash examples/llama/train_llama3.sh`
+  - **BF16 primary weights + FP8 caches (fp8_autocast):** `TE_FP8=1 MEGATRON_FSDP=1 FP8_PARAM_GATHER=0 bash examples/llama/train_llama3.sh`
   - Of note: the script always keeps the FP8 weight transpose cache for Megatron FSDP when FP8 is on; turning off `FP8_PARAM_GATHER` only removes the `--fp8-param-gather` flag.
 
 
@@ -205,6 +205,9 @@ follow these steps for 2 Node run with Node0 as master node :
 
 - **TE_FP8_RECIPE:**  
   `delayed` (default), `tensorwise`, `mxfp8` (supported on MI350) 
+  
+- **FP8_TRANSPOSE_CACHE:**  
+  `0` (default), `1` Keeps the fp8 weight transpose cache in memory to avoid recomputing it, boosting performance but using more memory.
 
 - **GEMM_TUNING:**  
   `1` (default) to enable GEMM tuning, which boosts performance by using the best GEMM kernels. Currently not supported for `mxfp8`.
@@ -219,7 +222,9 @@ follow these steps for 2 Node run with Node0 as master node :
   `1` to enable Megatron-LM's custom FSDP with DTensor checkpointing (default: 0). It adds automatically `--use-megatron-fsdp --ckpt-format fsdp_dtensor` in the script. Of note, this disables `TP>1` automatically.
 
 - **FP8_PARAM_GATHER:**
-  Controls FP8 primaries vs FP8 caches when `TE_FP8=1` and `MEGATRON_FSDP=1` (default: 0). Set to `1` to add --fp8-param-gather` (weights kept in FP8, smaller all-gathers). Set to `0` to skip the `--fp8-param-gather` flag (weights stay BF16, FP8 caches are used for compute; FP8 weight transpose cache is still kept).
+  Controls FP8 primary weights vs FP8 caches when `TE_FP8=1` (default: 0). Set to `1` to add `--fp8-param-gather` (weights kept in FP8, smaller all-gathers). Set to `0` to skip the `--fp8-param-gather` flag (weights stay BF16, FP8 caches are used for compute; FP8 weight transpose cache is still kept). 
+  
+  Warning: FSDP2 FP8 param gather is not supported yet and it falls back to BF16 `all_gather` instead, turning off `fp8_param_gather`.
 
 - **ENABLE_PROFILING:**  
   `1` to enable PyTorch profiling for performance analysis (default: 0).
