@@ -4,7 +4,17 @@ set -x
 
 # Install mock for unit tests
 pip install mock
-pip install yq
+
+# Install Go version of yq (required for ignore logic)
+# Matches upstream installation in Dockerfile.ci.dev
+YQ_VERSION=4.44.1
+if ! command -v yq &> /dev/null || ! yq eval '.test' <<< 'test: value' &> /dev/null 2>&1; then
+    echo "Installing Go version of yq..."
+    wget https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64 -O /usr/local/bin/yq
+    chmod a+x /usr/local/bin/yq
+    echo "yq installed successfully"
+fi
+
 chmod +x run_unit_tests_bucketed.sh
 
 BUCKETS=(
