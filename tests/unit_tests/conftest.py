@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+import subprocess
 
 import pytest
 import torch
@@ -109,3 +110,33 @@ def reset_env_vars():
     # After the test, restore the original environment
     os.environ.clear()
     os.environ.update(original_env)
+
+
+def pytest_runtest_teardown(item, nextitem):
+    """Run rocm-smi after each test to monitor GPU status."""
+    # Only run on rank 0 to avoid duplicate output
+    if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        try:
+            print("\n" + "=" * 80)
+            print(f"ROCm-SMI output after test: {item.nodeid}")
+            print("=" * 80)
+            result = subprocess.run(
+                ["rocm-smi"],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                print(result.stdout)
+            else:
+                print(f"rocm-smi returned error code {result.returncode}")
+                print(result.stderr)
+        except FileNotFoundError:
+            # rocm-smi not available (probably on CUDA system)
+            pass
+        except subprocess.TimeoutExpired:
+            print("rocm-smi command timed out")
+        except Exception as e:
+            print(f"Failed to run rocm-smi: {e}")
+        finally:
+            print("=" * 80 + "\n")
