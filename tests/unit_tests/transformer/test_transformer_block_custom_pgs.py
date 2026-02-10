@@ -34,38 +34,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer, TransformerLayerSubmodules
 from tests.unit_tests.test_utilities import Utils
 
-def destroy_hyper_comm_grid(grid):
-    """Clean up HyperCommGrid and its process groups.
-    
-    Args:
-        grid: HyperCommGrid instance to clean up
-    """
-    # Get all process groups from the grid before deleting it
-    process_groups = []
-    try:
-        # HyperCommGrid stores process groups in _pgs dictionary
-        if hasattr(grid, '_pgs'):
-            for pg in grid._pgs.values():
-                if pg is not None and pg not in process_groups:
-                    process_groups.append(pg)
-    except Exception as e:
-        print(f"  [Cleanup] Warning: Could not enumerate process groups: {e}")
-    
-    # Teardown grid
-    del grid
-    
-    # Now try to destroy the process groups
-    # NOTE: This may not work on all PyTorch versions - the groups might be 
-    # reference-counted and destroying them explicitly can cause issues
-    for group in process_groups:
-        try:
-            # Only destroy non-default world groups
-            if group != torch.distributed.group.WORLD:
-                torch.distributed.destroy_process_group(group)
-        except Exception as e:
-            # Destroying process groups can fail, just log and continue
-            print(f"  [Cleanup] Warning: Could not destroy process group: {e}")
-
 
 class HeterogenousTransformerLayer(TransformerLayer):
     """A transformer layer that supports different process groups for attention and MLP.
@@ -367,17 +335,6 @@ class TestTransformerBlockWithProcessGroups:
         # Forward passes
         output_default = default_block(hidden_states=hidden_states_default, attention_mask=None)
         output_custom = custom_block(hidden_states=hidden_states_custom, attention_mask=None)
-        
-        output_default.backward(torch.ones_like(output_default) * 1e3)
-        output_custom.backward(torch.ones_like(output_custom) * 1e3)
-
-        try:
-            destroy_hyper_comm_grid(grid)
-        except Exception as e:
-            print(f"  [Cleanup] Warning: Could not destroy grid: {e}")
-        # Verify gradients match for parameters
-        # with DDP grad attribute is None, only main_grad is available
-
         # Verify outputs match
         torch.testing.assert_close(
             output_default,
@@ -387,6 +344,10 @@ class TestTransformerBlockWithProcessGroups:
             msg="Forward outputs don't match between default and custom process groups",
         )
 
+        output_default.backward(torch.ones_like(output_default) * 1e3)
+        output_custom.backward(torch.ones_like(output_custom) * 1e3)
+        # Verify gradients match for parameters
+        # with DDP grad attribute is None, only main_grad is available
         for i, (default_param, custom_param) in enumerate(
             zip(default_block.parameters(), custom_block.parameters())
         ):
@@ -491,11 +452,7 @@ class TestTransformerBlockWithProcessGroups:
         hidden_states.retain_grad()
 
         output_custom = custom_block(hidden_states=hidden_states, attention_mask=None)
-        
-        try:
-            destroy_hyper_comm_grid(grid)
-        except Exception as e:
-            print(f"  [Cleanup] Warning: Could not destroy grid: {e}")
+
         assert (
             output_custom.shape[0] == sequence_length
         ), f"Output shape is {output_custom.shape} dont match sequence length {sequence_length}"
@@ -604,12 +561,6 @@ class TestTransformerBlockWithProcessGroups:
         output_cp2_tp_2_dp_2 = transformer_block_cp2_tp2_dp_2(
             hidden_states=hidden_states, attention_mask=None
         )
-
-        try:
-            destroy_hyper_comm_grid(grid_cp_2_tp_2_dp_2)
-            destroy_hyper_comm_grid(grid_cp_2_tp_4)
-        except Exception as e:
-            print(f"  [Cleanup] Warning: Could not destroy grid: {e}")
 
         assert output_cp2_tp_2_dp_2.shape == (
             sequence_length,
@@ -750,11 +701,6 @@ class TestTransformerBlockWithProcessGroups:
 
         output_default, _ = default_mlp(hidden_states)
         output_custom, _ = custom_mlp(hidden_states)
-
-        try:
-            destroy_hyper_comm_grid(grid)
-        except Exception as e:
-            print(f"  [Cleanup] Warning: Could not destroy grid: {e}")
 
         torch.testing.assert_close(output_default, output_custom, rtol=1e-8, atol=0)
 
