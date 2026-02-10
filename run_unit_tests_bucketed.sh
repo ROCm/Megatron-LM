@@ -142,6 +142,12 @@ echo "Running bucket: $BUCKET"
 echo "Environment: $ENVIRONMENT"
 echo "Markers: $MARKER"
 echo "Ignore args count: ${#IGNORE_ARGS[@]}"
+if [[ ${#IGNORE_ARGS[@]} -gt 0 ]]; then
+    echo "Ignoring the following paths:"
+    for ignore_arg in "${IGNORE_ARGS[@]}"; do
+        echo "  $ignore_arg"
+    done
+fi
 echo "============================================"
 echo ""
 

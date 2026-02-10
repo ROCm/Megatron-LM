@@ -4,6 +4,7 @@ set -x
 
 # Install mock for unit tests
 pip install mock
+pip install yq
 chmod +x run_unit_tests_bucketed.sh
 
 BUCKETS=(
@@ -13,7 +14,7 @@ BUCKETS=(
     "tests/unit_tests/transformer/*.py"
     "tests/unit_tests/transformer/moe"
     "tests/unit_tests/distributed/fsdp"
-    "tests/unit_tests/*.py"
+    "tests/unit_tests"
 )
 
 for bucket in "${BUCKETS[@]}"; do
