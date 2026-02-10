@@ -113,13 +113,87 @@ def reset_env_vars():
 
 
 def pytest_runtest_teardown(item, nextitem):
-    """Run rocm-smi after each test to monitor GPU status."""
+    """Run rocm-smi and resource monitoring after each test."""
     # Only run on rank 0 to avoid duplicate output
     if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        import subprocess
+        
+        print("\n" + "=" * 80)
+        print(f"Resource Monitor after test: {item.nodeid}")
+        print("=" * 80)
+        
+        # System Memory
         try:
-            print("\n" + "=" * 80)
-            print(f"ROCm-SMI output after test: {item.nodeid}")
-            print("=" * 80)
+            with open('/proc/meminfo', 'r') as f:
+                meminfo = {}
+                for line in f:
+                    if 'MemTotal:' in line:
+                        meminfo['total'] = int(line.split()[1]) // 1024  # MB
+                    elif 'MemAvailable:' in line:
+                        meminfo['available'] = int(line.split()[1]) // 1024  # MB
+                    elif 'MemFree:' in line:
+                        meminfo['free'] = int(line.split()[1]) // 1024  # MB
+                if meminfo:
+                    print(f"System Memory: {meminfo.get('available', 'N/A')} MB available / "
+                          f"{meminfo.get('total', 'N/A')} MB total")
+        except Exception as e:
+            print(f"Could not read memory info: {e}")
+        
+        # Process count
+        try:
+            import os
+            process_count = len([p for p in os.listdir('/proc') if p.isdigit()])
+            python_count = subprocess.run(
+                ["pgrep", "-c", "python"],
+                capture_output=True,
+                text=True,
+                timeout=5
+            )
+            print(f"Processes: {process_count} total, "
+                  f"{python_count.stdout.strip() if python_count.returncode == 0 else 'N/A'} python")
+        except Exception as e:
+            print(f"Could not count processes: {e}")
+        
+        # File descriptors
+        try:
+            fd_count = 0
+            for pid_dir in os.listdir('/proc'):
+                if not pid_dir.isdigit():
+                    continue
+                try:
+                    fd_count += len(os.listdir(f'/proc/{pid_dir}/fd'))
+                except:
+                    pass
+            print(f"File Descriptors: {fd_count} open")
+        except Exception as e:
+            print(f"Could not count file descriptors: {e}")
+        
+        # Shared memory usage
+        try:
+            if os.path.exists('/dev/shm'):
+                result = subprocess.run(
+                    ["du", "-sh", "/dev/shm"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5
+                )
+                if result.returncode == 0:
+                    shm_size = result.stdout.split()[0]
+                    print(f"/dev/shm usage: {shm_size}")
+                
+                # Count NCCL and HSA files
+                nccl_count = len([f for f in os.listdir('/dev/shm') if f.startswith('nccl-')])
+                hsa_count = len([f for f in os.listdir('/dev/shm') if f.startswith('hsa')])
+                torch_count = len([f for f in os.listdir('/dev/shm') if f.startswith('torch_')])
+                if nccl_count or hsa_count or torch_count:
+                    print(f"  NCCL files: {nccl_count}, HSA files: {hsa_count}, Torch files: {torch_count}")
+        except Exception as e:
+            print(f"Could not check /dev/shm: {e}")
+        
+        print("-" * 80)
+        
+        # ROCm-SMI
+        try:
             result = subprocess.run(
                 ["rocm-smi"],
                 capture_output=True,
