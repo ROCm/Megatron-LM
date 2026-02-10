@@ -13,7 +13,7 @@ BUCKETS=(
     "tests/unit_tests/transformer/*.py"
     "tests/unit_tests/transformer/moe"
     "tests/unit_tests/distributed/fsdp"
-    "tests/unit_tests"
+    "tests/unit_tests/*.py"
 )
 
 for bucket in "${BUCKETS[@]}"; do
