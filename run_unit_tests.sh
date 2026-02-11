@@ -18,11 +18,11 @@ fi
 chmod +x run_unit_tests_bucketed.sh
 
 BUCKETS=(
-    "tests/unit_tests/transformer/moe"
+    "tests/unit_tests/transformer/*.py"
     "tests/unit_tests/data/"
     "tests/unit_tests/dist_checkpointing/*.py"
     "tests/unit_tests/dist_checkpointing/models/"
-    "tests/unit_tests/transformer/*.py"
+    "tests/unit_tests/transformer/moe"
     "tests/unit_tests/distributed/fsdp"
     "tests/unit_tests"
 )
