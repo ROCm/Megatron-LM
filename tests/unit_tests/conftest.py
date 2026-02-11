@@ -65,6 +65,9 @@ def tmp_path_dist_ckpt(tmp_path_factory) -> Path:
     tmp_dir = tmp_path_factory.mktemp('ignored', numbered=False)
     tmp_dir = tmp_dir.parent.parent / 'tmp_dist_ckpt'
 
+    # Ensure directory exists for all ranks
+    os.makedirs(tmp_dir, exist_ok=True)
+
     if Utils.rank == 0:
         with TempNamedDir(tmp_dir, sync=False):
             yield tmp_dir
