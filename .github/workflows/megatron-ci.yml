@@ -22,7 +22,7 @@ jobs:
   build_and_test:
     name: Build and Test on GPU
     timeout-minutes: 720
-    runs-on: linux-mi325-8
+    runs-on: linux-megatron-mi325-8
 
     steps:
       - name: Checkout repository
@@ -68,7 +68,7 @@ jobs:
         id: te-ref
         run: |
           set -e
-          BRANCH=release_v2.2_bugfixes_megatron_IFU
+          BRANCH=release_v2.2_rocm
           SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
           if [ -z "$SHA" ]; then
             echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
@@ -112,7 +112,6 @@ jobs:
             --device=/dev/kfd \
             --device=/dev/dri \
             --group-add "$(getent group video | cut -d: -f3)" \
-            --ipc=host \
             --cap-add=SYS_PTRACE \
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
@@ -127,7 +126,7 @@ jobs:
         if: always()
         uses: dorny/test-reporter@v1
         with:
-          name: Megatron-LM unit tests
+          name: Megatron-LM unit tests report
           path: output/junit_report_*.xml
           reporter: java-junit
           fail-on-error: false
