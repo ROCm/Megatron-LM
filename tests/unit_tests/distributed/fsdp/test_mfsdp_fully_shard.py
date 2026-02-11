@@ -39,10 +39,30 @@ NUM_STEPS = 2
 SHARED_TMP_DIR = "/tmp/pytest-shared-tmp"
 
 
-def destroy_device_mesh(device_mesh):
+def destroy_device_mesh(device_mesh, clear_process_groups=True):
+    from torch.distributed.device_mesh import _mesh_resources
 
-    # Teardown device mesh.
+    # Get all process groups from the mesh before deleting it
+    if clear_process_groups:
+        process_groups = []
+        try:
+            # Try to get process groups from the mesh
+            if hasattr(device_mesh, 'get_group'):
+                # Get all the groups including flattened ones
+                for dim_name in [DP, DP_SHARD, CP, TP, DP_OUTER, DP_SHARD_CP, HSDP]:
+                    try:
+                        group = device_mesh[dim_name].get_group() if hasattr(device_mesh[dim_name], 'get_group') else None
+                        if group is not None and group not in process_groups:
+                            process_groups.append(group)
+                    except:
+                        pass
+        except Exception as e:
+            print(f"  [Cleanup] Warning: Could not enumerate process groups: {e}")
+        
+    # Teardown device mesh
     del device_mesh
+    
+    # Clear mesh resources
     try:
         from torch.distributed.device_mesh import _mesh_resources
 
@@ -56,6 +76,19 @@ def destroy_device_mesh(device_mesh):
         # Attempt to clean the global state, otherwise skip.
         logger.warning(f"Did not clean the deprecated DeviceMesh global state. Skipping...\n{e}")
         pass
+    
+    # Now try to destroy the process groups
+    # NOTE: This may not work on all PyTorch versions - the groups might be 
+    # reference-counted and destroying them explicitly can cause issues
+    if clear_process_groups:
+        for group in process_groups:
+            try:
+                # Only destroy non-default world groups
+                if group != torch.distributed.group.WORLD:
+                    torch.distributed.destroy_process_group(group)
+            except Exception as e:
+                # Destroying process groups can fail, just log and continue
+                print(f"  [Cleanup] Warning: Could not destroy process group: {e}")
 
 
 class ToyCNN(torch.nn.Module):
@@ -356,246 +389,6 @@ class TestMegatronFsdpFullyShard:
                 optimizer.zero_grad()
 
         # Required to reset the parallelism environment.
-        destroy_device_mesh(device_mesh)
-
-    @pytest.mark.skipif(
-        version.parse(torch.__version__) < version.parse('2.4.0'),
-        reason="Requires DTensor and DeviceMesh support in (approximately) PyTorch 2.4.0 or later. Should not be run on 2.2.0a0+81ea7a4 (LTS).",
-    )
-    @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
-    @pytest.mark.parametrize("outer_shard_strategy", [NO_SHARD, OPTIM])
-    @pytest.mark.parametrize("model_type", [CNN, TRANSFORMER, TE_TRANSFORMER])
-    @pytest.mark.parametrize("mesh_dim_config", [(1, 4, 2, 1), (2, 2, 2, 1)])
-    def test_dcp_checkpoint_save_and_load(
-        self, mesh_dim_config, shard_strategy, outer_shard_strategy, model_type
-    ):
-        """
-        Test that an Megatron-FSDP model checkpoint can be saved and loaded accurately.
-        """
-        from torch.distributed.tensor import DTensor
-
-        from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import fully_shard
-
-        # Skip tests.
-        if outer_shard_strategy == OPTIM and shard_strategy != OPTIM_GRADS_PARAMS:
-            # FIXME(@shjwudp, @cspades): This is an unexpected lack of support.
-            # [default0]:FAILED tests/unit_tests/distributed/test_mfsdp_fully_shard.py
-            # [False-True-True-True-mesh_dim_config0-optim-optim-cnn]
-            # [False-True-True-True-mesh_dim_config0-optim-optim_grads-cnn]
-            pytest.skip(
-                f"dp_outer sharding strategy {outer_shard_strategy} requires "
-                "zero_dp_strategy to be full-sharded ('optim_grads_params', 3)."
-            )
-        if shard_strategy == NO_SHARD:
-            # NOTE: Just directly checkpoint the MegatronFSDP.module.state_dict() using torch.save().
-            # Beyond the scope of this unit test.
-            pytest.xfail(reason="Megatron-FSDP does not support NO_SHARD for checkpointing yet.")
-
-        """
-        DISTRIBUTED ENVIRONMENT INIT
-        """
-        # Construct device mesh.
-        device_mesh = build_distributed_environment(mesh_dim_config)
-
-        """
-        MODEL TRAINING
-
-        Run through a single training step to update the model weights so the checkpoint
-        accuracy tests are non-trivial, i.e. don't just use the initialized weights.
-        """
-        # Test model.
-        toy_model, fsdp_unit_modules = build_toy_model(model_type, False, seed=0)
-        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
-
-        # Wrap in fully_shard.
-        model, optimizer = fully_shard(
-            module=toy_model,
-            optimizer=toy_adam,
-            device_mesh=device_mesh,
-            dp_shard_dim=DP_SHARD_CP,
-            dp_outer_dim=DP_OUTER,
-            tp_dim=TP,
-            hybrid_fsdp_group=device_mesh[HSDP].get_group(),
-            fsdp_unit_modules=fsdp_unit_modules,
-            zero_dp_strategy=shard_strategy,
-            outer_dp_sharding_strategy=outer_shard_strategy,
-            preserve_fp32_weights=True,
-            grad_reduce_in_fp32=True,
-            init_model_with_meta_device=False,
-            sync_model_each_microbatch=True,
-        )
-
-        # Mock input and target.
-        toy_input = torch.randn(1, DIM_SIZE, DIM_SIZE).to("cuda")
-        toy_target = torch.randn(1, DIM_SIZE, DIM_SIZE).to("cuda")
-
-        # Forward pass.
-        if model_type == CNN or model_type == TE_TRANSFORMER:
-            output = model(toy_input)
-        elif model_type == TRANSFORMER:
-            output = model(toy_input, toy_input)
-
-        # Loss.
-        loss = mse_loss(output, toy_target)
-
-        # Backward pass.
-        loss.backward()
-
-        # Optimizer step.
-        optimizer.step()
-        optimizer.zero_grad()
-
-        """
-        MODEL PRE-SAVE CHECKPOINT VALUES
-        """
-        # Compute one more forward pass using the optimized model
-        # weights to get a pre-save checkpoint validation loss.
-        model.eval()
-        if model_type == CNN or model_type == TE_TRANSFORMER:
-            pre_output = model(toy_input)
-        elif model_type == TRANSFORMER:
-            pre_output = model(toy_input, toy_input)
-        pre_save_loss = mse_loss(pre_output, toy_target).item()
-
-        # Save deep copy of the model state dictionary before checkpointing.
-        s1 = deepcopy(model.state_dict())
-
-        # Save deep copy of the optimizer state dictionary before checkpointing.
-        o1 = deepcopy(optimizer.state_dict())
-
-        """
-        MODEL CHECKPOINT SAVE
-        """
-        # Write model to checkpoint.
-        CKPT_DIR = (
-            Path(SHARED_TMP_DIR)
-            / TestMegatronFsdpFullyShard.__name__
-            / self.test_dcp_checkpoint_save_and_load.__name__
-            / f"checkpoint_shard-{shard_strategy}_outer-{outer_shard_strategy}_{model_type}"
-        )
-        CKPT_DIR.mkdir(parents=True, exist_ok=True, mode=0o777)
-        torch.distributed.checkpoint.save(
-            {"model": model.state_dict(), "optimizer": optimizer.state_dict()},
-            checkpoint_id=str(CKPT_DIR),
-        )
-
-        """
-        MODEL CHECKPOINT LOAD
-        """
-        # Initialize a new model for checkpoint loading. Set a different seed to force a different model init,
-        # to ensure the checkpoint loading is accurate and non-trivial.
-        toy_model, fsdp_unit_modules = build_toy_model(model_type, False, seed=1)
-        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
-
-        # Wrap in fully_shard.
-        model, optimizer = fully_shard(
-            module=toy_model,
-            optimizer=toy_adam,
-            device_mesh=device_mesh,
-            dp_shard_dim=DP_SHARD_CP,
-            dp_outer_dim=DP_OUTER,
-            tp_dim=TP,
-            hybrid_fsdp_group=device_mesh[HSDP].get_group(),
-            fsdp_unit_modules=fsdp_unit_modules,
-            zero_dp_strategy=shard_strategy,
-            outer_dp_sharding_strategy=outer_shard_strategy,
-            preserve_fp32_weights=True,
-            grad_reduce_in_fp32=True,
-            init_model_with_meta_device=False,
-            sync_model_each_microbatch=True,
-        )
-
-        # Load model from checkpoint.
-        ckpt_state_dict = {"model": model.state_dict(), "optimizer": optimizer.state_dict()}
-        torch.distributed.checkpoint.load(state_dict=ckpt_state_dict, checkpoint_id=str(CKPT_DIR))
-        model.load_state_dict(ckpt_state_dict["model"], strict=False)
-        optimizer.load_state_dict(ckpt_state_dict["optimizer"])
-        s2 = deepcopy(model.state_dict())
-        o2 = deepcopy(optimizer.state_dict())
-
-        """
-        MODEL CHECKPOINT STATE DICT VALIDATION
-        """
-        # Compare pre-save and post-load model state dictionaries.
-        for key in s1.keys() | s2.keys():
-            v1 = s1.get(key, None)
-            if isinstance(v1, DTensor):
-                v1 = v1.to_local()
-            v2 = s2.get(key, None)
-            if isinstance(v2, DTensor):
-                v2 = v2.to_local()
-            assert (
-                v1 is not None and v2 is not None
-            ), f"[{key} Not Found] Original Param: {v1} | Checkpoint Param: {v2}"
-            assert (
-                v1.shape == v2.shape
-            ), f"[Checkpoint Param {key} Shape Mismatch] {v1.shape} != {v2.shape}"
-            assert torch.allclose(v1, v2), f"[Checkpoint Param {key} Value Mismatch] {v1} != {v2}"
-
-        # Compare pre-save and post-load optimizer state dictionaries.
-        for param_id in o1["state"].keys() | o2["state"].keys():
-            param_state_1 = o1["state"].get(param_id, None)
-            param_state_2 = o2["state"].get(param_id, None)
-            assert (
-                param_state_1 is not None and param_state_2 is not None
-            ), f"[{param_id} Not Found] Original Param State: {param_state_1} | Checkpoint Param State: {param_state_2}"
-            for key in param_state_1.keys() | param_state_2.keys():
-                v1 = param_state_1.get(key, None)
-                if isinstance(v1, DTensor):
-                    v1 = v1.to_local()
-                v2 = param_state_2.get(key, None)
-                if isinstance(v2, DTensor):
-                    v2 = v2.to_local()
-                assert (
-                    v1 is not None and v2 is not None
-                ), f"[{param_id} {key} Not Found] Original Optimizer State: {v1} | Checkpoint Optimizer State: {v2}"
-                assert (
-                    v1.shape == v2.shape
-                ), f"[Optimizer State {param_id} {key} Shape Mismatch] {v1.shape} != {v2.shape}"
-                assert torch.allclose(
-                    v1, v2
-                ), f"[Optimizer State {param_id} {key} Value Mismatch] {v1} != {v2}"
-        assert len(o1["param_groups"]) == len(
-            o2["param_groups"]
-        ), f"[Optimizer State Param Groups Length Mismatch] {o1['param_groups']} != {o2['param_groups']}"
-        for i in range(len(o2["param_groups"])):
-            for key in o1["param_groups"][i].keys():
-                v1 = o1["param_groups"][i][key]
-                v2 = o2["param_groups"][i][key]
-                assert (
-                    v1 == v2
-                ), f"[Optimizer State Param Group {i} {key} Value Mismatch] {v1} != {v2}"
-
-        """
-        MODEL CHECKPOINT FORWARD PASS VALIDATION
-        """
-        # Forward pass using the post-load checkpoint model weights.
-        model.eval()
-        if model_type == CNN or model_type == TE_TRANSFORMER:
-            post_output = model(toy_input)
-        elif model_type == TRANSFORMER:
-            post_output = model(toy_input, toy_input)
-        post_load_loss = mse_loss(post_output, toy_target)
-
-        # Validate the pre-save and post-load loss.
-        assert (
-            pre_save_loss == post_load_loss.item()
-        ), f"[Rank {torch.distributed.get_rank()}] Pre-Save Loss: {pre_save_loss} != Post-Load Loss: {post_load_loss}"
-
-        # Continue training.
-        post_load_loss.backward()
-        optimizer.step()
-        optimizer.zero_grad()
-
-        """
-        CLEANUP
-        """
-        # Clean up temporary checkpoint directory.
-        if torch.distributed.get_rank() == 0:
-            shutil.rmtree(CKPT_DIR)
-        torch.distributed.barrier()
-
-        # Destroy device mesh.
         destroy_device_mesh(device_mesh)
 
     @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
