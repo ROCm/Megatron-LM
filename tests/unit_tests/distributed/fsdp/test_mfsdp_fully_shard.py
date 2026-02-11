@@ -39,30 +39,10 @@ NUM_STEPS = 2
 SHARED_TMP_DIR = "/tmp/pytest-shared-tmp"
 
 
-def destroy_device_mesh(device_mesh, clear_process_groups=True):
-    from torch.distributed.device_mesh import _mesh_resources
+def destroy_device_mesh(device_mesh):
 
-    # Get all process groups from the mesh before deleting it
-    if clear_process_groups:
-        process_groups = []
-        try:
-            # Try to get process groups from the mesh
-            if hasattr(device_mesh, 'get_group'):
-                # Get all the groups including flattened ones
-                for dim_name in [DP, DP_SHARD, CP, TP, DP_OUTER, DP_SHARD_CP, HSDP]:
-                    try:
-                        group = device_mesh[dim_name].get_group() if hasattr(device_mesh[dim_name], 'get_group') else None
-                        if group is not None and group not in process_groups:
-                            process_groups.append(group)
-                    except:
-                        pass
-        except Exception as e:
-            print(f"  [Cleanup] Warning: Could not enumerate process groups: {e}")
-        
-    # Teardown device mesh
+    # Teardown device mesh.
     del device_mesh
-    
-    # Clear mesh resources
     try:
         from torch.distributed.device_mesh import _mesh_resources
 
@@ -76,19 +56,6 @@ def destroy_device_mesh(device_mesh, clear_process_groups=True):
         # Attempt to clean the global state, otherwise skip.
         logger.warning(f"Did not clean the deprecated DeviceMesh global state. Skipping...\n{e}")
         pass
-    
-    # Now try to destroy the process groups
-    # NOTE: This may not work on all PyTorch versions - the groups might be 
-    # reference-counted and destroying them explicitly can cause issues
-    if clear_process_groups:
-        for group in process_groups:
-            try:
-                # Only destroy non-default world groups
-                if group != torch.distributed.group.WORLD:
-                    torch.distributed.destroy_process_group(group)
-            except Exception as e:
-                # Destroying process groups can fail, just log and continue
-                print(f"  [Cleanup] Warning: Could not destroy process group: {e}")
 
 
 class ToyCNN(torch.nn.Module):
@@ -629,7 +596,7 @@ class TestMegatronFsdpFullyShard:
         torch.distributed.barrier()
 
         # Destroy device mesh.
-        destroy_device_mesh(device_mesh, clear_process_groups=False)
+        destroy_device_mesh(device_mesh)
 
     @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
     def test_fully_shard_ez(self, shard_strategy):
