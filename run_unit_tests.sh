@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+set -u -o pipefail
 set -x
 
 # Install mock for unit tests
@@ -11,7 +11,7 @@ export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS-1)))
 echo "Number of GPUs: $NUM_GPUS"
 
 OUT_DIR=output
-mkdir -p $OUT_DIR
+mkdir -p "$OUT_DIR"
 
 PYTEST_MARKERS="(not flaky and not flaky_in_dev and not internal and not failing_on_rocm and not failing_on_upstream or test_on_rocm) and not experimental"
 
@@ -22,20 +22,35 @@ fi
 # Find all test files recursively
 TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
 
+ANY_FAIL=0
+
 for file in $TEST_FILES; do
+    # Create unique filename by replacing slashes with underscores and removing tests/unit_tests/ prefix
+    # E.g., tests/unit_tests/dist_checkpointing/test_optimizer.py -> dist_checkpointing_test_optimizer
+    test_name=$(echo "$file" | sed 's|tests/unit_tests/||' | sed 's|/|_|g' | sed 's|\.py$||')
+    
+    csv_file="$OUT_DIR/test_report_${test_name}.csv"
+    xml_file="$OUT_DIR/junit_report_${test_name}.xml"
+
     echo "Running test file: $file"
     torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
         --showlocals --tb=long -v -s -m "$PYTEST_MARKERS" \
-        --csv $OUT_DIR/test_report_$(basename $file .py).csv \
+        --csv "$csv_file" \
+        --junitxml "$xml_file" \
         $file
+    rc=$?
 
-    if [[ $? -ne 0 ]]; then
-        echo "Test failed in $file. Stopping execution."
-        exit 1
+    if [[ $rc -ne 0 ]]; then
+        echo "Test failed in $file."
+        ANY_FAIL=1
     fi
 done
 
-echo "All test files passed successfully."
+if [[ $ANY_FAIL -ne 0 ]]; then
+    echo "One or more test files failed."
+else
+    echo "All test files passed successfully."
+fi
 
 # Merge all individual CSVs into one unified report
 python - <<EOF
@@ -59,3 +74,5 @@ if dfs:
 else:
     print("No test report CSV files found to merge.")
 EOF
+
+exit $ANY_FAIL
