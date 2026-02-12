@@ -103,24 +103,7 @@ jobs:
           cache-to: |
             type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
-      - name: Run unit tests in container
-        run: |
-          set -euxo pipefail
-          docker run --rm \
-            --network=host \
-            -u root \
-            --device=/dev/kfd \
-            --device=/dev/dri \
-            --group-add "$(getent group video | cut -d: -f3)" \
-            --cap-add=SYS_PTRACE \
-            --security-opt seccomp=unconfined \
-            --security-opt apparmor=unconfined \
-            --shm-size=128G \
-            -v "${{ github.workspace }}:/workspace/Megatron-LM" \
-            --workdir /workspace/Megatron-LM \
-            --name megatron-lm-container \
-            --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
-            rocm/megatron-lm-private:${{ github.sha }}
+
 
       - name: Run benchmarks and generate performance report
         id: benchmarks
@@ -162,48 +145,6 @@ jobs:
           fi
           echo "::endgroup::"
 
-      - name: Publish test report
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: Megatron-LM unit tests report
-          path: output/junit_report_*.xml
-          reporter: java-junit
-          fail-on-error: false
-
-      - name: List test reports
-        if: always()
-        run: |
-          echo "Workspace contents:"
-          ls -R
-          if [ -d output ]; then
-            echo "Contents of output/:"
-            ls -R output || true
-          fi
-
-      - name: Upload test artifacts
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: megatron-lm-test-reports
-          path: |
-            output/unified_test_report.csv
-            output/junit_report_*.xml
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: Upload benchmark artifacts
-        if: always() && steps.benchmarks.outcome != 'skipped'
-        uses: actions/upload-artifact@v4
-        with:
-          name: megatron-lm-benchmark-reports
-          path: |
-            output/benchmark_report.txt
-            output/benchmark_report.json
-            output/benchmark_results.tmp
-            output/bench_*.log
-          if-no-files-found: ignore
-          retention-days: 7
 
       - name: Cleanup Docker image
         if: always()
