@@ -56,24 +56,24 @@ echo "---------|------------------------|-----------------|-------------|-------
 run_and_collect "llama3_8B_TP1_CP1_FP8" \
     "MBS=1 BS=128 SEQ_LENGTH=8192 TP=1 CP=1 MODEL_SIZE=8 TE_FP8=1 bash examples/llama/train_llama3.sh" || true
 
-run_and_collect "llama3_8B_TP8_BF16" \
+run_and_collect "llama3_70B_TP8_BF16" \
     "MBS=1 BS=8 SEQ_LENGTH=8192 TP=8 TE_FP8=0 bash examples/llama/train_llama3.sh" || true
 
-run_and_collect "llama3_8B_PYTORCH_FSDP_RECOMPUTE" \
+run_and_collect "llama3_70B_PYTORCH_FSDP_RECOMPUTE" \
     "MBS=1 BS=8 FSDP=1 TP=1 TE_FP8=0 SEQ_LENGTH=8192 RECOMPUTE=1 bash examples/llama/train_llama3.sh" || true
 
-run_and_collect "llama3_8B_TP8" \
+run_and_collect "llama3_70B_TP8" \
     "MBS=1 BS=8 TP=8 TE_FP8=0 SEQ_LENGTH=8192 bash examples/llama/train_llama3.sh" || true
 
-run_and_collect "llama3_8B_TP4_PP2" \
+run_and_collect "llama3_70B_TP4_PP2" \
     "MBS=1 BS=8 TP=4 PP=2 TE_FP8=0 SEQ_LENGTH=8192 bash examples/llama/train_llama3.sh" || true
 
 # DeepSeek benchmarks (use correct paths: deepseek_v2, deepseek_v3)
 run_and_collect "deepseek_v2" \
     "bash examples/deepseek_v2/train_deepseekv2.sh" || true
 
-    run_and_collect "deepseek_v3" \
-        "bash examples/deepseek_v3/train_deepseekv3.sh" || true
+run_and_collect "deepseek_v3" \
+    "bash examples/deepseek_v3/train_deepseekv3.sh" || true
 
 # Print results table
 echo "=============================================="

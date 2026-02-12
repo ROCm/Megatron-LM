@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 #################################################################################
 
-set -e
+# set -e
 
 # exp
 EXPERIMENT="deepseek_v3"

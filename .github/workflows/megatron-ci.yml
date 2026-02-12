@@ -19,9 +19,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  build_and_test:
-    name: Build and Test on GPU
-    timeout-minutes: 720
+  build:
+    name: Build Docker image
+    timeout-minutes: 120
     runs-on: linux-megatron-mi325-8
 
     steps:
@@ -92,7 +92,7 @@ jobs:
           context: .
           file: ./Dockerfile_rocm.ci
           push: true
-          load: true
+          load: false
           tags: |
             rocm/megatron-lm-private:${{ github.sha }}
           build-args: |
@@ -103,11 +103,108 @@ jobs:
           cache-to: |
             type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
+  unit_tests:
+    name: Unit tests
+    needs: build
+    timeout-minutes: 720
+    runs-on: linux-megatron-mi325-8
 
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: docker pull rocm/megatron-lm-private:${{ github.sha }}
+
+      - name: Run unit tests in container
+        run: |
+          set -euxo pipefail
+          docker run --rm \
+            --network=host \
+            -u root \
+            --device=/dev/kfd \
+            --device=/dev/dri \
+            --group-add "$(getent group video | cut -d: -f3)" \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --shm-size=128G \
+            -v "${{ github.workspace }}:/workspace/Megatron-LM" \
+            --workdir /workspace/Megatron-LM \
+            --name megatron-lm-container \
+            --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
+            rocm/megatron-lm-private:${{ github.sha }}
+
+      - name: Publish test report
+        if: always()
+        uses: dorny/test-reporter@v1
+        with:
+          name: Megatron-LM unit tests report
+          path: output/junit_report_*.xml
+          reporter: java-junit
+          fail-on-error: false
+
+      - name: List test reports
+        if: always()
+        run: |
+          echo "Workspace contents:"
+          ls -R
+          if [ -d output ]; then
+            echo "Contents of output/:"
+            ls -R output || true
+          fi
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-lm-test-reports
+          path: |
+            output/unified_test_report.csv
+            output/junit_report_*.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup Docker image
+        if: always()
+        run: |
+          docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
+
+  benchmarks:
+    name: Benchmarks
+    needs: build
+    timeout-minutes: 720
+    runs-on: linux-megatron-mi325-8
+    continue-on-error: true
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: docker pull rocm/megatron-lm-private:${{ github.sha }}
 
       - name: Run benchmarks and generate performance report
         id: benchmarks
-        continue-on-error: true
         run: |
           set -euxo pipefail
           mkdir -p output
@@ -128,27 +225,71 @@ jobs:
             -c "bash run_benchmarks.sh" 2>&1 | tee output/benchmark_report.txt
 
       - name: Display benchmark report
-        if: always() && steps.benchmarks.outcome != 'skipped'
+        if: always()
         run: |
           echo "::group::Megatron-LM Benchmark Performance Report"
           if [ -f output/benchmark_report.txt ]; then
             cat output/benchmark_report.txt
-            if [ -f output/benchmark_results.tmp ]; then
-              echo "## Megatron-LM Benchmark Performance Report" >> $GITHUB_STEP_SUMMARY
-              echo "" >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-              cat output/benchmark_results.tmp >> $GITHUB_STEP_SUMMARY
-              echo '```' >> $GITHUB_STEP_SUMMARY
-            fi
           else
             echo "Benchmark report not found (benchmarks may have been skipped or failed)"
           fi
           echo "::endgroup::"
 
+      - name: Generate benchmark report markdown
+        if: always()
+        run: |
+          python3 .github/scripts/benchmark-report-to-markdown.py
+
+      - name: Publish benchmark report to Job Summary
+        if: always()
+        run: |
+          if [ -f output/benchmark_summary.md ]; then
+            cat output/benchmark_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Publish benchmark report as Check Run
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let summary = 'No benchmark results available.';
+            if (fs.existsSync('output/benchmark_summary.md')) {
+              summary = fs.readFileSync('output/benchmark_summary.md', 'utf8');
+            }
+            try {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'Megatron-LM Benchmark Report',
+                head_sha: context.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: {
+                  title: 'Benchmark Performance Report',
+                  summary: summary
+                }
+              });
+              core.info('Benchmark report published as Check Run');
+            } catch (error) {
+              core.warning('Could not create Check Run (may lack permission on forked PRs): ' + error.message);
+            }
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-lm-benchmark-reports
+          path: |
+            output/benchmark_report.txt
+            output/benchmark_report.json
+            output/benchmark_results.tmp
+            output/benchmark_summary.md
+            output/bench_*.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Cleanup Docker image
         if: always()
         run: |
           docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
-
-
