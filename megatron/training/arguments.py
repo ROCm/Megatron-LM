@@ -1160,6 +1160,15 @@ def validate_args(args, defaults={}):
     if args.load_main_params_from_ckpt:
         assert args.no_load_optim, '--load-main-params-from-ckpt must be used with --no-load-optim.'
 
+    # Training args
+    if getattr(args, "deprecated_keep_fp8_weight_transpose_cache", False):
+        if args.rank == 0:
+            print(
+                "--keep_fp8_weight_transpose_cache is deprecated and has no effect. "
+                "Use --keep-fp8-weight-transpose-cache-te instead."
+            )
+            args.keep_fp8_weight_transpose_cache = True
+
     # Inference args
     if args.inference_batch_times_seqlen_threshold > -1:
         assert args.pipeline_model_parallel_size > 1, \
@@ -1382,9 +1391,11 @@ def _add_transformer_engine_args(parser):
     group.add_argument('--fp8-param-gather', action='store_true',
                        help='Keep the compute param in fp8 (do not use any other intermediate '
                             'dtype) and perform the param all-gather in fp8.')
-    group.add_argument('--keep_fp8_weight_transpose_cache', action='store_true', 
+    group.add_argument('--keep-fp8-weight-transpose-cache-te', action='store_true', dest='keep_fp8_weight_transpose_cache',
                        help='Keep the fp8 weight transpose cache in memory to avoid recomputing it '
                             ' This will use more memory')
+    group.add_argument('--keep_fp8_weight_transpose_cache', action='store_true', dest='deprecated_keep_fp8_weight_transpose_cache',
+                       help='DEPRECATED: Use --keep-fp8-weight-transpose-cache-te instead')
 
     group.add_argument('--first-last-layers-bf16', action='store_true',
                        help='Construct first and last layers in bf16 when doing FP8 training.')
@@ -1715,7 +1726,6 @@ def _add_network_size_args(parser):
                        help='Pad value head dim to the size of qk head dim, and run ck fused attention.')
     group.add_argument('--attention-sink-k', type=int, default=0,
                        help='k attention sink tokens.')
-    parser.add_argument("--window-size", type=int, nargs=2, help="sliding window size")
 
     group.add_argument('--mtp-num-layers', type=int, default=None,
                        help='Number of Multi-Token Prediction (MTP) Layers.'

@@ -4,6 +4,7 @@ import os
 import warnings
 from pathlib import Path
 
+import torch
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import CUDA_HOME, load_inline
 
@@ -55,18 +56,21 @@ EXPORT void managed_free(void* ptr, size_t size, int device, void* stream) {
   if (ptr) cudaFree(ptr);
 }
 """
-
 # Avoid linting errors.
 has_unified_memory = False
 _alloc = None
 
 # Build the .so upon import; this avoids issues.
 if _has_mem_pool:
-    _extra_ldflags = ["-lcudart"]
+    # Detect whether we're using ROCm or CUDA
+    is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+    runtime_lib = "-lamdhip64" if is_rocm else "-lcudart"
+    
+    _extra_ldflags = [runtime_lib]
     if CUDA_HOME:
         _cuda_lib = os.path.join(CUDA_HOME, "lib64")
         if os.path.isdir(_cuda_lib):
-            _extra_ldflags = [f"-L{_cuda_lib}", "-lcudart"]
+            _extra_ldflags = [f"-L{_cuda_lib}", runtime_lib]
     try:
         _mod = load_inline(
             name="managed_alloc_runtime",
@@ -84,6 +88,6 @@ if _has_mem_pool:
 
 
 def create_unified_mempool():
-    """Create a unified memory mempool using CUDA managed memory."""
+    """Create a unified memory mempool using CUDA/HIP managed memory."""
     assert has_unified_memory
     return MemPool(allocator=_alloc)

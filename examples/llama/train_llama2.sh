@@ -86,6 +86,7 @@ EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
+FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
 
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 if [ "$TOKENIZER_TYPE" == "Llama2Tokenizer" ]; then
@@ -281,7 +282,6 @@ EXTRA_ARGS="
 "
 
 if [ "$FSDP" -eq 1 ]; then
-    unset CUDA_DEVICE_MAX_CONNECTIONS
     EXTRA_ARGS="$EXTRA_ARGS --use-torch-fsdp2"
     if [ "$SEQ_PARALLEL" -eq 1 ]; then
         echo "Warning: Sequence Parallelism and FSDP2 have conflicting CUDA_MAX_CONNECTIONS requirements. It is recommended not to use them together."
@@ -328,13 +328,17 @@ if [ "$TE_FP8" -eq 1 ]; then
             --attention-softmax-in-fp32 \
         "
     elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
-            --fp8-format=e4m3 \
-            --keep_fp8_weight_transpose_cache \
-        "
-        # Currently we have to keep fp8 weight tranpose cache due to an issue
-        # Also, TE does not enable mxfp8 by default
-        export NVTE_ROCM_ENABLE_MXFP8=1
+        if [ "$MEGATRON_FSDP" -eq 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
+                --fp8-format=e4m3 \
+            "
+            # TE does not enable mxfp8 by default
+            export NVTE_ROCM_ENABLE_MXFP8=1
+        else 
+            echo "Error: Llama2 supports MXFP8 only for MEGATRON_FSDP."
+            exit
+        fi
+        
     elif [ "$TE_FP8_RECIPE" == "tensorwise" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=tensorwise \
             --fp8-format=hybrid \
@@ -345,11 +349,18 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather" 
+        if [ "$TE_FP8_RECIPE" != "mxfp8" ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+        else
+            echo "Error: For Llama2 FP8_PARAM_GATHER and MXFP8 cannot be currently used together."
+            exit
+        fi
     fi
 
-    if [ "$MEGATRON_FSDP" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
+    if [ "$FP8_TRANSPOSE_CACHE" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --keep-fp8-weight-transpose-cache-te \
+            --keep-fp8-transpose-cache \
+        " 
     fi
     
 fi
