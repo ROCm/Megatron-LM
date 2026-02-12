@@ -122,6 +122,46 @@ jobs:
             --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
             rocm/megatron-lm-private:${{ github.sha }}
 
+      - name: Run benchmarks and generate performance report
+        id: benchmarks
+        continue-on-error: true
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          docker run --rm \
+            --network=host \
+            -u root \
+            --device=/dev/kfd \
+            --device=/dev/dri \
+            --group-add "$(getent group video | cut -d: -f3)" \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --shm-size=128G \
+            -v "${{ github.workspace }}:/workspace/Megatron-LM" \
+            --workdir /workspace/Megatron-LM \
+            --entrypoint /bin/bash \
+            rocm/megatron-lm-private:${{ github.sha }} \
+            -c "bash run_benchmarks.sh" 2>&1 | tee output/benchmark_report.txt
+
+      - name: Display benchmark report
+        if: always() && steps.benchmarks.outcome != 'skipped'
+        run: |
+          echo "::group::Megatron-LM Benchmark Performance Report"
+          if [ -f output/benchmark_report.txt ]; then
+            cat output/benchmark_report.txt
+            if [ -f output/benchmark_results.tmp ]; then
+              echo "## Megatron-LM Benchmark Performance Report" >> $GITHUB_STEP_SUMMARY
+              echo "" >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+              cat output/benchmark_results.tmp >> $GITHUB_STEP_SUMMARY
+              echo '```' >> $GITHUB_STEP_SUMMARY
+            fi
+          else
+            echo "Benchmark report not found (benchmarks may have been skipped or failed)"
+          fi
+          echo "::endgroup::"
+
       - name: Publish test report
         if: always()
         uses: dorny/test-reporter@v1
@@ -149,6 +189,19 @@ jobs:
           path: |
             output/unified_test_report.csv
             output/junit_report_*.xml
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Upload benchmark artifacts
+        if: always() && steps.benchmarks.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-lm-benchmark-reports
+          path: |
+            output/benchmark_report.txt
+            output/benchmark_report.json
+            output/benchmark_results.tmp
+            output/bench_*.log
           if-no-files-found: ignore
           retention-days: 7
 
