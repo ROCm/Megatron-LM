@@ -221,6 +221,12 @@ follow these steps for 2 Node run with Node0 as master node :
 - **MEGATRON_FSDP:**
   `1` to enable Megatron-LM's custom FSDP with DTensor checkpointing (default: 0). It adds automatically `--use-megatron-fsdp --ckpt-format fsdp_dtensor` in the script. Of note, this disables `TP>1` automatically.
 
+- **ENABLE_HSDP:**
+  `1` to enable Hybrid Sharded Data Parallel (HSDP) mode (default: 0). Requires `MEGATRON_FSDP=1`. 
+
+- **HSDP_NUM_DIST_OPT_INSTANCES:**
+  Number of distributed optimizer instances used by HSDP (default: 2). This maps to `--num-distributed-optimizer-instances`.
+
 - **FP8_PARAM_GATHER:**
   Controls FP8 primary weights vs FP8 caches when `TE_FP8=1` (default: 0). Set to `1` to add `--fp8-param-gather` (weights kept in FP8, smaller all-gathers). Set to `0` to skip the `--fp8-param-gather` flag (weights stay BF16, FP8 caches are used for compute; FP8 weight transpose cache is still kept). 
   

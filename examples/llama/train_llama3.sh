@@ -88,6 +88,8 @@ DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
+ENABLE_HSDP="${ENABLE_HSDP:-0}"
+HSDP_NUM_DIST_OPT_INSTANCES="${HSDP_NUM_DIST_OPT_INSTANCES:-2}"
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
@@ -96,6 +98,11 @@ if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
         TP=1
         echo "Resetting TP=$TP"
     fi
+fi
+
+if [ "$ENABLE_HSDP" -eq 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+    echo "Error: ENABLE_HSDP=1 requires MEGATRON_FSDP=1"
+    exit
 fi
 
 EXPERIMENT_DIR="experiment"
@@ -350,6 +357,14 @@ fi
 
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
+    if [ "$ENABLE_HSDP" -eq 1 ]; then
+        if [ "$HSDP_NUM_DIST_OPT_INSTANCES" -le 1 ]; then
+            echo "Error: HSDP_NUM_DIST_OPT_INSTANCES should be greater than 1 when ENABLE_HSDP is set to 1"
+            exit
+        else
+            EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_DIST_OPT_INSTANCES"
+        fi
+    fi
 fi
 
 run_cmd="
