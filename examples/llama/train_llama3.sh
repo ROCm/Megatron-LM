@@ -70,6 +70,7 @@ TOTAL_ITERS="${TOTAL_ITERS:-12}"
 SEQ_PARALLEL="${SEQ_PARALLEL:-1}" 
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
+TE_FP8_RECIPE="${TE_FP8_RECIPE:-delayed}" # Options: delayed, tensorwise, mxfp8
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
@@ -84,8 +85,12 @@ SAVE_INTERVAL="${SAVE_INTERVAL:-5000}"
 EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
+MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
+FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
+FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
 
-if [ "$FSDP" -eq 1 ]; then
+if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
+    unset CUDA_DEVICE_MAX_CONNECTIONS
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
@@ -254,6 +259,7 @@ EXTRA_ARGS="
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
     --overlap-grad-reduce \
+    --rerun-mode disabled \
 "
 
 if [ "$FSDP" -eq 1 ]; then
@@ -291,15 +297,45 @@ fi
 
 if [ "$TE_FP8" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
-        --fp8-margin=0 \
-        --fp8-format=hybrid \
-        --fp8-interval=1 \
-        --fp8-amax-history-len=1024 \
-        --fp8-amax-compute-algo=max \
-        --attention-softmax-in-fp32 \
 "
-    if [ "$FSDP" -eq 1 ]; then
-        EXTRA_ARGS="$EXTRA_ARGS --keep_fp8_weight_transpose_cache" 
+
+    if [ "$TE_FP8_RECIPE" == "delayed" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=delayed \
+            --fp8-format=hybrid \
+            --fp8-margin=0 \
+            --fp8-interval=1 \
+            --fp8-amax-history-len=1024 \
+            --fp8-amax-compute-algo=max \
+            --attention-softmax-in-fp32 \
+        "
+    elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
+            --fp8-format=e4m3 \
+        "
+        # TE does not enable mxfp8 by default
+        export NVTE_ROCM_ENABLE_MXFP8=1
+    elif [ "$TE_FP8_RECIPE" == "tensorwise" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=tensorwise \
+            --fp8-format=hybrid \
+        "
+    else
+        echo "$TE_FP8_RECIPE is not supported"
+        exit
+    fi
+
+    if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ]  && [ "$FSDP" -eq 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+        else
+            echo "Error: For Llama3 FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1"
+            exit
+        fi
+    fi
+
+    if [ "$FP8_TRANSPOSE_CACHE" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --keep-fp8-weight-transpose-cache-te \
+            --keep-fp8-transpose-cache \
+        " 
     fi
 fi
 
@@ -310,6 +346,10 @@ if [ -n "${WANDB_API_KEY}" ]; then
     "
 else
    LOGGING_ARGS=""
+fi
+
+if [ "$MEGATRON_FSDP" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
 fi
 
 run_cmd="
