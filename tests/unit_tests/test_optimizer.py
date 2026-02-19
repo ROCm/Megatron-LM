@@ -26,10 +26,10 @@ try:
 except:
     fp8_block_scaling_available = False
     reason_for_no_fp8_block_scaling = "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
-    try:
-        from transformer_engine.common.recipe import DelayedScaling
-    except:
-        delayed_scaling_available = False
+try:
+    from transformer_engine.common.recipe import DelayedScaling
+except:
+    delayed_scaling_available = False
 
 
 class Net(nn.Module):
