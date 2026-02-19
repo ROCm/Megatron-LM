@@ -15,6 +15,5 @@ wandb/
 onelogger.log
 onelogger.err
 .venv
+test_cases/
 runs/
-/test_cases/
-**/dist/

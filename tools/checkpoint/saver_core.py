@@ -3,7 +3,6 @@
 import os
 import sys
 import torch
-from functools import partial
 from importlib.metadata import version
 from packaging.version import Version as PkgVersion
 
@@ -39,9 +38,8 @@ class MegatronCheckpointSaverLLM(MegatronCheckpointSaverBase):
             sys.exit(1)
 
         if self.md.model_type == 'GPT':
-            from model_provider import model_provider
-            from gpt_builders import gpt_builder
-            self.model_provider = partial(model_provider, gpt_builder)
+            from pretrain_gpt import model_provider
+            self.model_provider = model_provider
             self.margs.model_type = ModelType.encoder_or_decoder
         elif self.md.model_type == 'BERT':
             from pretrain_bert import model_provider

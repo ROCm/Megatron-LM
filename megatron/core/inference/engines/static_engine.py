@@ -65,11 +65,11 @@ class StaticInferenceEngine(AbstractEngine):
                 UserWarning,
             )
             max_batch_size = inference_max_batch_size
-        self.controller = text_generation_controller
+        self.text_generation_controller = text_generation_controller
         self.random_seed = random_seed
         self.scheduler = Scheduler(max_batch_size=max_batch_size)
 
-    def get_new_request_id(self) -> int:
+    def get_new_request_id(self) -> str:
         """Gets a new request id from the scheduler"""
         return self.scheduler.get_new_request_id()
 
@@ -83,7 +83,7 @@ class StaticInferenceEngine(AbstractEngine):
         inference_request: Optional[InferenceRequest] = None,
         *,
         inference_parameters: Optional[SamplingParams] = None,
-    ) -> int:
+    ) -> str:
         """
         Adds a request to the scheduler and returns the request ID.
 
@@ -113,8 +113,7 @@ class StaticInferenceEngine(AbstractEngine):
             sampling_params = inference_parameters
 
         if inference_request is None:
-            # Support legacy single-arg tokenize_prompt mocks in tests.
-            prompt_tokens = self.controller.tokenize_prompt(prompt, add_BOS)
+            prompt_tokens = self.text_generation_controller.tokenize_prompt(prompt, add_BOS)
         else:
             prompt_tokens = inference_request.prompt_tokens
 
@@ -128,7 +127,7 @@ class StaticInferenceEngine(AbstractEngine):
         )
 
     def get_stream_generator(
-        self, request_id: int
+        self, request_id: str
     ) -> Union[AsyncGenerator[InferenceRequest, None], None]:
         """Returns the stream generator for the given request ID if it exists."""
         stream = self.scheduler.streams.get(request_id, None)
@@ -166,7 +165,7 @@ class StaticInferenceEngine(AbstractEngine):
         """
         # TODO :M core- get rng state tracker
 
-        request_ids: List[int] = []
+        request_ids: List[str] = []
 
         if self.random_seed:
             torch.random.manual_seed(self.random_seed)
@@ -223,7 +222,7 @@ class StaticInferenceEngine(AbstractEngine):
                     assert isinstance(stream, AsyncStream), stream
                     active_streams[request_id] = stream
             result_dict: Dict[str, InferenceRequest] = (
-                self.controller.generate_all_output_tokens_static_batch(
+                self.text_generation_controller.generate_all_output_tokens_static_batch(
                     active_requests, active_streams
                 )
             )
@@ -233,6 +232,17 @@ class StaticInferenceEngine(AbstractEngine):
             crnt_num_requests_pending = self.scheduler.num_requests_pending()
             tbar.update(prev_num_requests_pending - crnt_num_requests_pending)
             prev_num_requests_pending = crnt_num_requests_pending
+
+        # TODO: Later for dynamic batching we will do something like this
+        """ 
+            if dynamic_batching:
+                result_dict: Dict[
+                    str, InferenceRequest
+                ] = self.text_generation_controller.generate_output_tokens_one_step_dynamic_batch(
+                    active_requests
+                )
+            self.scheduler.update_requests_pools(result_dict=result_dict)         
+        """
 
     def _wrapped_run_engine(self, cuda_device):
         """

@@ -68,21 +68,18 @@ def launch_and_wait_for_completion(
             pipeline = jetclient.JETClient(
                 customer="mcore", gitlab_ci_token=os.getenv("RO_API_TOKEN"), env="prod"
             ).workloads.submit(
-                workloads=[
-                    jetclient.JETWorkloadManifest(**workload)
-                    for workload in common.load_workloads(
-                        test_case=test_case,
-                        n_repeat=n_repeat,
-                        time_limit=(1200 if enable_lightweight_mode else time_limit),
-                        tag=tag,
-                        scope=scope,
-                        container_image=container_image,
-                        container_tag=container_tag,
-                        platform=platform,
-                        environment=environment,
-                        record_checkpoints=record_checkpoints,
-                    )
-                ],
+                workloads=common.load_workloads(
+                    test_case=test_case,
+                    n_repeat=n_repeat,
+                    time_limit=(1200 if enable_lightweight_mode else time_limit),
+                    tag=tag,
+                    scope=scope,
+                    container_image=container_image,
+                    container_tag=container_tag,
+                    platform=platform,
+                    environment=environment,
+                    record_checkpoints=record_checkpoints,
+                ),
                 config_id=f"mcore/{common.resolve_cluster_config(cluster)}",
                 custom_config={
                     "launchers": {cluster: cluster_config},
@@ -106,9 +103,6 @@ def launch_and_wait_for_completion(
                                         "MCORE_BACKWARDS_COMMIT": (
                                             os.getenv("MCORE_BACKWARDS_COMMIT") or ""
                                         ),
-                                        "HF_HUB_CACHE": "/lustre/fsw/coreai_dlalgo_mcore/hf_hub",
-                                        "TRANSFORMERS_OFFLINE": "1",
-                                        "CLUSTER": cluster,
                                     }
                                 }
                             }
@@ -122,10 +116,7 @@ def launch_and_wait_for_completion(
                 wait_for_validation=True,
                 max_wait_time=(60 * 60),
             )
-        except (
-            jetclient.clients.gitlab.GitlabAPIError,
-            jetclient.facades.objects.util.WaitTimeExceeded,
-        ) as e:
+        except (jetclient.clients.gitlab.GitlabAPIError, jetclient.facades.objects.util.WaitTimeExceeded) as e:
             logger.error(f"Faced {str(e)}. Waiting and retrying...")
             n_submission_attempts += 1
             time.sleep(2**n_submission_attempts * 5)
@@ -283,11 +274,6 @@ def is_flaky_failure(concat_allranks_logs: str) -> bool:
         or "Connection reset by peer" in concat_allranks_logs
         or "invalid pointer" in concat_allranks_logs
         or "malloc(): unaligned tcache chunk detected" in concat_allranks_logs
-        or "zmq.error.ZMQError: Address already in use" in concat_allranks_logs
-        or "We couldn't connect to 'https://huggingface.co'" in concat_allranks_logs
-        or "Unpack failed: incomplete input" in concat_allranks_logs
-        or "unspecified launch failure" in concat_allranks_logs
-        or "free(): corrupted unsorted chunks" in concat_allranks_logs
     )
 
 
@@ -385,7 +371,7 @@ def main(
     n_attempts = 0
     n_nondeterminism_attemps = 0
     n_iteration = 0
-    while True and n_attempts < 9 and n_nondeterminism_attemps < 3:
+    while True and n_attempts < 3 and n_nondeterminism_attemps < 2:
         pipeline = launch_and_wait_for_completion(
             test_case=test_case,
             environment=environment,
@@ -489,17 +475,13 @@ def main(
                 )
 
             if is_flaky_failure(concat_allranks_logs):
-                if n_attempts < 9:
-                    logger.error("Detected flaky failure, attempt restart.")
+                logger.error("Detected flaky failure, attempt restart.")
                 n_attempts += 1
                 continue
 
-            if (
-                "FAILED tests/functional_tests/python_test_utils" in concat_mainrank_log
-            ) and re.compile(r"\bEXIT_CODE=0\b").search(concat_mainrank_log) is not None:
+            if "FAILED tests/functional_tests/python_test_utils" in concat_mainrank_log:
+                logger.error("Non-determinism, let's try another node.")
                 n_nondeterminism_attemps += 1
-                if n_nondeterminism_attemps < 3:
-                    logger.error("Non-determinism, let's try another node.")
                 continue
 
             telemetrics_and_exit(
@@ -514,10 +496,9 @@ def main(
             if (
                 "StopIteration" in concat_allranks_logs
                 or "after training is done" in concat_allranks_logs
-                or "exiting program at iteration" in concat_allranks_logs
             ):
                 logger.info("Release training finished")
-                sys.exit(int(not success))  # invert for exit 0
+                sys.exit(0)
 
             if parse_failed_job(logs=mainrank_log):
                 n_attempts += 1

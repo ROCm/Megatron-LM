@@ -19,7 +19,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import torch
 from torch import multiprocessing as mp
 from torch.distributed.checkpoint import FileSystemWriter
-from torch.distributed.checkpoint.api import WRAPPED_EXCEPTION, _wrap_exception
 from torch.distributed.checkpoint.filesystem import DEFAULT_SUFFIX, _StoragePrefix, _write_item
 from torch.distributed.checkpoint.metadata import Metadata
 
@@ -421,14 +420,14 @@ class FileSystemWriterAsync(FileSystemWriter):
         """Write all items from ``plan``."""
         raise NotImplementedError("write_data not implemented for FileSystemWriterAsync")
 
-    def retrieve_write_results(self) -> Union[List[WriteResult], WRAPPED_EXCEPTION]:
+    def retrieve_write_results(self) -> List[WriteResult]:
         """
         Turn the latest dict including write results from `self.results_queue`
             into a single results lists. Includes error check.
 
-        Returns (Union(List[WriteResult], WRAPPED_EXCEPTION): the list of write results
-            from all local processes performing the save, or a WRAPPED_EXCEPTION if
-            an exception was raised during the writing process.
+        Returns (List[WriteResult]): the list of write results
+            from all local processes performing the save.
+
         """
         assert self.write_buckets is not None
 
@@ -438,22 +437,15 @@ class FileSystemWriterAsync(FileSystemWriter):
             try:
                 write_results_or_exc = self.results_queue.get_nowait()
             except queue.Empty:
-                return _wrap_exception(RuntimeError("results_queue should not be empty"))
+                raise RuntimeError("results_queue should not be empty")
 
         if isinstance(write_results_or_exc, Exception):
-            try:
-                raise RuntimeError(
-                    f"Worker failure: {write_results_or_exc}"
-                ) from write_results_or_exc
-            except Exception as e:
-                return _wrap_exception(e)
+            raise RuntimeError(f"Worker failure: {write_results_or_exc}") from write_results_or_exc
         write_results: dict = write_results_or_exc
         if len(write_results) != len(self.write_buckets):
-            return _wrap_exception(
-                RuntimeError(
-                    f"Incomplete worker results (expected {len(self.write_buckets)},"
-                    f" got {len(write_results)}. This probably indicates a worker failure."
-                )
+            raise RuntimeError(
+                f"Incomplete worker results (expected {len(self.write_buckets)},"
+                f" got {len(write_results)}. This probably indicates a worker failure."
             )
         return list(chain.from_iterable(write_results.values()))
 

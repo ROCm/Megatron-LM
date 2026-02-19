@@ -9,7 +9,7 @@ from torch import nn
 
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.models.common.vision_module.vision_module import VisionModule
-from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.process_groups_config import ModelCommProcessGroups
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear
 from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
@@ -64,7 +64,7 @@ class RADIOViTModel(VisionModule):
         pos_dropout: int = 0,
         has_cpe: bool = True,
         embedder_bias: bool = False,
-        pg_collection: Optional[ProcessGroupCollection] = None,
+        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
         vp_stage: Optional[int] = None,
     ) -> None:
         super().__init__(config=transformer_config)
@@ -105,8 +105,6 @@ class RADIOViTModel(VisionModule):
                     dtype=transformer_config.params_dtype,
                 )
             )
-            if transformer_config.fp8:
-                self.register_load_state_dict_pre_hook(fp8_pad_hook)
 
         self.seq_length = (img_h // self.patch_dim) * (img_w // self.patch_dim) + (
             self.class_token_len if self.add_class_token else 0
@@ -139,7 +137,7 @@ class RADIOViTModel(VisionModule):
 
         self.ln_pre = None
         self.ln_post = None
-        self.pg_collection = pg_collection
+        self.model_comm_pgs = model_comm_pgs
         self.vp_stage = vp_stage
         if ln_pre_impl is not None:
             self.ln_pre = build_module(
@@ -161,7 +159,7 @@ class RADIOViTModel(VisionModule):
             spec=transformer_layer_spec,
             pre_process=True,
             post_process=False,
-            pg_collection=self.pg_collection,
+            model_comm_pgs=self.model_comm_pgs,
             vp_stage=self.vp_stage,
         )
 
@@ -354,27 +352,3 @@ class RADIOViTModel(VisionModule):
         pos_embed = pos_embed.flatten(2).permute(0, 2, 1)
 
         return pos_embed
-
-
-def fp8_pad_hook(
-    module, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
-):
-    """FP8 requires class token length to be a multiple of 16 (for this model).
-
-    Original model checkpoint may not be padded for FP8 so pad it here.
-    """
-    if not "vision_model.class_token" in state_dict:
-        return
-
-    pad = 32 if module.config.fp8_recipe == "mxfp8" else 16
-
-    class_token = state_dict["vision_model.class_token"]
-    if class_token.shape[0] % pad != 0:
-        pad_len = pad - (class_token.shape[0] % pad)
-        pad_tensor = torch.randn(
-            pad_len, class_token.shape[-1], dtype=class_token.dtype, device=class_token.device
-        )
-        class_token = torch.cat([pad_tensor, class_token], dim=0)
-        state_dict["vision_model.class_token"] = class_token
-
-    return
