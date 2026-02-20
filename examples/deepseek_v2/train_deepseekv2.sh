@@ -381,6 +381,7 @@ megatron_options="  \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
         --tokenizer-type DeepSeekV2Tokenizer \
         --tokenizer-model ${TOKENIZER_MODEL}\
+        --legacy-tokenizer \
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --normalization RMSNorm \
