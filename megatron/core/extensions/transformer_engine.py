@@ -1350,7 +1350,6 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             else:
                 out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
             
-            out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, m_splits_tensor=m_splits_gpu)
             self.is_first_microbatch = False
 
             # TE only returns a tuple when return_bias is True, otherwise
