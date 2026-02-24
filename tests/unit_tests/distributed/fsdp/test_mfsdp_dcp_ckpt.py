@@ -30,7 +30,7 @@ OPTIM_GRADS_PARAMS = "optim_grads_params"
 CNN = "cnn"
 TRANSFORMER = "transformer"
 TE_TRANSFORMER = "te_transformer"
-DIM_SIZE = 2
+DIM_SIZE = 4
 NUM_LAYERS = 2
 NUM_STEPS = 2
 

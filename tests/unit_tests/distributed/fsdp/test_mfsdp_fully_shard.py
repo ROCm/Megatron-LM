@@ -386,7 +386,7 @@ class TestMegatronFsdpFullyShard:
         # Required to reset the parallelism environment.
         destroy_device_mesh(device_mesh)
 
-@pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
+    @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
     def test_fully_shard_ez(self, shard_strategy):
         """
         Test fully_shard(device_mesh=None). Represents the easiest entrypoint to Megatron-FSDP.
