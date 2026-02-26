@@ -464,10 +464,9 @@ class TransformerBlock(MegatronModule):
 
         if self.config.fp4 and self.config.fp4_recipe == "mxfp4":
             import transformer_engine
+            from megatron.core.fp4_utils import get_fp4_recipe
 
-            from transformer_engine.common.recipe import MXFP4BlockScaling
-
-            fp4_recipe = MXFP4BlockScaling(disable_hadamard=True)
+            fp4_recipe = get_fp4_recipe(self.config)
             fp8_context = transformer_engine.pytorch.fp8_autocast(
                 enabled=True, fp8_recipe=fp4_recipe
             )
