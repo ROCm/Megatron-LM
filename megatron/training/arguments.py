@@ -904,6 +904,17 @@ def _add_transformer_engine_args(parser):
     group.add_argument('--keep_fp8_weight_transpose_cache', action='store_true', 
                        help='Keep the fp8 weight transpose cache in memory to avoid recomputing it '
                             ' This will use more memory')
+    group.add_argument('--fp4-format', default=None,
+                       choices=['e2m1'],
+                       help='FP4 format for quantization (e.g., e2m1 for MXFP4)',
+                       dest='fp4')
+    group.add_argument('--fp4-recipe', default=None,
+                       choices=['mxfp4'],
+                       help='FP4 recipe type: mxfp4 for AMD ROCm gfx950+',
+                       dest='fp4_recipe')
+    group.add_argument('--fp4-param', action='store_true',
+                       help='Initialize model with FP4-quantized parameters',
+                       dest='fp4_param')
 
     return parser
 

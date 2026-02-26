@@ -289,7 +289,8 @@ class CudaGraphManager(torch.nn.Module):
             detach.zero_()
             detach.requires_grad = sample_kwargs[k].requires_grad
 
-        fp8_enabled = megatron_module.config.fp8 is not None
+        fp4_enabled = getattr(megatron_module.config, "fp4", None) is not None
+        fp8_enabled = megatron_module.config.fp8 is not None or fp4_enabled
         fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8_enabled else None
         graphed_module = make_graphed_callables(
             modules=wrapped_module,

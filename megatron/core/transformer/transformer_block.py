@@ -462,7 +462,16 @@ class TransformerBlock(MegatronModule):
         else:
             rng_context = nullcontext()
 
-        if self.config.fp8:
+        if self.config.fp4 and self.config.fp4_recipe == "mxfp4":
+            import transformer_engine
+
+            from transformer_engine.common.recipe import MXFP4BlockScaling
+
+            fp4_recipe = MXFP4BlockScaling()
+            fp8_context = transformer_engine.pytorch.fp8_autocast(
+                enabled=True, fp8_recipe=fp4_recipe
+            )
+        elif self.config.fp8:
             import transformer_engine  # To keep out TE dependency when not training in fp8
 
             if self.config.fp8 == "e4m3":

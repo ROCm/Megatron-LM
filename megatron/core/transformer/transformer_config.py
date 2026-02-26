@@ -247,6 +247,19 @@ class TransformerConfig(ModelParallelConfig):
     """When set to True, reduce the FP8 AMAX only in the TP or TP-CP domain"""
 
     ####################
+    # fp4 related
+    ####################
+    fp4: Optional[str] = None
+    """If set (e.g., 'e2m1'), enables FP4 precision through Transformer Engine.
+    For AMD ROCm gfx950+, use with fp4_recipe='mxfp4' to activate MXFP4BlockScaling recipe."""
+
+    fp4_recipe: Optional[str] = None
+    """FP4 recipe type. Currently supported: 'mxfp4' for AMD MXFP4 block scaling."""
+
+    fp4_param: bool = False
+    """If True, initialize model with FP4-quantized parameters."""
+
+    ####################
     # MoE related
     ####################
     moe_shared_expert_intermediate_size: Optional[int] = None
