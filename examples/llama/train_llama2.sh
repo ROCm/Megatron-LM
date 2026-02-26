@@ -110,8 +110,8 @@ if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     fi
 fi
 
-if [ "$ENABLE_HSDP" -eq 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
-    echo "Error: ENABLE_HSDP=1 requires MEGATRON_FSDP=1"
+if [ "$HSDP_NUM_DIST_OPT_INSTANCES" -gt 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+    echo "Error: HSDP_NUM_DIST_OPT_INSTANCES>1 requires MEGATRON_FSDP=1"
     exit
 fi
 
