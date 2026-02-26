@@ -467,7 +467,7 @@ class TransformerBlock(MegatronModule):
 
             from transformer_engine.common.recipe import MXFP4BlockScaling
 
-            fp4_recipe = MXFP4BlockScaling()
+            fp4_recipe = MXFP4BlockScaling(disable_hadamard=True)
             fp8_context = transformer_engine.pytorch.fp8_autocast(
                 enabled=True, fp8_recipe=fp4_recipe
             )
