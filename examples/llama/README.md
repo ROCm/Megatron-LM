@@ -162,6 +162,12 @@ TEE_OUTPUT=1 MBS=2 BS=16 TP=1 TE_FP8=0 FSDP=1 RECOMPUTE=1 SEQ_LENGTH=8192 MODEL_
 And FSDP-v2 is not supported with pipeline parallelism, expert parallelism, MCore's
 distributed optimizer, gradient accumulation fusion and fp16.
 
+To run with Megatron-LM HSDP enabled (Hybrid Sharded Data Parallel), use `ENABLE_HSDP=1`
+and set the number of replicas with `HSDP_NUM_REPLICAS>=2`. For example:
+```bash
+TEE_OUTPUT=1 MBS=2 BS=16 TP=1 TE_FP8=0 ENABLE_HSDP=1 HSDP_NUM_REPLICAS=2 SEQ_LENGTH=8192 MODEL_SIZE=8 bash examples/llama/train_llama3.sh
+```
+
 #### FP8 options with Megatron-LM FSDP (train_llama3.sh)
   - **FP8 primary weights (fp8_model_init, param gather):** `TE_FP8=1 MEGATRON_FSDP=1 FP8_PARAM_GATHER=1 bash examples/llama/train_llama3.sh`
   - **BF16 primary weights + FP8 caches (fp8_autocast):** `TE_FP8=1 MEGATRON_FSDP=1 FP8_PARAM_GATHER=0 bash examples/llama/train_llama3.sh`
@@ -221,8 +227,11 @@ follow these steps for 2 Node run with Node0 as master node :
 - **MEGATRON_FSDP:**
   `1` to enable Megatron-LM's custom FSDP with DTensor checkpointing (default: 0). It adds automatically `--use-megatron-fsdp --ckpt-format fsdp_dtensor` in the script. Of note, this disables `TP>1` automatically.
 
-- **HSDP_NUM_DIST_OPT_INSTANCES:**
-  Number of distributed optimizer instances used by HSDP (default: 1). This maps to `--num-distributed-optimizer-instances`. If set to greater than `1` it enables Hybrid Sharded Data Parallel (HSDP) mode, which requires `MEGATRON_FSDP=1`.
+- **ENABLE_HSDP:**
+  `1` to enable Hybrid Sharded Data Parallel (HSDP) mode (default: 0). Requires `MEGATRON_FSDP=1`.
+
+- **HSDP_NUM_REPLICAS:**
+  Number of outer DP replicas used by HSDP (default: 2) when `ENABLE_HSDP=1`. This maps to `--num-distributed-optimizer-instances`.
 
 - **FP8_PARAM_GATHER:**
   Controls FP8 primary weights vs FP8 caches when `TE_FP8=1` (default: 0). Set to `1` to add `--fp8-param-gather` (weights kept in FP8, smaller all-gathers). Set to `0` to skip the `--fp8-param-gather` flag (weights stay BF16, FP8 caches are used for compute; FP8 weight transpose cache is still kept). 

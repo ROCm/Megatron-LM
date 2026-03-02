@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 #################################################################################
@@ -87,7 +87,8 @@ DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
-HSDP_NUM_DIST_OPT_INSTANCES="${HSDP_NUM_DIST_OPT_INSTANCES:-1}"
+ENABLE_HSDP="${ENABLE_HSDP:-0}"
+HSDP_NUM_REPLICAS="${HSDP_NUM_REPLICAS:-2}"
 
 TOKENIZER_TYPE="${TOKENIZER_TYPE:-HuggingFaceTokenizer}"
 if [ "$TOKENIZER_TYPE" == "Llama2Tokenizer" ]; then
@@ -110,9 +111,16 @@ if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     fi
 fi
 
-if [ "$HSDP_NUM_DIST_OPT_INSTANCES" -gt 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
-    echo "Error: HSDP_NUM_DIST_OPT_INSTANCES>1 requires MEGATRON_FSDP=1"
-    exit
+if [ "$ENABLE_HSDP" -eq 1 ]; then
+    if [ "$MEGATRON_FSDP" -ne 1 ]; then
+        echo "Error: HSDP requires MEGATRON_FSDP=1"
+        exit 1
+    fi
+
+    if [ "$HSDP_NUM_REPLICAS" -lt 2 ]; then
+        echo "Error: HSDP_NUM_REPLICAS must be >= 2 when ENABLE_HSDP=1."
+        exit 1
+    fi
 fi
 
 EXPERIMENT_DIR="experiment"
@@ -374,9 +382,9 @@ fi
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
     
-    if [ "$HSDP_NUM_DIST_OPT_INSTANCES" -gt 1 ]; then
-        echo "HSDP is enabled with $HSDP_NUM_DIST_OPT_INSTANCES distributed optimizer instances"
-        EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_DIST_OPT_INSTANCES"
+    if [ "$ENABLE_HSDP" -eq 1 ]; then
+        echo "Megatron HSDP is enabled with $HSDP_NUM_REPLICAS DP outer replicas"
+        EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_REPLICAS"
     fi
 fi
 
