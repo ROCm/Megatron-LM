@@ -2,6 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+import os
 from typing import List, Optional, Tuple
 
 import torch
@@ -581,6 +582,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             else:
                 self.routing_map = pad_routing_map(self.routing_map, pad_multiple)
         self.tokens_per_expert = self.preprocess(self.routing_map)
+        self.tokens_per_expert_gpu = self.tokens_per_expert
 
         if self.shared_experts is not None:
             self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
@@ -701,7 +703,12 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             "before_finish", self.tokens_per_expert
         )
         self.tokens_per_expert = None
+        if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON") == "1":
+            tokens_per_expert_gpu = self.tokens_per_expert_gpu.to(torch.int32)
+            self.tokens_per_expert_gpu = None
+            return global_input_tokens, (tokens_per_expert, tokens_per_expert_gpu), global_probs
         return global_input_tokens, tokens_per_expert, global_probs
+        
 
     def combine_preprocess(self, hidden_states):
         """Prepares hidden states for token combination after expert computations.

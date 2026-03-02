@@ -88,6 +88,15 @@ def class_has_init_param(cls, param_name):
     except (ValueError, TypeError):
         return False
 
+def class_has_method_param(cls, method_name, param_name):
+    """Check if a class method has a specific parameter."""
+    try:
+        method = getattr(cls, method_name)
+        sig = inspect.signature(method)
+        return param_name in sig.parameters
+    except (ValueError, TypeError, AttributeError):
+        return False
+
 
 def condition_init_method(config, init_method):
     """Condition TE init_method on config.perform_initialization."""
@@ -1320,12 +1329,27 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
 
             self._register_load_state_dict_pre_hook(merge_extra_states, with_module=True)
 
-        def forward(self, x, m_splits):
+        def forward(self, x, m_splits, m_splits_gpu=None):
             """Forward."""
             _is_first_microbatch = (
                 None if self.disable_parameter_transpose_cache else self.is_first_microbatch
             )
-            out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+            # Check if parent class forward supports m_splits_tensor parameter
+            # Added in TE commit: https://github.com/ROCm/TransformerEngine/commit/2776c33
+            if is_te_min_version("2.7.0", check_equality=False):
+                if class_has_method_param(te.pytorch.GroupedLinear, "forward", "m_splits_tensor"):
+                    out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, m_splits_tensor=m_splits_gpu)
+                else:
+                    warnings.warn(
+                        "Transformer Engine is missing `m_splits_tensor` parameter in GroupedLinear.forward; "
+                        "MoE GroupedGEMM will be slower. Consider upgrading to a newer version "
+                        "of Transformer Engine.",
+                        UserWarning,
+                    )
+                    out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+            else:
+                out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+            
             self.is_first_microbatch = False
 
             # TE only returns a tuple when return_bias is True, otherwise
