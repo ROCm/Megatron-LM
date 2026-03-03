@@ -34,7 +34,7 @@ class TestSafeGlobals:
     @pytest.mark.skipif(not is_torch_min_version("2.6a0"), reason="PyTorch 2.6 is required")
     def test_unsafe_globals(self, tmp_path_dist_ckpt):
         # create dummy checkpoint
-        ckpt_path = tmp_path_dist_ckpt / "test_safe_globals.pt"
+        ckpt_path = tmp_path_dist_ckpt / "test_unsafe_globals.pt"
         dummy_obj = UnsafeClass(123)
         if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
             torch.save(dummy_obj, ckpt_path)

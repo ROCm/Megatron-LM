@@ -14,7 +14,7 @@ from torch.nn.functional import mse_loss
 from torch.optim import Adam
 
 from tests.unit_tests.test_utilities import Utils
-
+from megatron.core.utils import is_te_min_version
 logger = logging.getLogger(__name__)
 
 HSDP = "hsdp"
@@ -465,6 +465,10 @@ class TestMegatronFsdpFullyShard:
             optimizer.step()
             optimizer.zero_grad()
 
+    @pytest.mark.skipif(
+        not is_te_min_version("2.9.0"),
+        reason="TE >= 2.10.0 is required for test_fully_shard_te_quantized",
+    )
     @pytest.mark.parametrize("init_model_with_meta_device", [True, False])
     @pytest.mark.parametrize(
         "te_recipe",
@@ -474,9 +478,13 @@ class TestMegatronFsdpFullyShard:
         """
         Test Megatron-FSDP with FP8 activations and parameters via TransformerEngine.
         """
+        if te_recipe == BLOCKWISE_FP8_RECIPE:
+            pytest.skip("FP8 block scaling is not supported on ROCM")
+
         if te_recipe == MXFP8_BLOCKWISE_RECIPE:
-            # TODO(@cspades, @ko3n1g): Add this test case in.
-            pytest.skip(f"[Megatron CI/CD] MXFP8 requires Blackwell nodes to test.")
+            mxfp8_supported, mxfp8_skip_reason = te.pytorch.quantization.check_mxfp8_support()
+            if not mxfp8_supported:
+                pytest.skip(mxfp8_skip_reason)
 
         from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import (
             fully_shard_model,

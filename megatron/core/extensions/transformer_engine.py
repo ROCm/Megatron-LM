@@ -1757,8 +1757,17 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                     with quant_context:
                         out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, m_splits_tensor=m_splits_gpu)
                 else:
+                    warnings.warn(
+                        "Transformer Engine is missing `m_splits_tensor` parameter in GroupedLinear.forward; "
+                        "MoE GroupedGEMM will be slower. Consider upgrading to a newer version "
+                        "of Transformer Engine.",
+                        UserWarning,
+                    )
                     with quant_context:
                         out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+            else:
+                with quant_context:
+                    out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
 
             self.is_first_microbatch = False
 

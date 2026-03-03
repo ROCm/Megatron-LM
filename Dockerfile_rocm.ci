@@ -37,7 +37,9 @@ pybind11 \
 setuptools==69.5.1 \
 datasets \
 tiktoken \
-pynvml
+pynvml \
+fastapi \
+uvicorn
 
 RUN pip install "nltk==3.8.1"
 
@@ -53,11 +55,7 @@ RUN git clone https://github.com/Dao-AILab/causal-conv1d causal-conv1d &&\
 
 # Install mamba
 WORKDIR ${STAGE_DIR}
-RUN git clone https://github.com/sudhu2k/mamba mamba &&\
-    cd mamba &&\
-    git checkout hipcub_warp_threads_deprecation &&\
-    git show --oneline -s &&\
-    pip install --no-build-isolation --no-deps .
+RUN pip install mamba-ssm --no-build-isolation
 
 # Build flash-attention
 ARG BUILD_FA="1"
@@ -78,6 +76,7 @@ ARG TE_COMMIT=release_v2.2_rocm
 ENV NVTE_FRAMEWORK=pytorch
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH_OVERRIDE}
 ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
 
 RUN git clone --recursive https://github.com/ROCm/TransformerEngine.git && \
     cd TransformerEngine && \
@@ -90,6 +89,12 @@ RUN git clone https://github.com/caaatch22/grouped_gemm.git &&\
     cd grouped_gemm &&\
     git checkout rocm &&\
     git submodule update --init --recursive &&\
+    pip install --no-build-isolation .
+
+
+RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
+    cd Emerging-Optimizers &&\
+    git checkout v0.1.0 &&\
     pip install --no-build-isolation .
 
 WORKDIR $WORKSPACE_DIR

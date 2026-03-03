@@ -41,6 +41,8 @@ def download_and_extract_asset(assets_dir: Path) -> bool:
     Returns:
         bool: True if successful, False otherwise
     """
+    assets_dir = Path(assets_dir)
+    assets_dir.mkdir(parents=True, exist_ok=True)
     for asset in ASSETS:
         asset_name, asset_url = asset.values()
         try:

@@ -1,3 +1,6 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+import logging
 import shutil
 from contextlib import nullcontext
 from copy import deepcopy
@@ -11,6 +14,8 @@ from torch.nn.functional import mse_loss
 from torch.optim import Adam
 
 from tests.unit_tests.test_utilities import Utils
+
+logger = logging.getLogger(__name__)
 
 HSDP = "hsdp"
 DP = "dp"
@@ -29,6 +34,10 @@ TE_TRANSFORMER = "te_transformer"
 DIM_SIZE = 4
 NUM_LAYERS = 2
 NUM_STEPS = 2
+DELAYED_FP8_RECIPE = "fp8_delayed_scaling"
+CURRENT_FP8_RECIPE = "fp8_current_scaling"
+BLOCKWISE_FP8_RECIPE = "fp8_blockwise_scaling"
+MXFP8_BLOCKWISE_RECIPE = "mxfp8_blockwise"
 
 # Needed for `torch.distributed.checkpoint.{save,load}` because
 # multiple processes need to write to the same directory.
@@ -48,6 +57,7 @@ def destroy_device_mesh(device_mesh):
     _mesh_resources.flatten_name_to_root_dims.clear()
     _mesh_resources.mesh_dim_group_options.clear()
     
+
 
 class ToyCNN(torch.nn.Module):
     """Toy CNN model for testing Megatron-FSDP sharding for high-rank Tensor parameters and inputs."""
@@ -110,17 +120,33 @@ class ToyTransformer(torch.nn.Module):
 class ToyTETransformer(torch.nn.Module):
     """Toy Transformer model for testing Megatron-FSDP with Transformer Engine."""
 
-    def __init__(self, model_dim, num_heads, num_layers, output_dim):
+    def __init__(
+        self,
+        model_dim,
+        num_heads,
+        num_layers,
+        output_dim,
+        fuse_qkv_params=False,
+        params_dtype=torch.float32,
+        device="cuda",
+    ):
         super().__init__()
         self.layers = torch.nn.ModuleList(
             [
                 te.pytorch.TransformerLayer(
-                    hidden_size=model_dim, ffn_hidden_size=model_dim, num_attention_heads=num_heads
+                    hidden_size=model_dim,
+                    ffn_hidden_size=model_dim,
+                    num_attention_heads=num_heads,
+                    fuse_qkv_params=fuse_qkv_params,
+                    params_dtype=params_dtype,
+                    device=device,
                 )
                 for _ in range(num_layers)
             ]
         )
-        self.fc_out = te.pytorch.Linear(model_dim, output_dim)
+        self.fc_out = te.pytorch.Linear(
+            model_dim, output_dim, params_dtype=params_dtype, device=device
+        )
 
     def forward(self, x):
         for layer in self.layers:
@@ -129,9 +155,9 @@ class ToyTETransformer(torch.nn.Module):
         return x
 
 
-def build_toy_model_and_optimizer(model_type: str, init_model_with_meta_device: bool, seed=None):
+def build_toy_model(model_type: str, init_model_with_meta_device: bool, seed=None):
     """
-    Helper function to build a toy model and optimizer for testing Megatron-FSDP.
+    Helper function to build a toy model for testing Megatron-FSDP.
     """
     # Set the seed to make sure the same model is initialized on all ranks.
     if seed is not None:
@@ -157,13 +183,16 @@ def build_toy_model_and_optimizer(model_type: str, init_model_with_meta_device: 
             fsdp_unit_modules = [torch.nn.Transformer]
         elif model_type == TE_TRANSFORMER:
             toy_model = ToyTETransformer(
-                model_dim=DIM_SIZE, num_heads=2, num_layers=NUM_LAYERS, output_dim=DIM_SIZE
+                model_dim=DIM_SIZE,
+                num_heads=2,
+                num_layers=NUM_LAYERS,
+                output_dim=DIM_SIZE,
+                device="meta" if init_model_with_meta_device else "cuda",
             )
             fsdp_unit_modules = [te.pytorch.TransformerLayer]
-        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
 
     # Return the toy model, optimizer, and FSDP unit modules.
-    return toy_model, toy_adam, fsdp_unit_modules
+    return toy_model, fsdp_unit_modules
 
 
 def build_distributed_environment(mesh_dim_config: tuple):

@@ -28,6 +28,16 @@ from megatron.training.training import get_model, setup_model_and_optimizer
 from megatron.training.utils import get_device_arch_version
 from tests.unit_tests.test_utilities import Utils
 
+try:
+    # Check if FP8 block scaling is available.
+    from transformer_engine.pytorch.fp8 import check_fp8_block_scaling_support
+
+    fp8_block_scaling_available, reason_for_no_fp8_block_scaling = check_fp8_block_scaling_support()
+    from transformer_engine.common.recipe import Float8BlockScaling, Format
+except:
+    fp8_block_scaling_available = False
+    reason_for_no_fp8_block_scaling = "FP8 block scaled GEMM requires Hopper and CUDA >= 12.9."
+
 _SEED = 1234
 fp8_available, reason_for_no_fp8 = check_fp8_support()
 
@@ -345,6 +355,7 @@ class TestFP8Param:
     @pytest.mark.parametrize("tp_size", [2])
     @pytest.mark.parametrize("dp_overlap", [(True, True)])
     @pytest.mark.skipif(not cuda_graph_supported, reason=reason_for_no_cuda_graph)
+    @pytest.mark.failing_on_rocm(reason="CUDA graph capture bug on ROCm 7.1 https://github.com/ROCm/rccl/issues/2022")
     def test_delayed_scaling_with_cuda_graph(self, tp_size, dp_overlap):
         kwargs = {"overlap_param_gather": dp_overlap[0], "overlap_grad_reduce": dp_overlap[1]}
         self.run_test_with_cuda_graph(tp_size, "delayed", **kwargs)
@@ -368,6 +379,7 @@ class TestFP8Param:
     @pytest.mark.parametrize("tp_size", [2])
     @pytest.mark.parametrize("dp_overlap", [(True, True)])
     @pytest.mark.skipif(not cuda_graph_supported, reason=reason_for_no_cuda_graph)
+    @pytest.mark.failing_on_rocm(reason="CUDA graph capture bug on ROCm 7.1 https://github.com/ROCm/rccl/issues/2022")
     def test_tensorwise_scaling_with_cuda_graph(self, tp_size, dp_overlap):
         kwargs = {"overlap_param_gather": dp_overlap[0], "overlap_grad_reduce": dp_overlap[1]}
         self.run_test_with_cuda_graph(tp_size, "tensorwise", **kwargs)
@@ -383,10 +395,7 @@ class TestFP8Param:
         }
         self.run_test(tp_size=tp_size, recipe="tensorwise", **kwargs)
 
-    @pytest.mark.skipif(
-        get_device_arch_version() != 9, reason="blockwise is only supported on Hopper architecture"
-    )
-    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
     @pytest.mark.skipif(not is_te_min_version("2.4.0.dev0"), reason="TE 2.4.0.dev0 is required")
     @pytest.mark.parametrize("tp_size", [2])
     @pytest.mark.parametrize("dp_overlap", [(True, True)])
@@ -394,14 +403,12 @@ class TestFP8Param:
         kwargs = {"overlap_param_gather": dp_overlap[0], "overlap_grad_reduce": dp_overlap[1]}
         self.run_test(tp_size=tp_size, recipe="blockwise")
 
-    @pytest.mark.skipif(
-        get_device_arch_version() != 9, reason="blockwise is only supported on Hopper architecture"
-    )
-    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
     @pytest.mark.skipif(not is_te_min_version("2.4.0.dev0"), reason="TE 2.4.0.dev0 is required")
     @pytest.mark.parametrize("tp_size", [2])
     @pytest.mark.parametrize("dp_overlap", [(True, True)])
     @pytest.mark.skipif(not cuda_graph_supported, reason=reason_for_no_cuda_graph)
+    @pytest.mark.failing_on_rocm(reason="CUDA graph capture bug on ROCm 7.1 https://github.com/ROCm/rccl/issues/2022")
     def test_blockwise_scaling_with_cuda_graph(self, tp_size, dp_overlap):
         kwargs = {"overlap_param_gather": dp_overlap[0], "overlap_grad_reduce": dp_overlap[1]}
         self.run_test_with_cuda_graph(tp_size, "blockwise", **kwargs)
@@ -428,6 +435,7 @@ class TestFP8Param:
     @pytest.mark.parametrize("tp_size", [2])
     @pytest.mark.parametrize("dp_overlap", [(False, False), (False, True), (True, True)])
     @pytest.mark.skipif(not cuda_graph_supported, reason=reason_for_no_cuda_graph)
+    @pytest.mark.failing_on_rocm(reason="CUDA graph capture bug on ROCm 7.1 https://github.com/ROCm/rccl/issues/2022")
     def test_mxfp8_with_cuda_graph(self, tp_size, dp_overlap):
         """
         dp_overlap: (overlap_param_gather, overlap_grad_reduce)
@@ -435,10 +443,7 @@ class TestFP8Param:
         kwargs = {"overlap_param_gather": dp_overlap[0], "overlap_grad_reduce": dp_overlap[1]}
         self.run_test_with_cuda_graph(tp_size=tp_size, recipe="mxfp8", **kwargs)
 
-    @pytest.mark.skipif(
-        get_device_arch_version() != 9, reason="blockwise is only supported on Hopper architecture"
-    )
-    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.skipif(not fp8_block_scaling_available, reason=reason_for_no_fp8_block_scaling)
     @pytest.mark.skipif(not is_te_min_version("2.4.0.dev0"), reason="TE 2.4.0.dev0 is required")
     @pytest.mark.parametrize("tp_size", [2])
     def test_blockwise_scaling_with_first_last_layers_bf16(self, tp_size):

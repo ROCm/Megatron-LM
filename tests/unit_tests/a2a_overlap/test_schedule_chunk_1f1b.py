@@ -1,6 +1,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 import gc
 
+from megatron.core.enums import Fp8Recipe
 import pytest
 import torch
 
@@ -101,10 +102,13 @@ class TestA2AOverlap:
 
         # create TransformerConfig
         extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
+
         if dispatcher_type == "flex":
             extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
             extra_kwargs["moe_router_dtype"] = "fp32"
         if fp8_flag is not None:
+            if fp8_flag[1] == Fp8Recipe.blockwise:
+                pytest.skip("Blockwise FP8 is not supported in ROCm")
             extra_kwargs["fp8"] = fp8_flag[0]
             extra_kwargs["fp8_recipe"] = fp8_flag[1]
         if mtp_layers > 0:
