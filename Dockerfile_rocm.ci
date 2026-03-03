@@ -37,7 +37,8 @@ pybind11 \
 setuptools==69.5.1 \
 datasets \
 tiktoken \
-pynvml
+pynvml \
+fastapi
 
 RUN pip install "nltk==3.8.1"
 

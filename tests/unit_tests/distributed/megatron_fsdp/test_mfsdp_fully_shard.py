@@ -465,6 +465,10 @@ class TestMegatronFsdpFullyShard:
             optimizer.step()
             optimizer.zero_grad()
 
+    @pytest.mark.skipif(
+        not is_te_min_version("2.10.0"),
+        reason="TE >= 2.10.0 is required for test_fully_shard_te_quantized",
+    )
     @pytest.mark.parametrize("init_model_with_meta_device", [True, False])
     @pytest.mark.parametrize(
         "te_recipe",

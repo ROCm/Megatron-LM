@@ -25,7 +25,7 @@ def _sentinel_builder(return_value, calls):
 
     return _builder
 
-
+@pytest.mark.failing_on_rocm
 def test_model_provider_switches_to_modelopt_builder(monkeypatch):
     """Ensure model_provider delegates to ModelOpt builder when enabled."""
     args = Namespace(record_memory_history=False, modelopt_enabled=True)

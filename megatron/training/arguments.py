@@ -1827,23 +1827,11 @@ def _add_network_size_args(parser):
                        help='Untie embeddings and output weights.')
 
     # MLA
-    group.add_argument('--multi-latent-attention', action='store_true',
-                       help='Use multi-latent attention for model.')
     group.add_argument('--fused-padded-mla-attention', action='store_true',
                        help='Pad value head dim to the size of qk head dim, and run ck fused attention.')
     group.add_argument('--attention-sink-k', type=int, default=0,
                        help='k attention sink tokens.')
 
-    group.add_argument('--mtp-num-layers', type=int, default=None,
-                       help='Number of Multi-Token Prediction (MTP) Layers.'
-                       'MTP extends the prediction scope to multiple future tokens at each position.'
-                       'This MTP implementation sequentially predict additional tokens '
-                       'by using D sequential modules to predict D additional tokens.')
-    group.add_argument('--mtp-loss-scaling-factor', type=float, default=0.1,
-                       help='Scaling factor of Multi-Token Prediction (MTP) loss. '
-                       'We compute the average of the MTP losses across all depths, '
-                       'and multiply it the scaling factor to obtain the overall MTP loss, '
-                       'which serves as an additional training objective.')
     return parser
 
 def _add_straggler_detector_args(parser):

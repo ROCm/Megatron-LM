@@ -629,7 +629,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             # as a gradient hook of attention_output_with_bias[0]
             self.input_layernorm_checkpoint.discard_output_and_register_recompute(
                 attention_output_with_bias[0]
-                **kwargs
         )
 
         # TODO: could we move `bias_dropout_add_exec_handler` itself
