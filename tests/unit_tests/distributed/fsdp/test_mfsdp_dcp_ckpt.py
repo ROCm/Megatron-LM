@@ -1,5 +1,7 @@
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+import logging
 import shutil
-from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
 
@@ -11,6 +13,8 @@ from torch.nn.functional import mse_loss
 from torch.optim import Adam
 
 from tests.unit_tests.test_utilities import Utils
+
+logger = logging.getLogger(__name__)
 
 HSDP = "hsdp"
 DP = "dp"
@@ -36,18 +40,23 @@ SHARED_TMP_DIR = "/tmp/pytest-shared-tmp"
 
 
 def destroy_device_mesh(device_mesh):
-    from torch.distributed.device_mesh import _mesh_resources
 
-    # Teardown device mesh
+    # Teardown device mesh.
     del device_mesh
-    
-    # Clear mesh resources
-    _mesh_resources.mesh_stack.clear()
-    _mesh_resources.child_to_root_mapping.clear()
-    _mesh_resources.root_to_flatten_mapping.clear()
-    _mesh_resources.flatten_name_to_root_dims.clear()
-    _mesh_resources.mesh_dim_group_options.clear()
-    
+    try:
+        from torch.distributed.device_mesh import _mesh_resources
+
+        _mesh_resources.child_to_root_mapping.clear()
+        _mesh_resources.root_to_flatten_mapping.clear()
+        _mesh_resources.mesh_stack.clear()
+        _mesh_resources.mesh_dim_group_options.clear()
+        _mesh_resources.flatten_name_to_root_dims.clear()
+    except Exception as e:
+        # Global _MeshEnv is on a convoluted deprecation path.
+        # Attempt to clean the global state, otherwise skip.
+        logger.warning(f"Did not clean the deprecated DeviceMesh global state. Skipping...\n{e}")
+        pass
+
 
 class ToyCNN(torch.nn.Module):
     """Toy CNN model for testing Megatron-FSDP sharding for high-rank Tensor parameters and inputs."""
@@ -129,9 +138,9 @@ class ToyTETransformer(torch.nn.Module):
         return x
 
 
-def build_toy_model_and_optimizer(model_type: str, init_model_with_meta_device: bool, seed=None):
+def build_toy_model(model_type: str, init_model_with_meta_device: bool, seed=None):
     """
-    Helper function to build a toy model and optimizer for testing Megatron-FSDP.
+    Helper function to build a toy model for testing Megatron-FSDP.
     """
     # Set the seed to make sure the same model is initialized on all ranks.
     if seed is not None:
@@ -160,10 +169,9 @@ def build_toy_model_and_optimizer(model_type: str, init_model_with_meta_device: 
                 model_dim=DIM_SIZE, num_heads=2, num_layers=NUM_LAYERS, output_dim=DIM_SIZE
             )
             fsdp_unit_modules = [te.pytorch.TransformerLayer]
-        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
 
     # Return the toy model, optimizer, and FSDP unit modules.
-    return toy_model, toy_adam, fsdp_unit_modules
+    return toy_model, fsdp_unit_modules
 
 
 def build_distributed_environment(mesh_dim_config: tuple):
@@ -251,9 +259,8 @@ class TestMegatronFsdpFullyShard:
         accuracy tests are non-trivial, i.e. don't just use the initialized weights.
         """
         # Test model.
-        toy_model, toy_adam, fsdp_unit_modules = build_toy_model_and_optimizer(
-            model_type, False, seed=0
-        )
+        toy_model, fsdp_unit_modules = build_toy_model(model_type, False, seed=0)
+        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
 
         # Wrap in fully_shard.
         model, optimizer = fully_shard(
@@ -332,9 +339,8 @@ class TestMegatronFsdpFullyShard:
         """
         # Initialize a new model for checkpoint loading. Set a different seed to force a different model init,
         # to ensure the checkpoint loading is accurate and non-trivial.
-        toy_model, toy_adam, fsdp_unit_modules = build_toy_model_and_optimizer(
-            model_type, False, seed=1
-        )
+        toy_model, fsdp_unit_modules = build_toy_model(model_type, False, seed=1)
+        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
 
         # Wrap in fully_shard.
         model, optimizer = fully_shard(
