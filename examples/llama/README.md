@@ -163,7 +163,7 @@ And FSDP-v2 is not supported with pipeline parallelism, expert parallelism, MCor
 distributed optimizer, gradient accumulation fusion and fp16.
 
 To run with Megatron-LM HSDP enabled (Hybrid Sharded Data Parallel), use `ENABLE_HSDP=1`
-and set the number of replicas with `HSDP_NUM_REPLICAS>=2`. For example:
+and optionally set the number of replicas with `HSDP_NUM_REPLICAS>=2`. For example:
 ```bash
 TEE_OUTPUT=1 MBS=2 BS=16 TP=1 TE_FP8=0 ENABLE_HSDP=1 HSDP_NUM_REPLICAS=2 SEQ_LENGTH=8192 MODEL_SIZE=8 bash examples/llama/train_llama3.sh
 ```
