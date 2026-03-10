@@ -275,7 +275,7 @@ if [ "$ENABLE_PROFILING" -eq 1 ]; then
 fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --attention-backend flash"
+    EXTRA_ARGS="$EXTRA_ARGS --attention-backend fused"
 fi
 
 if [ "$SEQ_PARALLEL" -eq 1 ]; then
