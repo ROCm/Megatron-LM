@@ -5,7 +5,7 @@
 from argparse import Namespace
 
 import model_provider as mp
-
+import pytest
 
 def _sentinel_builder(return_value, calls):
     """Create a builder stub that records invocation."""

@@ -134,6 +134,10 @@ def _run_one_iter_and_capture(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for offloading tests.")
+@pytest.mark.skipif(
+    not is_te_min_version("2.6.0dev0"),
+    reason="Fine-grained activation offloading with set_save_original_input requires transformer-engine>=2.6.0dev0.",
+)
 @pytest.mark.parametrize(
     "is_moe, is_mla, offload_modules",
     [

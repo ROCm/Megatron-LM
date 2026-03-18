@@ -14,7 +14,7 @@ from torch.nn.functional import mse_loss
 from torch.optim import Adam
 
 from tests.unit_tests.test_utilities import Utils
-
+from megatron.core.utils import is_te_min_version
 logger = logging.getLogger(__name__)
 
 HSDP = "hsdp"

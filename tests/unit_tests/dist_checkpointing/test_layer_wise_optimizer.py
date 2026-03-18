@@ -32,6 +32,16 @@ from tests.unit_tests.dist_checkpointing import (
     setup_moe_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+try:
+    from emerging_optimizers.orthogonalized_optimizers import (
+        OrthogonalizedOptimizer,
+        get_muon_scale_factor,
+    )
+    from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp
+
+    HAVE_EMERGING_OPTIMIZERS = True
+except ImportError:
+    HAVE_EMERGING_OPTIMIZERS = False
 
 
 def check_equal(input_1, input_2):
@@ -120,7 +130,7 @@ def load_checkpoint_no_arg_checks(*args, **kwargs):
         with mock.patch('megatron.training.checkpointing.update_num_microbatches'):
             return load_checkpoint(*args, **kwargs)
 
-
+@pytest.mark.skipif(not HAVE_EMERGING_OPTIMIZERS, reason="Emerging Optimizers is not installed")
 class TestLayerWiseOptimizer:
     """Tests for LayerWiseDistributedOptimizer functionality."""
 
