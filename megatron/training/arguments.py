@@ -1116,7 +1116,7 @@ def validate_args(args, defaults={}):
     if args.num_experts == 0:
         args.num_experts = None
     
-    if args.tensor_model_parallel_size > 1:
+    if args.tensor_model_parallel_size > 1 and args.num_experts is not None:
             assert args.sequence_parallel, \
                 "When using MoE and tensor parallelism, sequence parallelism must be used."
     if args.num_experts is not None and args.moe_ffn_hidden_size is None:
