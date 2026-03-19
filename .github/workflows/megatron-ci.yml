@@ -94,14 +94,14 @@ jobs:
           push: true
           load: true
           tags: |
-            rocm/megatron-lm-private:${{ github.sha }}
+            rocm/megatron-lm-private2:${{ github.sha }}
           build-args: |
             PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
             TE_COMMIT=${{ steps.te-ref.outputs.sha }}
           cache-from: |
-            type=registry,ref=rocm/megatron-lm-private:cache
+            type=registry,ref=rocm/megatron-lm-private2:cache
           cache-to: |
-            type=registry,ref=rocm/megatron-lm-private:cache,mode=max
+            type=registry,ref=rocm/megatron-lm-private2:cache,mode=max
 
       - name: Run unit tests in container
         run: |
@@ -120,7 +120,7 @@ jobs:
             --workdir /workspace/Megatron-LM \
             --name megatron-lm-container \
             --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
-            rocm/megatron-lm-private:${{ github.sha }}
+            rocm/megatron-lm-private2:${{ github.sha }}
 
       - name: Publish test report
         if: always()
@@ -155,6 +155,6 @@ jobs:
       - name: Cleanup Docker image
         if: always()
         run: |
-          docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
+          docker image rm rocm/megatron-lm-private2:${{ github.sha }} || true
 
 
