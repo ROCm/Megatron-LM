@@ -1699,6 +1699,7 @@ def _add_network_size_args(parser):
         "batch_p2p_sync",
         "deallocate_pipeline_outputs",
         "cpu_offloading",
+        "cpu_offloading_num_layers",
         "cpu_offloading_activations",
         "cpu_offloading_weights",
         "cpu_offloading_double_buffering",

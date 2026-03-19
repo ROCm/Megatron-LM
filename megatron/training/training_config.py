@@ -249,6 +249,9 @@ class LoggerConfig:
     log_timers_to_tensorboard: bool = False
     """If set, write timers to tensorboard."""
 
+    log_batch_size_to_tensorboard: bool = False
+    """If set, write batch size to tensorboard."""
+
     log_loss_scale_to_tensorboard: bool = True
     """Disable loss-scale logging to tensorboard."""
 
