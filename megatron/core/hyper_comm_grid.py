@@ -158,7 +158,7 @@ class HyperCommGrid:
         rank_enum = self._gen_rank_enum(ordered_dims)
         pg, _ = dist.new_subgroups_by_enumeration(rank_enum, backend=self.backend, **kwargs)
 
-        if dist.get_rank() == 0:
+        if dist.is_initialized() and dist.get_rank() == 0:
             logging.info(
                 f"Generated process group for {unique_group_key} with enumeration {rank_enum}"
             )

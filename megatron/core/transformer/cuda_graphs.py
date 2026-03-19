@@ -51,12 +51,17 @@ try:
     from transformer_engine.pytorch.graph import set_capture_end as te_set_capture_end
     from transformer_engine.pytorch.graph import set_capture_start as te_set_capture_start
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
-    from transformer_engine.pytorch.utils import make_weak_ref
 
     HAVE_TE_GRAPHS = True
 except:
     HAVE_TE_GRAPHS = False
 
+try:
+    from transformer_engine.pytorch.utils import make_weak_ref
+    HAVE_TE_WEAK_REF = True
+except:
+    HAVE_TE_WEAK_REF = False
+    
 try:
     from tqdm import tqdm
 
@@ -1122,7 +1127,7 @@ class _CudaGraphRunner(torch.nn.Module):
                     _CudagraphGlobalRecord.tensor_reuse_pool.insert(ten)
 
         # now weakref everything
-        if HAVE_TE_GRAPHS:
+        if HAVE_TE_WEAK_REF:
 
             def replace_with_weak_ref(arg):
                 if not torch.is_tensor(arg):

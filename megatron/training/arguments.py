@@ -1699,7 +1699,6 @@ def _add_network_size_args(parser):
         "batch_p2p_sync",
         "deallocate_pipeline_outputs",
         "cpu_offloading",
-        "cpu_offloading_num_layers",
         "cpu_offloading_activations",
         "cpu_offloading_weights",
         "cpu_offloading_double_buffering",
@@ -3097,19 +3096,6 @@ def get_patch_args(parser):
         "keep zero to search for a optimal size",
     )
 
-    group.add_argument(
-        "--cpu-offloading",
-        default=False,
-        action="store_true",
-        help="Use activation checkpointing.",
-    )
-
-    group.add_argument(
-        "--cpu-offloading-num-layers",
-        type=int,
-        default=0,
-        help="The num of layers to be moved to CPU",
-    )
     return parser
 
 def _add_autoresume_args(parser):

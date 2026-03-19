@@ -310,8 +310,8 @@ def test_gpt_fine_grained_activation_offloading_correctness_and_memory(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for offloading tests.")
 @pytest.mark.skipif(
-    not is_te_min_version("1.9.0.dev0"),
-    reason="EP A2A overlap requires TE 1.9.0.dev0+ in this repo's tests.",
+    not is_te_min_version("2.6.0dev0"),
+    reason="Fine-grained activation offloading with set_save_original_input requires transformer-engine>=2.6.0dev0.",
 )
 @pytest.mark.parametrize(
     "dispatcher_backend, is_mla, offload_modules",
@@ -429,7 +429,7 @@ def test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility(
             moe_flex_dispatcher_backend=dispatcher_backend,
             moe_router_dtype="fp32" if dispatcher_backend == "hybridep" else "fp64",
             overlap_moe_expert_parallel_comm=True,
-            delay_wgrad_compute=True,
+            delay_wgrad_compute=True if is_te_min_version("2.3.0") else False,
             # Fine-grained activation offloading
             fine_grained_activation_offloading=enable_offload,
             offload_modules=offload_modules if enable_offload else None,
