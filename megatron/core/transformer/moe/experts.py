@@ -842,7 +842,7 @@ class TEGroupedMLP(MegatronModule):
     def forward(
         self,
         permuted_local_hidden_states: torch.Tensor,
-        tokens_per_expert: torch.Tensor,
+        tokens_per_expert: torch.Tensor | Tuple[torch.Tensor, torch.Tensor],
         permuted_probs: torch.Tensor,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward of TEGroupedMLP
@@ -856,6 +856,9 @@ class TEGroupedMLP(MegatronModule):
         Return:
             output (torch.Tensor): The output of the local experts.
         """
+        tokens_per_expert_gpu = None
+        if isinstance(tokens_per_expert, tuple):
+            tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
         tokens_per_expert = tokens_per_expert.tolist()
         if self.config.fp8:
             actual_tokens_per_expert = tokens_per_expert
@@ -879,7 +882,7 @@ class TEGroupedMLP(MegatronModule):
             permuted_probs = torch.ones_like(permuted_probs)
 
         intermediate_parallel, bias_parallel = self.linear_fc1(
-            permuted_local_hidden_states, tokens_per_expert
+            permuted_local_hidden_states, tokens_per_expert, tokens_per_expert_gpu
         )
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
@@ -945,13 +948,13 @@ class TEGroupedMLP(MegatronModule):
             intermediate_parallel = self.activation_checkpoint.checkpoint(
                 bias_act_func, intermediate_parallel, bias_parallel, permuted_probs
             )
-            output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
+            output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert, tokens_per_expert_gpu)
             self.activation_checkpoint.discard_output_and_register_recompute(output)
         else:
             intermediate_parallel = bias_act_func(
                 intermediate_parallel, bias_parallel, permuted_probs
             )
-            output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert)
+            output, output_bias = self.linear_fc2(intermediate_parallel, tokens_per_expert, tokens_per_expert_gpu)
 
         # upad and concat the output
         if self.config.fp8:
