@@ -68,7 +68,7 @@ jobs:
         id: te-ref
         run: |
           set -e
-          BRANCH=sudhu/release_v2.10_rocm_cherrypicks
+          BRANCH=release_v2.10_rocm
           SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
           if [ -z "$SHA" ]; then
             echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
@@ -99,9 +99,9 @@ jobs:
             PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
             TE_COMMIT=${{ steps.te-ref.outputs.sha }}
           cache-from: |
-            type=registry,ref=rocm/megatron-lm-private:cache2
+            type=registry,ref=rocm/megatron-lm-private:cache
           cache-to: |
-            type=registry,ref=rocm/megatron-lm-private:cache2,mode=max
+            type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
       - name: Run unit tests in container
         run: |
