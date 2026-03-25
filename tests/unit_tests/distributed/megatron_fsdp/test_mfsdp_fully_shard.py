@@ -478,7 +478,7 @@ class TestMegatronFsdpFullyShard:
         """
         Test Megatron-FSDP with FP8 activations and parameters via TransformerEngine.
         """
-        if te_recipe == MXFP8_BLOCKWISE_RECIPE:
+        if te_recipe == BLOCKWISE_FP8_RECIPE:
             pytest.skip("FP8 block scaling is not supported on ROCM")
 
         from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import (
