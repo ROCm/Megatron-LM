@@ -12,6 +12,12 @@ RUN mkdir -p $WORKSPACE_DIR
 RUN mkdir -p ${STAGE_DIR}
 WORKDIR $WORKSPACE_DIR
 
+RUN apt-get update && \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        cmake \
+        ninja-build \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN pip3 install \
 scipy \
 wheel \
