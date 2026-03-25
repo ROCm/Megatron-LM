@@ -479,8 +479,7 @@ class TestMegatronFsdpFullyShard:
         Test Megatron-FSDP with FP8 activations and parameters via TransformerEngine.
         """
         if te_recipe == MXFP8_BLOCKWISE_RECIPE:
-            # TODO(@cspades, @ko3n1g): Add this test case in.
-            pytest.skip(f"[Megatron CI/CD] MXFP8 requires Blackwell nodes to test.")
+            pytest.skip("FP8 block scaling is not supported on ROCM")
 
         from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import (
             fully_shard_model,
@@ -498,7 +497,6 @@ class TestMegatronFsdpFullyShard:
         elif te_recipe == CURRENT_FP8_RECIPE:
             te_quant_recipe = te.common.recipe.Float8CurrentScaling()
         elif te_recipe == BLOCKWISE_FP8_RECIPE:
-            pytest.skip("FP8 block scaling is not supported on ROCM")
             te_quant_recipe = te.common.recipe.Float8BlockScaling()
 
         # Construct toy model compatible with FP8.
