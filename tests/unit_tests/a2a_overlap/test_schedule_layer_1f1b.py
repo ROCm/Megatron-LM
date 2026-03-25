@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from megatron.core.fp8_utils import get_fp8_context
+from megatron.core.enums import Fp8Recipe
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
@@ -361,6 +362,8 @@ class TestA2AOverlap:
             extra_kwargs["moe_enable_deepep"] = True
             extra_kwargs["moe_router_dtype"] = "fp32"
         if fp8_flag is not None:
+            if fp8_flag[1] == Fp8Recipe.blockwise:
+                pytest.skip("Blockwise FP8 is not supported in ROCm")
             extra_kwargs["fp8"] = fp8_flag[0]
             extra_kwargs["fp8_recipe"] = fp8_flag[1]
         config = get_test_config(extra_kwargs=extra_kwargs)
@@ -411,6 +414,8 @@ class TestA2AOverlap:
             extra_kwargs["moe_enable_deepep"] = True
             extra_kwargs["moe_router_dtype"] = "fp32"
         if fp8_flag is not None:
+            if fp8_flag[1] == Fp8Recipe.blockwise:
+                pytest.skip("Blockwise FP8 is not supported in ROCm")
             extra_kwargs["fp8_recipe"] = fp8_flag[1]
             extra_kwargs["fp8"] = fp8_flag[0]
         config = get_test_config(extra_kwargs=extra_kwargs)

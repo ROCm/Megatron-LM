@@ -78,6 +78,7 @@ ARG TE_COMMIT=release_v2.2_rocm
 ENV NVTE_FRAMEWORK=pytorch
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH_OVERRIDE}
 ENV NVTE_USE_HIPBLASLT=1
+ENV NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
 
 RUN git clone --recursive https://github.com/ROCm/TransformerEngine.git && \
     cd TransformerEngine && \
