@@ -498,6 +498,7 @@ class TestMegatronFsdpFullyShard:
         elif te_recipe == CURRENT_FP8_RECIPE:
             te_quant_recipe = te.common.recipe.Float8CurrentScaling()
         elif te_recipe == BLOCKWISE_FP8_RECIPE:
+            pytest.skip("FP8 block scaling is not supported on ROCM")
             te_quant_recipe = te.common.recipe.Float8BlockScaling()
 
         # Construct toy model compatible with FP8.
