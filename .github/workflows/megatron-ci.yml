@@ -99,9 +99,9 @@ jobs:
             PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
             TE_COMMIT=${{ steps.te-ref.outputs.sha }}
           cache-from: |
-            type=registry,ref=rocm/megatron-lm-private:cache
+            type=registry,ref=rocm/megatron-lm-private:cache2
           cache-to: |
-            type=registry,ref=rocm/megatron-lm-private:cache,mode=max
+            type=registry,ref=rocm/megatron-lm-private:cache2,mode=max
 
       - name: Run unit tests in container
         run: |
