@@ -92,7 +92,6 @@ jobs:
           context: .
           file: ./Dockerfile_rocm.ci
           push: true
-          load: true
           tags: |
             rocm/megatron-lm-private:${{ github.sha }}
           build-args: |
@@ -102,6 +101,9 @@ jobs:
             type=registry,ref=rocm/megatron-lm-private:cache
           cache-to: |
             type=registry,ref=rocm/megatron-lm-private:cache,mode=max
+
+      - name: Pull image for local docker run
+        run: docker pull rocm/megatron-lm-private:${{ github.sha }}
 
       - name: Run unit tests in container
         run: |
