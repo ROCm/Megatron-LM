@@ -466,7 +466,7 @@ class TestMegatronFsdpFullyShard:
             optimizer.zero_grad()
 
     @pytest.mark.skipif(
-        not is_te_min_version("2.10.0"),
+        not is_te_min_version("2.9.0"),
         reason="TE >= 2.10.0 is required for test_fully_shard_te_quantized",
     )
     @pytest.mark.parametrize("init_model_with_meta_device", [True, False])
@@ -480,6 +480,11 @@ class TestMegatronFsdpFullyShard:
         """
         if te_recipe == BLOCKWISE_FP8_RECIPE:
             pytest.skip("FP8 block scaling is not supported on ROCM")
+
+        if te_recipe == MXFP8_BLOCKWISE_RECIPE:
+            mxfp8_supported, mxfp8_skip_reason = te.pytorch.quantization.check_mxfp8_support()
+            if not mxfp8_supported:
+                pytest.skip(mxfp8_skip_reason)
 
         from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import (
             fully_shard_model,

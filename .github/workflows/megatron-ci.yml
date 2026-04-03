@@ -105,7 +105,7 @@ jobs:
           cache-to: |
             type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
-      - name: Load image for docker run (no Hub access from dockerd)
+      - name: Load image for docker run
         run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
 
       - name: Run unit tests in container
