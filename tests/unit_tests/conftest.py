@@ -69,9 +69,13 @@ def tmp_path_dist_ckpt(tmp_path_factory) -> Path:
     if Utils.rank == 0:
         with TempNamedDir(tmp_dir, sync=False):
             yield tmp_dir
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
 
     else:
         yield tmp_dir
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
 
 @pytest.fixture(scope="session", autouse=True)
