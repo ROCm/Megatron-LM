@@ -92,6 +92,9 @@ jobs:
           context: .
           file: ./Dockerfile_rocm.ci
           push: true
+          # Also write image to disk so `docker run` does not need `docker pull`.
+          # On some runners dockerd cannot reach auth.docker.io (timeout); BuildKit push may still work.
+          outputs: type=docker,dest=${{ runner.temp }}/megatron-ci-image.tar
           tags: |
             rocm/megatron-lm-private:${{ github.sha }}
           build-args: |
@@ -102,8 +105,8 @@ jobs:
           cache-to: |
             type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
-      - name: Pull image for local docker run
-        run: docker pull rocm/megatron-lm-private:${{ github.sha }}
+      - name: Load image for docker run (no Hub access from dockerd)
+        run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
 
       - name: Run unit tests in container
         run: |
@@ -158,5 +161,6 @@ jobs:
         if: always()
         run: |
           docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
+          rm -f "${{ runner.temp }}/megatron-ci-image.tar"
 
 
