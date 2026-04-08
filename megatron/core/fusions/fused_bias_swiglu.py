@@ -3,11 +3,23 @@
 
 # pylint: disable=missing-function-docstring, missing-class-docstring
 
+import os
+
 import torch
 import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
+
+try:
+    import transformer_engine.pytorch as te
+    import transformer_engine_torch as tex
+
+    _te_swiglu_available = True
+except ImportError:
+    _te_swiglu_available = False
+
+_use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -166,6 +178,9 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.save_for_backward(input_for_backward)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
+
+        if _use_te_swiglu and _te_swiglu_available:
+            return te.ops.SwiGLU()(input)
         return swiglu(input)
 
     @staticmethod
@@ -184,7 +199,11 @@ class SwiGLUFunction(torch.autograd.Function):
         """
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
-        tmp = swiglu_back(grad_output, input)
+
+        if _use_te_swiglu and _te_swiglu_available:
+            tmp = tex.dswiglu(grad_output, input, None)
+        else:
+            tmp = swiglu_back(grad_output, input)
         return tmp, None, None
 
 
