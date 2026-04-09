@@ -19,7 +19,7 @@ try:
 except ImportError:
     _te_swiglu_available = False
 
-_use_te_swiglu = os.getenv("USE_TE_SWIGLU", "0") == "1"
+_use_te_swiglu = _te_swiglu_available and int(os.getenv("USE_TE_SWIGLU", "0"))
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -179,7 +179,7 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
 
-        if _use_te_swiglu and _te_swiglu_available:
+        if _use_te_swiglu:
             return te.ops.SwiGLU()(input)
         return swiglu(input)
 
@@ -200,7 +200,7 @@ class SwiGLUFunction(torch.autograd.Function):
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
 
-        if _use_te_swiglu and _te_swiglu_available:
+        if _use_te_swiglu:
             tmp = tex.dswiglu(grad_output, input, None)
         else:
             tmp = swiglu_back(grad_output, input)
