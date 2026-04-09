@@ -1081,7 +1081,7 @@ class TestParallelMLAAttentionPrecisionWithRopeFusion:
             os.environ.clear()
             os.environ.update(_environ)
 
-
+@pytest.mark.failing_on_rocm("ROCm does not support return_max_logit yet")
 @pytest.mark.skipif(not is_te_min_version("2.9.0"), reason="QK clipping requires TE >= 2.9.0")
 @pytest.mark.parametrize("rope_type", ('yarn', 'rope'))
 class TestMLAClipQK:

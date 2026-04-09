@@ -164,7 +164,7 @@ class TestParallelAttention:
         assert output.shape[2] == config.hidden_size
         assert bias.shape[0] == config.hidden_size
 
-
+@pytest.mark.failing_on_rocm("ROCm does not support return_max_logit yet")
 @pytest.mark.skipif(not is_te_min_version("2.9.0"), reason="QK clipping requires TE >= 2.9.0")
 class TestClipQK:
 
