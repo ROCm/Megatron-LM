@@ -36,7 +36,7 @@ TIME_STAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 EXP_NAME="${EXP_NAME:-perf}"
 
 TEE_OUTPUT="${TEE_OUTPUT:-1}"
-USE_FLASH_ATTN="${USE_FLASH_ATTN:-1}"
+USE_FLASH_ATTN="${USE_FLASH_ATTN:-0}"
 NO_TRAINING="${NO_TRAINING:-0}" # NO_TRAINING=1: for computing metrics only
 ENABLE_PROFILING="${ENABLE_PROFILING:-0}" #enable pytorch profiling
 ENABLE_ROPE="${ENABLE_ROPE:-1}"
@@ -259,6 +259,8 @@ fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
 EXTRA_ARGS="$EXTRA_ARGS --use-flash-attn"
+else
+EXTRA_ARGS="$EXTRA_ARGS --attention-backend fused"
 fi
 
 if [ "$SEQ_PARALLEL" -eq 1 ]; then

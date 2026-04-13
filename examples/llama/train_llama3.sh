@@ -10,7 +10,12 @@
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
-NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+NCCL_IB_HCA_LIST=$(rdma link -j 2>/dev/null | python3 -c "import json, sys
+try:
+    links = json.load(sys.stdin)
+    print(*[links[i][\"ifname\"] for i in range(min(8, len(links)))], sep=',')
+except Exception:
+    pass") || NCCL_IB_HCA_LIST=""
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
@@ -35,7 +40,7 @@ TIME_STAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 EXP_NAME="${EXP_NAME:-perf}"
 
 TEE_OUTPUT="${TEE_OUTPUT:-1}"
-USE_FLASH_ATTN="${USE_FLASH_ATTN:-1}"
+USE_FLASH_ATTN="${USE_FLASH_ATTN:-0}"
 NO_TRAINING="${NO_TRAINING:-0}" # NO_TRAINING=1: for computing metrics only
 ENABLE_PROFILING="${ENABLE_PROFILING:-0}" #enable pytorch profiling
 echo "NO_TRAINING=$NO_TRAINING"
@@ -295,6 +300,8 @@ fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-flash-attn"
+else
+    EXTRA_ARGS="$EXTRA_ARGS --attention-backend fused"
 fi
 
 if [ "$SEQ_PARALLEL" -eq 1 ]; then
