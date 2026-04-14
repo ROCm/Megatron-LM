@@ -2,6 +2,7 @@
 
 """Utility functions related to FP4 that are used throughout Megatron core"""
 
+import os
 from contextlib import nullcontext
 
 import torch
@@ -81,6 +82,7 @@ if HAVE_TE:
                     "MXFP4BlockScaling requires TransformerEngine >= 2.8.0."
                 )
             fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
+            fp4_recipe.use_hadamard = os.environ.get("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
         else:
             raise ValueError(
                 f"Unsupported FP4 recipe: {config.fp4_recipe}. "
