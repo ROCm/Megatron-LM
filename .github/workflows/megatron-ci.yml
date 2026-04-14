@@ -26,7 +26,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0
 
@@ -68,7 +68,7 @@ jobs:
         id: te-ref
         run: |
           set -e
-          BRANCH=release_v2.2_rocm
+          BRANCH=release_v2.10_rocm
           SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
           if [ -z "$SHA" ]; then
             echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
