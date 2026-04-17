@@ -762,7 +762,7 @@ def validate_args(args, defaults={}):
 
     # FP4 requires TE >= 2.7.0.dev0
     if args.fp4 and not is_te_min_version("2.7.0.dev0"):
-        raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+        raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling and MXFP4BlockScaling support.")
 
     if args.use_megatron_fsdp:
         # NOTE: The flag `use_custom_fsdp` is deprecated and will be removed in future versions.
