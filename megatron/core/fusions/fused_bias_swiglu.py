@@ -12,7 +12,6 @@ from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
 
 try:
-    import transformer_engine.pytorch as te
     import transformer_engine_torch as tex
 
     _te_swiglu_available = True
@@ -180,7 +179,7 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.fp8_input_store = fp8_input_store
 
         if _use_te_swiglu:
-            return te.ops.SwiGLU()(input)
+            return tex.swiglu(input)
         return swiglu(input)
 
     @staticmethod
