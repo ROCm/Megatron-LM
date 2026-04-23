@@ -1,6 +1,3 @@
-import os
-import unittest.mock
-
 import pytest
 import torch
 
@@ -56,7 +53,7 @@ def test_weighted_bias_swiglu(input_dtype):
 @pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("shape", [(16, 64), (4, 8, 64)])
 def test_te_swiglu_forward_backward(input_dtype, shape):
-    """Verify NVTE_SWIGLU=1 (TE kernel) matches the default fused path for SwiGLUFunction."""
+    """Verify use_te_swiglu=True (TE kernel) matches the default fused path."""
     if input_dtype == torch.float32:
         tols = dict(rtol=1.0e-5, atol=1.0e-5)
     else:
@@ -71,11 +68,9 @@ def test_te_swiglu_forward_backward(input_dtype, shape):
     y_ref = bias_swiglu_impl(x_ref, None)
     y_ref.backward(grad_out)
 
-    import megatron.core.fusions.fused_bias_swiglu as _mod
-    with unittest.mock.patch.object(_mod, "_use_te_swiglu", True):
-        x_te = x.clone().detach().requires_grad_(True)
-        y_te = bias_swiglu_impl(x_te, None)
-        y_te.backward(grad_out)
+    x_te = x.clone().detach().requires_grad_(True)
+    y_te = bias_swiglu_impl(x_te, None, use_te_swiglu=True)
+    y_te.backward(grad_out)
 
     assert y_te.shape == y_ref.shape
     assert torch.allclose(y_te, y_ref, **tols), (

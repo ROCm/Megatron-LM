@@ -3,7 +3,7 @@
 
 # pylint: disable=missing-function-docstring, missing-class-docstring
 
-import os
+import warnings
 
 import torch
 import torch.nn.functional as F
@@ -12,13 +12,10 @@ from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
 
 try:
+    import transformer_engine.pytorch  # noqa: F401 — loads shared libs needed by tex
     import transformer_engine_torch as tex
-
-    _te_swiglu_available = True
 except ImportError:
-    _te_swiglu_available = False
-
-_use_te_swiglu = _te_swiglu_available and int(os.getenv("NVTE_SWIGLU", "0"))
+    tex = None
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
@@ -160,13 +157,15 @@ class SwiGLUFunction(torch.autograd.Function):
 
     @staticmethod
     @nvtx_decorator()
-    def forward(ctx, input, fp8_input_store, cpu_offload_input):
+    def forward(ctx, input, fp8_input_store, cpu_offload_input, use_te_swiglu=False):
         """Forward pass of SwiGLU activation.
 
         Args:
             ctx: Autograd context object for saving tensors for backward pass.
             input (torch.Tensor): Input tensor to apply SwiGLU to.
             fp8_input_store (bool): If True, stores intermediate values in FP8 format.
+            cpu_offload_input (bool): If True, offloads activations to CPU.
+            use_te_swiglu (bool): If True, dispatch to TE native kernel.
 
         Returns:
             torch.Tensor: Result of applying SwiGLU activation.
@@ -177,8 +176,15 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.save_for_backward(input_for_backward)
         ctx.ori_input_dtype = input.dtype
         ctx.fp8_input_store = fp8_input_store
+        if use_te_swiglu and tex is None:
+            warnings.warn(
+                "--use-te-swiglu was set but transformer_engine is not installed. "
+                "Falling back to the default fused SwiGLU implementation."
+            )
+            use_te_swiglu = False
+        ctx.use_te_swiglu = use_te_swiglu
 
-        if _use_te_swiglu:
+        if use_te_swiglu:
             return tex.swiglu(input, None)
         return swiglu(input)
 
@@ -199,11 +205,11 @@ class SwiGLUFunction(torch.autograd.Function):
         input = ctx.saved_tensors[0]
         input = input.to(ctx.ori_input_dtype) if ctx.fp8_input_store else input
 
-        if _use_te_swiglu:
+        if ctx.use_te_swiglu:
             tmp = tex.dswiglu(grad_output, input, None)
         else:
             tmp = swiglu_back(grad_output, input)
-        return tmp, None, None
+        return tmp, None, None, None
 
 
 class WeightedSwiGLUFunction(torch.autograd.Function):
@@ -224,7 +230,9 @@ class WeightedSwiGLUFunction(torch.autograd.Function):
         return tmp, wgrad, None
 
 
-def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False):
+def bias_swiglu_impl(
+    input, bias, fp8_input_store=False, cpu_offload_input=False, use_te_swiglu=False
+):
     """Implementation of biased SwiGLU that handles different input shapes.
 
     This function reshapes the input if necessary, applies the SwiGLU activation
@@ -236,6 +244,10 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
             uses the bias-free SwiGLU variant.
         fp8_input_store (bool, optional): Whether to store intermediate values in FP8 format.
             Defaults to False.
+        cpu_offload_input (bool, optional): Whether to offload activations to CPU.
+            Defaults to False.
+        use_te_swiglu (bool, optional): Whether to dispatch to TE native SwiGLU kernel.
+            Only applies to the bias-free path. Defaults to False.
 
     Returns:
         torch.Tensor: Result of biased SwiGLU activation.
@@ -249,7 +261,9 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
     if bias is not None:
         output = BiasSwiGLUFunction.apply(input, bias, fp8_input_store, cpu_offload_input)
     else:
-        output = SwiGLUFunction.apply(input, fp8_input_store, cpu_offload_input)
+        output = SwiGLUFunction.apply(
+            input, fp8_input_store, cpu_offload_input, use_te_swiglu
+        )
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 
