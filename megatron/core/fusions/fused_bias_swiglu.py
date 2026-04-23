@@ -179,7 +179,7 @@ class SwiGLUFunction(torch.autograd.Function):
         ctx.fp8_input_store = fp8_input_store
 
         if _use_te_swiglu:
-            return tex.swiglu(input)
+            return tex.swiglu(input, None)
         return swiglu(input)
 
     @staticmethod
