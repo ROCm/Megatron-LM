@@ -212,6 +212,7 @@ class MLP(MegatronModule):
                         self.config.cpu_offloading
                         and self.config.cpu_offloading_activations
                         and HAVE_TE,
+                        self.config.use_te_swiglu,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")

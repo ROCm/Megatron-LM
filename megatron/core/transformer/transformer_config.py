@@ -679,6 +679,10 @@ class TransformerConfig(ModelParallelConfig):
     use_te_activation_func: bool = False
     """Whether to use ffn activation functions implemented by TransformerEngine"""
 
+    use_te_swiglu: bool = False
+    """Whether to use Transformer Engine native SwiGLU kernel (tex.swiglu/tex.dswiglu)
+    in the bias-free SwiGLU activation path."""
+
     use_te_rng_tracker: bool = False
     """ Whether to use the TE or MCore version of the RNG tracker. """
 

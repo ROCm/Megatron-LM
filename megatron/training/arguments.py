@@ -2334,6 +2334,9 @@ def _add_training_args(parser):
                        help='The communicator group names to use high priority streams.')
     group.add_argument('--use-te-activation-func', action='store_true',
                        help='Use activation function kernel from Transformer Engine in MLP module.')
+    group.add_argument('--use-te-swiglu', action='store_true',
+                       help='Use Transformer Engine native SwiGLU kernel in the bias-free '
+                            'SwiGLU activation path. Requires transformer_engine_torch.')
 
     return parser
 
