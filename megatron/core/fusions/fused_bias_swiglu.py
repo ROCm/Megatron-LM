@@ -18,7 +18,7 @@ try:
 except ImportError:
     _te_swiglu_available = False
 
-_use_te_swiglu = _te_swiglu_available and int(os.getenv("USE_TE_SWIGLU", "0"))
+_use_te_swiglu = _te_swiglu_available and int(os.getenv("NVTE_SWIGLU", "0"))
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
