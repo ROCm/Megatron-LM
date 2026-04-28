@@ -1,4 +1,5 @@
 import subprocess
+import sys
 
 from setuptools import Extension, setup
 
@@ -9,7 +10,7 @@ setup_args = dict(
             sources=["megatron/core/datasets/helpers.cpp"],
             language="c++",
             extra_compile_args=(
-                subprocess.check_output(["python3", "-m", "pybind11", "--includes"])
+                subprocess.check_output([sys.executable, "-m", "pybind11", "--includes"])
                 .decode("utf-8")
                 .strip()
                 .split()
