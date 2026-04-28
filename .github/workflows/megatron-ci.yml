@@ -13,6 +13,16 @@ on:
         description: 'GPU architecture to use for build/tests (e.g. gfx942)'
         required: false
         default: 'gfx942'
+      generate_benchmark_charts:
+        description: 'After benchmarks, emit memory_footprint + perf_breakdown PNG/JSON'
+        required: false
+        default: false
+        type: boolean
+      run_te_profile:
+        description: 'Run TE E2E PyTorch profiler job (uploads trace + perf breakdown)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -205,6 +215,8 @@ jobs:
 
       - name: Run benchmarks and generate performance report
         id: benchmarks
+        env:
+          GENERATE_BENCHMARK_CHARTS: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.generate_benchmark_charts && '1' || '0' }}
         run: |
           set -euxo pipefail
           mkdir -p output
@@ -218,6 +230,7 @@ jobs:
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
             --shm-size=128G \
+            -e GENERATE_BENCHMARK_CHARTS="${GENERATE_BENCHMARK_CHARTS:-0}" \
             -v "${{ github.workspace }}:/workspace/Megatron-LM" \
             --workdir /workspace/Megatron-LM \
             --entrypoint /bin/bash \
@@ -286,8 +299,81 @@ jobs:
             output/benchmark_results.tmp
             output/benchmark_summary.md
             output/bench_*.log
+            output/memory_footprint.json
+            output/memory_footprint.png
+            output/perf_breakdown.json
+            output/perf_breakdown.png
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Cleanup Docker image
+        if: always()
+        run: |
+          docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
+
+  te_profile:
+    name: TE E2E profile (optional)
+    needs: build
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.run_te_profile }}
+    timeout-minutes: 180
+    runs-on: linux-megatron-mi325-8
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: docker pull rocm/megatron-lm-private:${{ github.sha }}
+
+      - name: Run TE profile CI script
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          docker run --rm \
+            --network=host \
+            -u root \
+            --device=/dev/kfd \
+            --device=/dev/dri \
+            --group-add "$(getent group video | cut -d: -f3)" \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --shm-size=128G \
+            -v "${{ github.workspace }}:/workspace/Megatron-LM" \
+            --workdir /workspace/Megatron-LM \
+            --entrypoint /bin/bash \
+            rocm/megatron-lm-private:${{ github.sha }} \
+            -c "bash run_profile_ci.sh" 2>&1 | tee output/te_profile_ci.log
+
+      - name: Upload TE profile artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-lm-te-profile
+          path: |
+            output/te_profile_run/**
+            output/te_profile_ci.log
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Add TE profile summary
+        if: always()
+        run: |
+          if [ -f output/te_profile_ci.log ]; then
+            echo "## TE E2E profile run" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 80 output/te_profile_ci.log >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Cleanup Docker image
         if: always()

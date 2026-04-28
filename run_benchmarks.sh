@@ -1,6 +1,8 @@
 #!/bin/bash
 ###############################################################################
 # Run Megatron-LM benchmarks and generate a performance report.
+# Single entry for CI/local: Llama uses Transformer Engine by default
+# (examples/llama/train_llama3.sh, USE_TE=1); use USE_TE=0 on a row for local baseline.
 ###############################################################################
 set -e
 
@@ -37,26 +39,61 @@ run_and_collect() {
 }
 
 # Main
+# BENCHMARK_SUITE (optional, CI/local):
+#   unset, empty, "full", or "all" → run the full matrix below (default).
+#   "llama" → Llama train_llama3 rows only.
+#   "deepseek" → DeepSeek v2/v3 rows only.
+#   "llama,deepseek" → same as full for current matrix (both groups).
 echo "=============================================="
 echo "     Megatron-LM Benchmark Performance Report"
 echo "     $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
 echo "=============================================="
+echo ""
+_SUITE_RAW="${BENCHMARK_SUITE:-}"
+_SUITE=$(echo "${_SUITE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+RUN_LLAMA=1
+RUN_DEEPSEEK=1
+if [ -n "${_SUITE}" ] && [ "${_SUITE}" != "full" ] && [ "${_SUITE}" != "all" ]; then
+  RUN_LLAMA=0
+  RUN_DEEPSEEK=0
+  _LINE=$(echo "${BENCHMARK_SUITE}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+  IFS=',' read -r -a _PARTS <<< "$_LINE"
+  for _p in "${_PARTS[@]}"; do
+    case "$_p" in
+      llama) RUN_LLAMA=1 ;;
+      deepseek) RUN_DEEPSEEK=1 ;;
+      *)
+        echo "Unknown BENCHMARK_SUITE segment '${_p}' (use full, llama, deepseek, or llama,deepseek)"
+        exit 1
+        ;;
+    esac
+  done
+fi
+echo "BENCHMARK_SUITE=${_SUITE_RAW:-<empty>=full} RUN_LLAMA=$RUN_LLAMA RUN_DEEPSEEK=$RUN_DEEPSEEK"
 echo ""
 
 # Use TOTAL_ITERS for short runs (Llama defaults to 12)
 export TOTAL_ITERS="${TOTAL_ITERS:-12}"
 export TRAIN_ITERS="${TRAIN_ITERS:-12}"
 export TEE_OUTPUT=1
+# Richer timer lines for tools/gen_perf_breakdown_charts.py (optional)
+if [ "${GENERATE_BENCHMARK_CHARTS:-0}" = "1" ]; then
+  export LOG_DETAILED_TIMERS=1
+fi
 
 # Initialize results file with header
 echo "Benchmark|Throughput (TFLOP/s/GPU)|Elapsed (ms/iter)|Tokens/GPU/s|Mem (GB)" > "$RESULTS_FILE"
 echo "---------|------------------------|-----------------|-------------|--------" >> "$RESULTS_FILE"
 
-# Llama3 benchmarks
+# Llama3 benchmarks (train_llama3.sh defaults to USE_TE=1 / --transformer-impl=transformer_engine for BF16)
+if [ "$RUN_LLAMA" -eq 1 ]; then
 run_and_collect "llama3_8B_TP1_CP1_FP8" \
     "MBS=1 BS=128 SEQ_LENGTH=8192 TP=1 CP=1 MODEL_SIZE=8 TE_FP8=1 bash examples/llama/train_llama3.sh" || true
 
-run_and_collect "llama3_70B_TP8_BF16" \
+run_and_collect "llama3_8B_TP1_CP1_BF16" \
+    "MBS=1 BS=128 SEQ_LENGTH=8192 TP=1 CP=1 MODEL_SIZE=8 TE_FP8=0 bash examples/llama/train_llama3.sh" || true
+
+run_and_collect "llama3_70B_TP8_TE_BF16" \
     "MBS=1 BS=8 SEQ_LENGTH=8192 TP=8 TE_FP8=0 bash examples/llama/train_llama3.sh" || true
 
 run_and_collect "llama3_70B_PYTORCH_FSDP_RECOMPUTE" \
@@ -68,12 +105,19 @@ run_and_collect "llama3_70B_TP8" \
 run_and_collect "llama3_70B_TP4_PP2" \
     "MBS=1 BS=8 TP=4 PP=2 TE_FP8=0 SEQ_LENGTH=8192 bash examples/llama/train_llama3.sh" || true
 
+# Optional non-TE baseline (local transformer impl) for A/B vs Transformer Engine
+run_and_collect "llama3_70B_TP8_local" \
+    "USE_TE=0 TE_FP8=0 MBS=1 BS=8 SEQ_LENGTH=8192 TP=8 bash examples/llama/train_llama3.sh" || true
+fi
+
 # DeepSeek benchmarks (use correct paths: deepseek_v2, deepseek_v3)
+if [ "$RUN_DEEPSEEK" -eq 1 ]; then
 run_and_collect "deepseek_v2" \
     "bash examples/deepseek_v2/train_deepseekv2.sh" || true
 
 run_and_collect "deepseek_v3" \
     "bash examples/deepseek_v3/train_deepseekv3.sh" || true
+fi
 
 # Print results table
 echo "=============================================="
@@ -112,3 +156,16 @@ try:
 except Exception as e:
     print(f"Could not generate JSON: {e}")
 PYEOF
+
+# Optional: theoretical memory + perf breakdown charts for CI artifacts
+if [ "${GENERATE_BENCHMARK_CHARTS:-0}" = "1" ]; then
+  echo "Generating memory footprint and perf breakdown charts..."
+  python3 tools/gen_memory_footprint_charts.py --output-json output/memory_footprint.json --output-png output/memory_footprint.png || true
+  shopt -s nullglob
+  mapfile -t BENCH_LOGS < <(ls -1 output/bench_*.log 2>/dev/null || true)
+  if [ "${#BENCH_LOGS[@]}" -gt 0 ]; then
+    python3 tools/gen_perf_breakdown_charts.py "${BENCH_LOGS[@]}" \
+      --output-json output/perf_breakdown.json --output-png output/perf_breakdown.png || true
+  fi
+  shopt -u nullglob
+fi

@@ -1,0 +1,222 @@
+# Manual / parametric benchmark runs (separate from megatron-ci.yml).
+#
+# Semantics (empty optional inputs = same as main CI defaults, full benchmark matrix):
+#   - benchmark_suite: unset or empty → run full suite (all Llama + DeepSeek rows in run_benchmarks.sh).
+#     Use "llama", "deepseek", or "llama,deepseek" to restrict.
+#   - te_commit: unset or empty → TE_COMMIT = tip of TransformerEngine branch release_v2.10_rocm
+#     (git ls-remote), same as the main CI build job.
+#   - gpu_arch: defaults to gfx942 if detection fails; host rocminfo overrides when available.
+
+name: Benchmark dispatch
+
+on:
+  workflow_dispatch:
+    inputs:
+      gpu_arch:
+        description: 'GPU architecture for Docker build when rocminfo is unavailable (e.g. gfx942)'
+        required: false
+        default: 'gfx942'
+      te_commit:
+        description: 'TransformerEngine git SHA for Docker TE_COMMIT. Leave empty = tip of release_v2.10_rocm (same as main CI).'
+        required: false
+        default: ''
+        type: string
+      benchmark_suite:
+        description: 'Empty or full = full suite; or llama, deepseek, llama,deepseek (comma-separated, no spaces required)'
+        required: false
+        default: ''
+        type: string
+      generate_benchmark_charts:
+        description: 'After benchmarks, emit memory_footprint + perf_breakdown PNG/JSON'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: benchmark-dispatch-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build Docker image (dispatch)
+    timeout-minutes: 120
+    runs-on: linux-megatron-mi325-8
+    outputs:
+      image_tag: ${{ steps.img-tag.outputs.tag }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Image tag (unique per run; avoids clobbering rocm/megatron-lm-private:${{ github.sha }})
+        id: img-tag
+        run: echo "tag=bench-dispatch-${{ github.run_id }}-${{ github.run_attempt }}" >> "$GITHUB_OUTPUT"
+
+      - name: ROCm diagnostics (host)
+        run: |
+          if command -v rocm-smi >/dev/null 2>&1; then
+            rocm-smi || true
+          else
+            echo "rocm-smi not found on runner"
+          fi
+
+      - name: Determine GPU architecture via rocminfo
+        id: gpu-arch
+        run: |
+          set -e
+          DEFAULT_ARCH="${{ github.event.inputs.gpu_arch || 'gfx942' }}"
+          if command -v rocminfo >/dev/null 2>&1; then
+            ARCH=$(rocminfo | grep -m 1 -oP 'gfx[0-9a-fA-F]+') || true
+          else
+            echo "rocminfo not found on runner, falling back to default arch"
+            ARCH=""
+          fi
+
+          if [ -z "$ARCH" ]; then
+            echo "Could not detect GPU arch automatically, falling back to $DEFAULT_ARCH"
+            ARCH="$DEFAULT_ARCH"
+          fi
+
+          echo "Using GPU arch: $ARCH"
+          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve TransformerEngine commit
+        id: te-ref
+        env:
+          TE_INPUT: ${{ github.event.inputs.te_commit }}
+        run: |
+          set -e
+          if [ -n "${TE_INPUT}" ]; then
+            echo "Using workflow TE_COMMIT: ${TE_INPUT}"
+            echo "sha=${TE_INPUT}" >> "$GITHUB_OUTPUT"
+          else
+            BRANCH=release_v2.10_rocm
+            SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
+            if [ -z "$SHA" ]; then
+              echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
+              exit 1
+            fi
+            echo "Using TransformerEngine commit (branch tip): $SHA"
+            echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push Docker image with registry cache
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile_rocm.ci
+          push: true
+          load: false
+          tags: |
+            rocm/megatron-lm-private:${{ steps.img-tag.outputs.tag }}
+          build-args: |
+            PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
+            TE_COMMIT=${{ steps.te-ref.outputs.sha }}
+          cache-from: |
+            type=registry,ref=rocm/megatron-lm-private:cache
+          cache-to: |
+            type=registry,ref=rocm/megatron-lm-private:cache,mode=max
+
+  benchmarks:
+    name: Run benchmarks (dispatch)
+    needs: build
+    timeout-minutes: 720
+    runs-on: linux-megatron-mi325-8
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Pull Docker image
+        run: docker pull rocm/megatron-lm-private:${{ needs.build.outputs.image_tag }}
+
+      - name: Run benchmarks and generate performance report
+        id: benchmarks
+        env:
+          BENCHMARK_SUITE: ${{ github.event.inputs.benchmark_suite }}
+          GENERATE_BENCHMARK_CHARTS: ${{ github.event.inputs.generate_benchmark_charts && '1' || '0' }}
+        run: |
+          set -euxo pipefail
+          mkdir -p output
+          docker run --rm \
+            --network=host \
+            -u root \
+            --device=/dev/kfd \
+            --device=/dev/dri \
+            --group-add "$(getent group video | cut -d: -f3)" \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --shm-size=128G \
+            -e GENERATE_BENCHMARK_CHARTS="${GENERATE_BENCHMARK_CHARTS:-0}" \
+            -e BENCHMARK_SUITE="${BENCHMARK_SUITE:-}" \
+            -v "${{ github.workspace }}:/workspace/Megatron-LM" \
+            --workdir /workspace/Megatron-LM \
+            --entrypoint /bin/bash \
+            rocm/megatron-lm-private:${{ needs.build.outputs.image_tag }} \
+            -c "bash run_benchmarks.sh" 2>&1 | tee output/benchmark_report.txt
+
+      - name: Display benchmark report
+        if: always()
+        run: |
+          echo "::group::Megatron-LM Benchmark Performance Report (dispatch)"
+          if [ -f output/benchmark_report.txt ]; then
+            cat output/benchmark_report.txt
+          else
+            echo "Benchmark report not found (benchmarks may have been skipped or failed)"
+          fi
+          echo "::endgroup::"
+
+      - name: Generate benchmark report markdown
+        if: always()
+        run: |
+          python3 .github/scripts/benchmark-report-to-markdown.py
+
+      - name: Publish benchmark report to Job Summary
+        if: always()
+        run: |
+          if [ -f output/benchmark_summary.md ]; then
+            cat output/benchmark_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-lm-benchmark-reports-dispatch-${{ github.run_id }}
+          path: |
+            output/benchmark_report.txt
+            output/benchmark_report.json
+            output/benchmark_results.tmp
+            output/benchmark_summary.md
+            output/bench_*.log
+            output/memory_footprint.json
+            output/memory_footprint.png
+            output/perf_breakdown.json
+            output/perf_breakdown.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup Docker image
+        if: always()
+        run: |
+          docker image rm rocm/megatron-lm-private:${{ needs.build.outputs.image_tag }} || true
