@@ -1,27 +1,58 @@
-name: Megatron-LM CI
+# Manual benchmarks / profiling only — does not run unit tests.
+# Actions → "Megatron-LM benchmarks (manual)" → Run workflow
+
+name: Megatron-LM benchmarks (manual)
 
 on:
-  push:
-    branches:
-      - rocm_dev
-  pull_request:
-    branches:
-      - '**'
   workflow_dispatch:
     inputs:
       gpu_arch:
-        description: 'GPU architecture to use for build/tests (e.g. gfx942)'
+        description: 'GPU architecture for the Docker build (e.g. gfx942) if not detected'
         required: false
         default: 'gfx942'
+      te_branch:
+        description: 'ROCm/TransformerEngine.git branch used to resolve TE_COMMIT build-arg'
+        required: false
+        default: 'release_v2.10'
+        type: string
+      benchmark_preset:
+        description: 'Named benchmark matrix (see run_benchmarks.sh). LLAMA FSDP = llama_fsdp (70B FSDP+recompute).'
+        required: false
+        default: 'all'
+        type: choice
+        options:
+          - all
+          - llama
+          - deepseek
+          - llama_fsdp
+          - llama_8b
+          - llama_70b
+          - deepseek_v2
+          - deepseek_v3
+      total_iters:
+        description: 'Training iterations per benchmark row (TOTAL_ITERS / TRAIN_ITERS)'
+        required: false
+        default: '12'
+        type: string
+      generate_benchmark_charts:
+        description: 'Emit memory_footprint + perf_breakdown PNG/JSON under output/'
+        required: false
+        default: false
+        type: boolean
+      run_te_profile:
+        description: 'After benchmarks, run TE E2E profiler (run_profile_ci.sh)'
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: megatron-benchmarks-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build_and_test:
-    name: Build and Test on GPU
-    timeout-minutes: 720
+  build:
+    name: Build Docker image
+    timeout-minutes: 120
     runs-on: linux-megatron-mi325-8
 
     steps:
@@ -48,7 +79,7 @@ jobs:
         id: gpu-arch
         run: |
           set -e
-          DEFAULT_ARCH="${{ github.event.inputs.gpu_arch || 'gfx942' }}"
+          DEFAULT_ARCH="${{ inputs.gpu_arch }}"
           if command -v rocminfo >/dev/null 2>&1; then
             ARCH=$(rocminfo | grep -m 1 -oP 'gfx[0-9a-fA-F]+') || true
           else
@@ -66,15 +97,17 @@ jobs:
 
       - name: Resolve TransformerEngine commit for branch
         id: te-ref
+        env:
+          TE_BRANCH: ${{ inputs.te_branch }}
         run: |
           set -e
-          BRANCH=release_v2.10_rocm
+          BRANCH="${TE_BRANCH:-release_v2.10}"
           SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
           if [ -z "$SHA" ]; then
             echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
             exit 1
           fi
-          echo "Using TransformerEngine commit: $SHA"
+          echo "Using TransformerEngine branch $BRANCH commit: $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
@@ -92,8 +125,7 @@ jobs:
           context: .
           file: ./Dockerfile_rocm.ci
           push: true
-          # Also write image to disk so `docker run` does not need `docker pull`.
-          # On some runners dockerd cannot reach auth.docker.io (timeout); BuildKit push may still work.
+          load: false
           outputs: type=docker,dest=${{ runner.temp }}/megatron-ci-image.tar
           tags: |
             rocm/megatron-lm-private:${{ github.sha }}
@@ -105,12 +137,170 @@ jobs:
           cache-to: |
             type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
-      - name: Load image for docker run
-        run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
+      - name: Upload Docker image for downstream jobs
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-ci-docker-image
+          path: ${{ runner.temp }}/megatron-ci-image.tar
+          retention-days: 1
 
-      - name: Run unit tests in container
+  benchmarks:
+    name: Benchmarks
+    needs: build
+    timeout-minutes: 720
+    runs-on: linux-megatron-mi325-8
+    continue-on-error: true
+    permissions:
+      contents: read
+      checks: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: megatron-ci-docker-image
+          path: ${{ runner.temp }}/megatron-ci-image
+
+      - name: Load Docker image
+        run: docker load -i "${{ runner.temp }}/megatron-ci-image/megatron-ci-image.tar"
+
+      - name: Run benchmarks and generate performance report
+        id: benchmarks
+        env:
+          GENERATE_BENCHMARK_CHARTS: ${{ inputs.generate_benchmark_charts && '1' || '0' }}
+          BENCHMARK_PRESET: ${{ inputs.benchmark_preset }}
+          TOTAL_ITERS: ${{ inputs.total_iters }}
+          TRAIN_ITERS: ${{ inputs.total_iters }}
         run: |
           set -euxo pipefail
+          mkdir -p output
+          docker run --rm \
+            --network=host \
+            -u root \
+            --device=/dev/kfd \
+            --device=/dev/dri \
+            --group-add "$(getent group video | cut -d: -f3)" \
+            --cap-add=SYS_PTRACE \
+            --security-opt seccomp=unconfined \
+            --security-opt apparmor=unconfined \
+            --shm-size=128G \
+            -e GENERATE_BENCHMARK_CHARTS="${GENERATE_BENCHMARK_CHARTS:-0}" \
+            -e BENCHMARK_PRESET="${BENCHMARK_PRESET}" \
+            -e TOTAL_ITERS="${TOTAL_ITERS:-12}" \
+            -e TRAIN_ITERS="${TRAIN_ITERS:-12}" \
+            -v "${{ github.workspace }}:/workspace/Megatron-LM" \
+            --workdir /workspace/Megatron-LM \
+            --entrypoint /bin/bash \
+            rocm/megatron-lm-private:${{ github.sha }} \
+            -c "bash run_benchmarks.sh" 2>&1 | tee output/benchmark_report.txt
+
+      - name: Display benchmark report
+        if: always()
+        run: |
+          echo "::group::Megatron-LM Benchmark Performance Report"
+          if [ -f output/benchmark_report.txt ]; then
+            cat output/benchmark_report.txt
+          else
+            echo "Benchmark report not found (benchmarks may have been skipped or failed)"
+          fi
+          echo "::endgroup::"
+
+      - name: Generate benchmark report markdown
+        if: always()
+        run: |
+          python3 .github/scripts/benchmark-report-to-markdown.py
+
+      - name: Publish benchmark report to Job Summary
+        if: always()
+        run: |
+          if [ -f output/benchmark_summary.md ]; then
+            cat output/benchmark_summary.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Publish benchmark report as Check Run
+        if: always()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            let summary = 'No benchmark results available.';
+            if (fs.existsSync('output/benchmark_summary.md')) {
+              summary = fs.readFileSync('output/benchmark_summary.md', 'utf8');
+            }
+            try {
+              await github.rest.checks.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'Megatron-LM Benchmark Report (manual)',
+                head_sha: context.sha,
+                status: 'completed',
+                conclusion: 'success',
+                output: {
+                  title: 'Benchmark Performance Report',
+                  summary: summary
+                }
+              });
+              core.info('Benchmark report published as Check Run');
+            } catch (error) {
+              core.warning('Could not create Check Run (may lack permission on forked PRs): ' + error.message);
+            }
+
+      - name: Upload benchmark artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: megatron-lm-benchmark-reports-manual
+          path: |
+            output/benchmark_report.txt
+            output/benchmark_report.json
+            output/benchmark_results.tmp
+            output/benchmark_summary.md
+            output/bench_*.log
+            output/memory_footprint.json
+            output/memory_footprint.png
+            output/perf_breakdown.json
+            output/perf_breakdown.png
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Cleanup Docker image
+        if: always()
+        run: |
+          docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
+          rm -f "${{ runner.temp }}/megatron-ci-image/megatron-ci-image.tar"
+
+  te_profile:
+    name: TE E2E profile (optional)
+    needs: build
+    if: ${{ inputs.run_te_profile }}
+    timeout-minutes: 180
+    runs-on: linux-megatron-mi325-8
+    continue-on-error: true
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download Docker image artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: megatron-ci-docker-image
+          path: ${{ runner.temp }}/megatron-ci-image
+
+      - name: Load Docker image
+        run: docker load -i "${{ runner.temp }}/megatron-ci-image/megatron-ci-image.tar"
+
+      - name: Run TE profile CI script
+        run: |
+          set -euxo pipefail
+          mkdir -p output
           docker run --rm \
             --network=host \
             -u root \
@@ -123,42 +313,33 @@ jobs:
             --shm-size=128G \
             -v "${{ github.workspace }}:/workspace/Megatron-LM" \
             --workdir /workspace/Megatron-LM \
-            --name megatron-lm-container \
-            --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
-            rocm/megatron-lm-private:${{ github.sha }}
+            --entrypoint /bin/bash \
+            rocm/megatron-lm-private:${{ github.sha }} \
+            -c "bash run_profile_ci.sh" 2>&1 | tee output/te_profile_ci.log
 
-      - name: Publish test report
-        if: always()
-        uses: dorny/test-reporter@v1
-        with:
-          name: Megatron-LM unit tests report
-          path: output/junit_report_*.xml
-          reporter: java-junit
-          fail-on-error: false
-
-      - name: List test reports
-        if: always()
-        run: |
-          echo "Workspace contents:"
-          ls -R
-          if [ -d output ]; then
-            echo "Contents of output/:"
-            ls -R output || true
-          fi
-
-      - name: Upload test artifacts
+      - name: Upload TE profile artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: megatron-lm-test-reports
+          name: megatron-lm-te-profile-manual
           path: |
-            output/unified_test_report.csv
-            output/junit_report_*.xml
+            output/te_profile_run/**
+            output/te_profile_ci.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Add TE profile summary
+        if: always()
+        run: |
+          if [ -f output/te_profile_ci.log ]; then
+            echo "## TE E2E profile run" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            tail -n 80 output/te_profile_ci.log >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Cleanup Docker image
         if: always()
         run: |
           docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
-          rm -f "${{ runner.temp }}/megatron-ci-image.tar"
+          rm -f "${{ runner.temp }}/megatron-ci-image/megatron-ci-image.tar"
