@@ -13,7 +13,7 @@ on:
       te_branch:
         description: 'ROCm/TransformerEngine.git branch used to resolve TE_COMMIT build-arg'
         required: false
-        default: 'release_v2.10'
+        default: 'release_v2.10_rocm'
         type: string
       benchmark_preset:
         description: 'Named benchmark matrix (see run_benchmarks.sh). LLAMA FSDP = llama_fsdp (70B FSDP+recompute).'

@@ -39,37 +39,97 @@ run_and_collect() {
 }
 
 # Main
-# BENCHMARK_SUITE (optional, CI/local):
-#   unset, empty, "full", or "all" → run the full matrix below (default).
-#   "llama" → Llama train_llama3 rows only.
-#   "deepseek" → DeepSeek v2/v3 rows only.
-#   "llama,deepseek" → same as full for current matrix (both groups).
+# BENCHMARK_PRESET (optional): fine-grained row selection; when set, overrides BENCHMARK_SUITE.
+#   all | full          → full matrix
+#   llama | llama_all   → all Llama rows
+#   deepseek            → DeepSeek v2 + v3
+#   llama_fsdp          → Llama 70B PyTorch FSDP + recompute only
+#   llama_8b            → Llama 8B FP8 + 8B BF16
+#   llama_70b           → Llama 70B rows (excludes 8B): TE BF16, FSDP, TP8, TP4/PP2, local
+#   deepseek_v2 | deepseek_v3 → single DeepSeek run
+#
+# BENCHMARK_SUITE (optional, used only when BENCHMARK_PRESET is unset):
+#   unset, empty, "full", or "all" → full matrix (default).
+#   "llama" → Llama rows only. "deepseek" → DeepSeek v2/v3 only. "llama,deepseek" → both groups.
 echo "=============================================="
 echo "     Megatron-LM Benchmark Performance Report"
 echo "     $(date -u +"%Y-%m-%d %H:%M:%S UTC")"
 echo "=============================================="
 echo ""
-_SUITE_RAW="${BENCHMARK_SUITE:-}"
-_SUITE=$(echo "${_SUITE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
-RUN_LLAMA=1
-RUN_DEEPSEEK=1
-if [ -n "${_SUITE}" ] && [ "${_SUITE}" != "full" ] && [ "${_SUITE}" != "all" ]; then
-  RUN_LLAMA=0
-  RUN_DEEPSEEK=0
-  _LINE=$(echo "${BENCHMARK_SUITE}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
-  IFS=',' read -r -a _PARTS <<< "$_LINE"
-  for _p in "${_PARTS[@]}"; do
-    case "$_p" in
-      llama) RUN_LLAMA=1 ;;
-      deepseek) RUN_DEEPSEEK=1 ;;
-      *)
-        echo "Unknown BENCHMARK_SUITE segment '${_p}' (use full, llama, deepseek, or llama,deepseek)"
-        exit 1
-        ;;
-    esac
-  done
+
+L8_FP8=0
+L8_BF16=0
+L70_TE=0
+L70_FSDP=0
+L70_TP8=0
+L70_PP=0
+L70_LOC=0
+D2=0
+D3=0
+
+_PRESET=$(echo "${BENCHMARK_PRESET:-}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+
+if [ -n "${_PRESET}" ]; then
+  case "${_PRESET}" in
+    all|full)
+      L8_FP8=1 L8_BF16=1 L70_TE=1 L70_FSDP=1 L70_TP8=1 L70_PP=1 L70_LOC=1 D2=1 D3=1
+      ;;
+    llama|llama_all)
+      L8_FP8=1 L8_BF16=1 L70_TE=1 L70_FSDP=1 L70_TP8=1 L70_PP=1 L70_LOC=1
+      ;;
+    deepseek)
+      D2=1 D3=1
+      ;;
+    llama_fsdp)
+      L70_FSDP=1
+      ;;
+    llama_8b)
+      L8_FP8=1 L8_BF16=1
+      ;;
+    llama_70b)
+      L70_TE=1 L70_FSDP=1 L70_TP8=1 L70_PP=1 L70_LOC=1
+      ;;
+    deepseek_v2)
+      D2=1
+      ;;
+    deepseek_v3)
+      D3=1
+      ;;
+    *)
+      echo "Unknown BENCHMARK_PRESET '${BENCHMARK_PRESET}' (see run_benchmarks.sh header for valid values)"
+      exit 1
+      ;;
+  esac
+  echo "BENCHMARK_PRESET=${BENCHMARK_PRESET} (row flags: 8b_fp8=$L8_FP8 8b_bf16=$L8_BF16 70_te=$L70_TE 70_fsdp=$L70_FSDP 70_tp8=$L70_TP8 70_pp=$L70_PP 70_loc=$L70_LOC deepseek_v2=$D2 deepseek_v3=$D3)"
+else
+  _SUITE_RAW="${BENCHMARK_SUITE:-}"
+  _SUITE=$(echo "${_SUITE_RAW}" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')
+  RUN_LLAMA=1
+  RUN_DEEPSEEK=1
+  if [ -n "${_SUITE}" ] && [ "${_SUITE}" != "full" ] && [ "${_SUITE}" != "all" ]; then
+    RUN_LLAMA=0
+    RUN_DEEPSEEK=0
+    _LINE=$(echo "${BENCHMARK_SUITE}" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')
+    IFS=',' read -r -a _PARTS <<< "$_LINE"
+    for _p in "${_PARTS[@]}"; do
+      case "$_p" in
+        llama) RUN_LLAMA=1 ;;
+        deepseek) RUN_DEEPSEEK=1 ;;
+        *)
+          echo "Unknown BENCHMARK_SUITE segment '${_p}' (use full, llama, deepseek, or llama,deepseek)"
+          exit 1
+          ;;
+      esac
+    done
+  fi
+  if [ "$RUN_LLAMA" -eq 1 ]; then
+    L8_FP8=1 L8_BF16=1 L70_TE=1 L70_FSDP=1 L70_TP8=1 L70_PP=1 L70_LOC=1
+  fi
+  if [ "$RUN_DEEPSEEK" -eq 1 ]; then
+    D2=1 D3=1
+  fi
+  echo "BENCHMARK_SUITE=${_SUITE_RAW:-<empty>=full} RUN_LLAMA=$RUN_LLAMA RUN_DEEPSEEK=$RUN_DEEPSEEK"
 fi
-echo "BENCHMARK_SUITE=${_SUITE_RAW:-<empty>=full} RUN_LLAMA=$RUN_LLAMA RUN_DEEPSEEK=$RUN_DEEPSEEK"
 echo ""
 
 # Use TOTAL_ITERS for short runs (Llama defaults to 12)
@@ -86,35 +146,42 @@ echo "Benchmark|Throughput (TFLOP/s/GPU)|Elapsed (ms/iter)|Tokens/GPU/s|Mem (GB)
 echo "---------|------------------------|-----------------|-------------|--------" >> "$RESULTS_FILE"
 
 # Llama3 benchmarks (train_llama3.sh defaults to USE_TE=1 / --transformer-impl=transformer_engine for BF16)
-if [ "$RUN_LLAMA" -eq 1 ]; then
+if [ "$L8_FP8" -eq 1 ]; then
 run_and_collect "llama3_8B_TP1_CP1_FP8" \
     "MBS=1 BS=128 SEQ_LENGTH=8192 TP=1 CP=1 MODEL_SIZE=8 TE_FP8=1 bash examples/llama/train_llama3.sh" || true
-
+fi
+if [ "$L8_BF16" -eq 1 ]; then
 run_and_collect "llama3_8B_TP1_CP1_BF16" \
     "MBS=1 BS=128 SEQ_LENGTH=8192 TP=1 CP=1 MODEL_SIZE=8 TE_FP8=0 bash examples/llama/train_llama3.sh" || true
-
+fi
+if [ "$L70_TE" -eq 1 ]; then
 run_and_collect "llama3_70B_TP8_TE_BF16" \
     "MBS=1 BS=8 SEQ_LENGTH=8192 TP=8 TE_FP8=0 bash examples/llama/train_llama3.sh" || true
-
+fi
+if [ "$L70_FSDP" -eq 1 ]; then
 run_and_collect "llama3_70B_PYTORCH_FSDP_RECOMPUTE" \
     "MBS=1 BS=8 FSDP=1 TP=1 TE_FP8=0 SEQ_LENGTH=8192 RECOMPUTE=1 bash examples/llama/train_llama3.sh" || true
-
+fi
+if [ "$L70_TP8" -eq 1 ]; then
 run_and_collect "llama3_70B_TP8" \
     "MBS=1 BS=8 TP=8 TE_FP8=0 SEQ_LENGTH=8192 bash examples/llama/train_llama3.sh" || true
-
+fi
+if [ "$L70_PP" -eq 1 ]; then
 run_and_collect "llama3_70B_TP4_PP2" \
     "MBS=1 BS=8 TP=4 PP=2 TE_FP8=0 SEQ_LENGTH=8192 bash examples/llama/train_llama3.sh" || true
-
+fi
+if [ "$L70_LOC" -eq 1 ]; then
 # Optional non-TE baseline (local transformer impl) for A/B vs Transformer Engine
 run_and_collect "llama3_70B_TP8_local" \
     "USE_TE=0 TE_FP8=0 MBS=1 BS=8 SEQ_LENGTH=8192 TP=8 bash examples/llama/train_llama3.sh" || true
 fi
 
 # DeepSeek benchmarks (use correct paths: deepseek_v2, deepseek_v3)
-if [ "$RUN_DEEPSEEK" -eq 1 ]; then
+if [ "$D2" -eq 1 ]; then
 run_and_collect "deepseek_v2" \
     "bash examples/deepseek_v2/train_deepseekv2.sh" || true
-
+fi
+if [ "$D3" -eq 1 ]; then
 run_and_collect "deepseek_v3" \
     "bash examples/deepseek_v3/train_deepseekv3.sh" || true
 fi
