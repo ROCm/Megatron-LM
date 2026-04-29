@@ -1,0 +1,17 @@
+{
+  "name": "MI325X_OAM",
+  "mem_bw_gbps": 6000,
+  "max_achievable_tflops": {
+    "matrix_fp16": 1307,
+    "matrix_bf16": 1307,
+    "matrix_fp32": 163,
+    "matrix_fp64": 82,
+    "matrix_fp8": 2615,
+    "matrix_int8": 2615,
+    "vector_fp16": 163,
+    "vector_bf16": 163,
+    "vector_fp32": 163,
+    "vector_fp64": 82
+  },
+  "_reference": "Peak theoretical per-accelerator figures from AMD Instinct MI325X product brief / datasheet (FP16/BF16 matrix ~1307 TFLOPS, FP8/INT8 ~2615 TFLOPS, FP32 ~163 TFLOPS, FP64 ~82 TFLOPS, HBM3E peak memory bandwidth 6 TB/s). Sources: https://www.amd.com/content/dam/amd/en/documents/instinct-tech-docs/product-briefs/instinct-mi325x-datasheet.pdf , https://www.amd.com/en/products/accelerators/instinct/mi300/mi325x/platform.html . TraceLens expects MAF-style ceilings for roofline; replace these with measured MAF from https://rocm.blogs.amd.com/software-tools-optimization/measuring-max-achievable-flops-part2/README.html if you need tighter roofline bounds."
+}

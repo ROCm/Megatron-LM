@@ -42,7 +42,15 @@ EXP_NAME="${EXP_NAME:-perf}"
 TEE_OUTPUT="${TEE_OUTPUT:-1}"
 USE_FLASH_ATTN="${USE_FLASH_ATTN:-0}"
 NO_TRAINING="${NO_TRAINING:-0}" # NO_TRAINING=1: for computing metrics only
-ENABLE_PROFILING="${ENABLE_PROFILING:-0}" #enable pytorch profiling
+ENABLE_PROFILING="${ENABLE_PROFILING:-0}" # enable pytorch profiling
+# Optional: PyTorch profiler schedule uses active = profile_step_end - profile_step_start.
+# Default one *active* step keeps Chrome trace JSON small; widen with PROFILE_STEP_END if needed.
+PROFILE_STEP_START="${PROFILE_STEP_START:-2}"
+PROFILE_STEP_END="${PROFILE_STEP_END:-}"  # empty => one active step: start+1 (see below)
+# Default: Transformer Engine for BF16 (TE_FP8=0). Set USE_TE=0 for local Megatron transformer.
+USE_TE="${USE_TE:-1}"
+# Set to 1 to pass --timing-log-level 2 for richer Megatron timer breakdown in logs (perf charts)
+LOG_DETAILED_TIMERS="${LOG_DETAILED_TIMERS:-0}"
 echo "NO_TRAINING=$NO_TRAINING"
 
 CWD=`pwd`
@@ -295,7 +303,22 @@ else
 fi
 
 if [ "$ENABLE_PROFILING" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --profile --use-pytorch-profiler --tensorboard-dir $LOG_DIR"
+    if [ -z "$PROFILE_STEP_END" ]; then
+        PROFILE_STEP_END=$((PROFILE_STEP_START + 1))
+    fi
+    # Megatron stops the profiler when iteration == PROFILE_STEP_END; ensure train-iters is enough.
+    NEED_ITERS=$((PROFILE_STEP_END + 1))
+    if [ "$TOTAL_ITERS" -lt "$NEED_ITERS" ]; then
+        echo "ENABLE_PROFILING=1: bumping TOTAL_ITERS from $TOTAL_ITERS to $NEED_ITERS (PROFILE_STEP_END=$PROFILE_STEP_END)"
+        TOTAL_ITERS=$NEED_ITERS
+    fi
+    echo "Profiler window: step_start=$PROFILE_STEP_START step_end=$PROFILE_STEP_END (active_steps=$((PROFILE_STEP_END - PROFILE_STEP_START)), larger window => bigger trace JSON)"
+    EXTRA_ARGS="$EXTRA_ARGS --profile --use-pytorch-profiler --tensorboard-dir $LOG_DIR \
+        --profile-step-start $PROFILE_STEP_START --profile-step-end $PROFILE_STEP_END"
+fi
+
+if [ "$LOG_DETAILED_TIMERS" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --timing-log-level 2"
 fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
@@ -316,10 +339,12 @@ if [ "$MCORE" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-mcore-models"
 fi
 
-if [ "$TE_FP8" -eq 1 ]; then
+if [ "$TE_FP8" -eq 1 ] || [ "$USE_TE" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
 "
+fi
 
+if [ "$TE_FP8" -eq 1 ]; then
     if [ "$TE_FP8_RECIPE" == "delayed" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=delayed \
             --fp8-format=hybrid \
@@ -343,7 +368,9 @@ if [ "$TE_FP8" -eq 1 ]; then
         echo "$TE_FP8_RECIPE is not supported"
         exit
     fi
+fi
 
+if [ "$TE_FP8" -eq 1 ]; then
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
         if [ "$TE_FP8_RECIPE" == "mxfp8" ]  && [ "$FSDP" -eq 1 ]; then
             EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
