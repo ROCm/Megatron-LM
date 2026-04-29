@@ -1,10 +1,10 @@
 #!/bin/bash
 ###############################################################################
-# Short profiled TE E2E run for CI: PyTorch profiler + optional TraceLens report.
+# Short profiled TE E2E run for CI: PyTorch profiler + TraceLens Excel + text summary.
 # Usage: bash run_profile_ci.sh
 # Env:
-#   TRACE_DIR   - output root (default: output/te_profile_run)
-#   RUN_TRACELENS - if 1, run tools/run_tracelens_report.sh on exported trace
+#   TRACE_DIR - output root (default: output/te_profile_run)
+# Full NCCL skew/bw tables need one trace per rank; otherwise see gpu_timeline in Excel.
 ###############################################################################
 set -euo pipefail
 
@@ -35,11 +35,11 @@ TRACE_JSON=$(find "$LOG_DIR" -name "*.json" -type f 2>/dev/null | head -1 || tru
 if [ -n "$TRACE_JSON" ]; then
   echo "Found profiler trace: $TRACE_JSON"
   echo "$TRACE_JSON" > "${TRACE_DIR}/trace_path.txt"
-  if [ "${RUN_TRACELENS:-0}" = "1" ]; then
-    export TRACE_JSON
-    export TRACELENS_OUT_DIR="${TRACE_DIR}/tracelens"
-    bash tools/run_tracelens_report.sh || echo "TraceLens step failed (install AMD-AGI/TraceLens)"
-  fi
+  export TRACE_JSON
+  export TRACELENS_OUT_DIR="${TRACE_DIR}/tracelens"
+  bash tools/run_tracelens_report.sh || echo "TraceLens step failed (install AMD-AGI/TraceLens + openpyxl)"
+  python3 tools/summarize_profiler_trace.py "$TRACE_JSON" -o "${TRACE_DIR}/profiler_trace_summary.txt" || true
+  python3 tools/run_nccl_analyser_if_multirank.py --search-dir "$TRACE_DIR" --output-csv "${TRACE_DIR}/nccl_summary.csv" || true
 else
   echo "No exported Chrome trace JSON found under $LOG_DIR; TensorBoard may use a different layout."
 fi

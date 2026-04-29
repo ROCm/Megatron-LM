@@ -236,3 +236,31 @@ if [ "${GENERATE_BENCHMARK_CHARTS:-0}" = "1" ]; then
   fi
   shopt -u nullglob
 fi
+
+# When a PyTorch Chrome trace exists under output/, generate TraceLens Excel + text summary (+ NCCL CSV if multi-rank traces).
+TRACE_JSON=""
+while IFS= read -r f; do
+  TRACE_JSON="$f"
+  break
+done < <(find output -type f -path '*/tb/*.json' 2>/dev/null || true)
+if [ -z "$TRACE_JSON" ]; then
+  while IFS= read -r f; do
+    case "$f" in
+      *benchmark_report.json) continue ;;
+    esac
+    if head -c 800 "$f" 2>/dev/null | grep -q '"traceEvents"'; then
+      TRACE_JSON="$f"
+      break
+    fi
+  done < <(find output -type f -name '*.json' 2>/dev/null || true)
+fi
+if [ -n "$TRACE_JSON" ]; then
+  echo "Chrome profiler trace found: $TRACE_JSON — running TraceLens + summarize_profiler_trace (+ optional NcclAnalyser)"
+  export TRACE_JSON
+  export TRACELENS_OUT_DIR="${TRACELENS_OUT_DIR:-output/tracelens_bench}"
+  bash tools/run_tracelens_report.sh || echo "TraceLens step failed (see ${TRACELENS_OUT_DIR:-output/tracelens_bench}/tracelens.log)"
+  python3 tools/summarize_profiler_trace.py "$TRACE_JSON" -o output/profiler_trace_summary.txt || true
+  python3 tools/run_nccl_analyser_if_multirank.py --search-dir output --output-csv output/nccl_summary.csv || true
+else
+  echo "No Chrome trace JSON under output/ (enable profiling / tensorboard trace export to get TraceLens artifacts)."
+fi

@@ -141,6 +141,17 @@ def main() -> None:
             )
         )
 
+    sum_cuda = sum(cuda_by_name.values())
+    sum_cpu = sum(cpu_by_name.values())
+    sum_rt = sum(cuda_rt_by_name.values())
+    lines.append("Bucket totals (sum of matched Complete events; overlapping GPU work is not deduplicated):")
+    lines.append("")
+    lines.append(f"  GPU / CUDA-named regions: {sum_cuda:,.3f} ms")
+    lines.append(f"  CPU-side regions:         {sum_cpu:,.3f} ms")
+    if not args.no_cuda_runtime_cpu:
+        lines.append(f"  CUDA runtime on CPU:      {sum_rt:,.3f} ms")
+    lines.append("")
+
     text = "\n".join(lines).rstrip() + "\n"
     print(text, end="")
     if args.output:

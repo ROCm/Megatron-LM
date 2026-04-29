@@ -51,6 +51,10 @@ pynvml
 
 RUN pip install "nltk==3.8.1"
 
+# TraceLens: Excel perf reports from PyTorch profiler JSON (openpyxl for .xlsx)
+ARG TRACELENS_REF=main
+RUN pip install --no-cache-dir openpyxl "git+https://github.com/AMD-AGI/TraceLens.git@${TRACELENS_REF}"
+
 # Install Causal-Conv1d and its dependencies
 WORKDIR ${STAGE_DIR}
 ENV CAUSAL_CONV1D_FORCE_BUILD=TRUE

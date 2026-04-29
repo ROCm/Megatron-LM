@@ -4,10 +4,24 @@ Convert benchmark results to markdown table.
 Reads from output/benchmark_report.json or output/benchmark_results.tmp
 """
 import json
+import math
 import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
+
+
+def _fmt_num(val, ndigits=4):
+    """Round floats for GitHub markdown tables; pass through N/A and strings."""
+    if val is None or val == "N/A":
+        return str(val)
+    try:
+        f = float(val)
+        if math.isnan(f) or math.isinf(f):
+            return str(val)
+        return f"{f:.{ndigits}g}"
+    except (TypeError, ValueError):
+        return str(val)
 
 
 def parse_results():
@@ -52,7 +66,17 @@ def to_markdown_table(rows):
     header = "| Benchmark | Throughput (TFLOP/s/GPU) | Elapsed (ms/iter) | Tokens/GPU/s | Mem (GB) |"
     sep = "|-----------|--------------------------|-------------------|--------------|----------|"
     data_rows = [
-        f"| {r['benchmark']} | {r['throughput']} | {r['elapsed']} | {r['tokens']} | {r['mem']} |"
+        "| "
+        + " | ".join(
+            [
+                r["benchmark"],
+                _fmt_num(r["throughput"], 5),
+                _fmt_num(r["elapsed"], 5),
+                _fmt_num(r["tokens"], 5),
+                _fmt_num(r["mem"], 4),
+            ]
+        )
+        + " |"
         for r in rows
     ]
     return "\n".join([header, sep] + data_rows)

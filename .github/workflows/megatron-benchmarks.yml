@@ -237,6 +237,13 @@ jobs:
             output/memory_footprint.png
             output/perf_breakdown.json
             output/perf_breakdown.png
+            output/perf_breakdown_table.md
+            output/perf_breakdown_non_compute.png
+            output/profiler_trace_summary.txt
+            output/nccl_summary.csv
+            output/tracelens_bench/**
+            output/tracelens/**
+            output/*.xlsx
           if-no-files-found: ignore
           retention-days: 7
 
