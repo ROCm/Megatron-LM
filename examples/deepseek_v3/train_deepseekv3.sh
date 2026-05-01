@@ -177,7 +177,13 @@ PROFILE_SYNC=${PROFILE_SYNC:-false}
 PROFILE_START=${PROFILE_START:-6}
 PROFILE_END=${PROFILE_END:-7}
 FORCE_BALANCE=${FORCE_BALANCE:-false}
-MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-false}
+MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-true}
+USE_PRECISION_AWARE_OPTIMIZER="${USE_PRECISION_AWARE_OPTIMIZER:-false}"
+APPLY_ROPE_FUSION="${APPLY_ROPE_FUSION:-false}"
+MOE_ROUTER_FUSION="${MOE_ROUTER_FUSION:-false}"
+MOE_SHARED_EXPERT_OVERLAP="${MOE_SHARED_EXPERT_OVERLAP:-false}"
+GA_FUSION="${GA_FUSION:-false}"
+CE_FUSION_ARGS="${CE_FUSION_ARGS:-}"
 echo "PROFILE: $PROFILE"
 echo "PROFILE_START: $PROFILE_START"
 echo "PROFILE_END: $PROFILE_END"
@@ -247,8 +253,8 @@ if [ $MODEL_SIZE = 671B ]; then
     NUM_EXPERTS=256 # change from 160 to 256 experts
     ROUTER_TOPK=8 # change from 6 to 8 experts
     NUM_SHARED_EXPERTS=1 # 1 epxert shared
-    # MOE_LAYER_FREQ='([0]*1+[1]*2)'  # 3 layer example
-    MOE_LAYER_FREQ=1 # use '([0]*3+[1]*58)' for full model
+    # MOE_LAYER_FREQ: set via proxy_mi355x_deepseekv3_671B.sh (or export before launch). Default 1 = every layer MoE.
+    MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
@@ -277,7 +283,7 @@ elif [ $MODEL_SIZE = 236B ]; then
     NUM_EXPERTS=160
     ROUTER_TOPK=6
     NUM_SHARED_EXPERTS=2
-    MOE_LAYER_FREQ=1
+    MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
@@ -303,13 +309,21 @@ elif [ $MODEL_SIZE = 16B ]; then
     NUM_EXPERTS=64
     ROUTER_TOPK=6
     NUM_SHARED_EXPERTS=2
-    MOE_LAYER_FREQ=([0]*3+[1]*24)
+    MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-"([0]*3+[1]*24)"}
     
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
         --moe-router-num-groups ${EP} \
     "
 fi
+
+# RoPE fusion (Primus-style): enable experimental + fused RoPE when APPLY_ROPE_FUSION is true.
+if [ "${APPLY_ROPE_FUSION:-false}" = true ] || [ "${APPLY_ROPE_FUSION:-0}" = 1 ]; then
+    ROPE_FUSION_OPTS=" --enable-experimental"
+else
+    ROPE_FUSION_OPTS=" --no-rope-fusion"
+fi
+
 if [ $MOE_PERMUTE_FUSION != false ]; then
     moe_permute_fustion_options=" \
             --moe-permute-fusion "
@@ -343,7 +357,7 @@ moe_options=" \
     --qk-pos-emb-head-dim ${QK_ROPE_HEAD_DIM} \
     --v-head-dim ${V_HEAD_DIM} \
     --kv-channels ${V_HEAD_DIM} \
-    --no-rope-fusion \
+    ${ROPE_FUSION_OPTS} \
     "
 
 if [ $ENABLE_DEEP_EP = true ]; then
@@ -356,14 +370,22 @@ else
     moe_options=" \
             ${moe_options} \
             --moe-token-dispatcher-type alltoall \
-            --moe-shared-expert-overlap \
-    "
+            "
+    if [ "${MOE_SHARED_EXPERT_OVERLAP:-false}" = true ] || [ "${MOE_SHARED_EXPERT_OVERLAP:-0}" = 1 ]; then
+        moe_options="${moe_options} --moe-shared-expert-overlap"
+    fi
 fi
 
 # MXFP8: pad per-expert token counts for FP8 grouped GEMM (requires FP8 + non-allgather dispatcher).
 if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
     moe_options="${moe_options} --moe-router-padding-for-fp8"
     echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
+fi
+
+# Fused TopK router + aux (TE >= 2.7); maps to Primus moe_use_fused_router_with_aux_score.
+if [ "${MOE_ROUTER_FUSION:-false}" = true ] || [ "${MOE_ROUTER_FUSION:-0}" = 1 ]; then
+    moe_options="${moe_options} --moe-router-fusion"
+    echo "[INFO] MoE: --moe-router-fusion"
 fi
 
 if [ $WINDOW_SIZE != none ]; then
@@ -535,9 +557,23 @@ fi
 
 sft_option="--train-mode pretrain"
 
+pao_options=""
+if [ "${USE_PRECISION_AWARE_OPTIMIZER:-false}" = true ] || [ "${USE_PRECISION_AWARE_OPTIMIZER:-0}" = 1 ]; then
+    MAIN_GRADS_DTYPE=${MAIN_GRADS_DTYPE:-bf16}
+    EXP_AVG_DTYPE=${EXP_AVG_DTYPE:-bf16}
+    EXP_AVG_SQ_DTYPE=${EXP_AVG_SQ_DTYPE:-bf16}
+    pao_options=" --use-precision-aware-optimizer --main-grads-dtype ${MAIN_GRADS_DTYPE} --exp-avg-dtype ${EXP_AVG_DTYPE} --exp-avg-sq-dtype ${EXP_AVG_SQ_DTYPE}"
+fi
+
+if [ "${GA_FUSION:-false}" = true ] || [ "${GA_FUSION:-0}" = 1 ]; then
+    ga_fusion_opt=""
+else
+    ga_fusion_opt=" --no-gradient-accumulation-fusion"
+fi
+
 megatron_options="  \
 	--log-throughput \
-	--no-gradient-accumulation-fusion \
+	${ga_fusion_opt} \
 	--no-async-tensor-model-parallel-allreduce \
 	${data_args} \
         --lr ${LR} \
@@ -578,8 +614,8 @@ megatron_options="  \
         --num-workers 8 \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
         --tokenizer-type DeepSeekV3Tokenizer \
-        --tokenizer-model ${TOKENIZER_MODEL}\
-        --legacy-tokenizer
+        --tokenizer-model ${TOKENIZER_MODEL} \
+        --legacy-tokenizer \
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --normalization RMSNorm \
@@ -594,7 +630,9 @@ megatron_options="  \
         $USE_GROUPED_GEMM_OPTION \
         $USE_LEGACY_GROUPED_GEMM_OPTION \
         --distributed-timeout-minutes 60 \
-        --eod-mask-loss
+        --eod-mask-loss \
+        ${pao_options} \
+        ${CE_FUSION_ARGS} \
         "
         # --save ${CHECKPOINT_PATH} \
 

@@ -107,7 +107,7 @@ def dequantize_fp8_tensor(fp8_tensor: torch.Tensor) -> torch.Tensor:
 def get_fp8_align_size(fp8_recipe: Fp8Recipe) -> int:
     """Get the alignment size required for fp8 GEMM."""
     if fp8_recipe == Fp8Recipe.mxfp8:
-        return 32
+        return 128
     else:
         return 16
 
@@ -576,8 +576,8 @@ if HAVE_TE:
         """
         if module in _fp8_inference_wrapped_modules:
             return
-        _pad_func = Fp8Padding(1)
-        _unpad_func = Fp8Unpadding(1)
+        _pad_func = Fp8Padding(1, 128)
+        _unpad_func = Fp8Unpadding(1, 128)
 
         original_forward = module.forward
 

@@ -53,6 +53,7 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export NVTE_FLASH_ATTN=0
 
 GPUS_PER_NODE=$(python3 -c "import torch; print(torch.cuda.device_count())")
 RUN_ENV="${RUN_ENV:-cluster}"
@@ -571,9 +572,6 @@ echo "OUTPUT_BASEPATH: $OUTPUT_BASEPATH"
 echo "TRAIN_LOG: $TRAIN_LOG"
 echo ""
 
-# Flash / fused attention
-flash_options=" --use-flash-attn"
-
 # RoPE fusion: Primus enables apply_rope_fusion + enable_experimental; default here stays --no-rope-fusion unless APPLY_ROPE_FUSION is set.
 if [ "${APPLY_ROPE_FUSION:-false}" = true ] || [ "${APPLY_ROPE_FUSION:-0}" = 1 ]; then
     qwen_rope_experimental_opts=" --enable-experimental"
@@ -649,6 +647,7 @@ megatron_options=" \
     --transformer-impl ${TRANSFORMER_IMPL} \
     --distributed-timeout-minutes 60 \
     --eod-mask-loss \
+    --attention-backend fused \
     ${qwen_base_options} \
     ${fsdp_option} \
     ${CE_FUSION_ARGS} \
@@ -687,7 +686,7 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 run_cmd="torchrun $DISTRIBUTED_ARGS ${MEGATRON_PATH}/pretrain_gpt.py \
     ${megatron_options} ${pr_options} ${load_options} ${activation_checkpoint_options} \
     ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} \
-    ${sft_option} ${vp_options} ${flash_options} ${profile_options} ${LOGGING_ARGS}"
+    ${sft_option} ${vp_options} ${profile_options} ${LOGGING_ARGS}"
 
 run_cmd="$run_cmd | tee $TRAIN_LOG"
 echo "${run_cmd}"
