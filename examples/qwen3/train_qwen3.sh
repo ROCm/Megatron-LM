@@ -7,13 +7,19 @@
 # Usage:
 #   cd /path/to/Megatron-LM && bash examples/qwen3/train_qwen3.sh
 #
+# Primus MI355X parity (optional): source one of the env files first, then run:
+#   source examples/qwen3/primus_mi355x_qwen3_30B_A3B_pretrain.env.sh
+#   source examples/qwen3/primus_mi355x_qwen3_235B_A22B_pretrain.env.sh
+#
 # Model sizes (MODEL_SIZE):
 #   235B_A22B | 235B   — MoE (128 experts, top-8), defaults aligned with Primus qwen3_235B_A22B
 #   30B_A3B | 30B      — MoE, Primus qwen3_30B_A3B
 #   32B                — dense, FSDP2 + full recompute defaults
 #   4B | 8B | 14B      — dense
 #
-# Override any default via environment, e.g. PRIMUS_SEQ_LENGTH, EP, TP, LR, TRAIN_ITERS.
+# Override any default via environment, e.g. SEQ_LENGTH, EP, TP, LR, TRAIN_ITERS.
+# For 235B proxy runs: export NUM_LAYERS / NUM_EXPERTS (and optionally ROUTER_TOPK <= NUM_EXPERTS) before launch.
+# FP8: PR=fp8 and FP8_RECIPE=delayed|tensorwise|mxfp8|blockwise (mxfp8 sets NVTE_ROCM_ENABLE_MXFP8=1).
 #################################################################################
 
 set -e
@@ -46,7 +52,6 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-# Default 1 (DeepSeek-style); 32B + FSDP2 raises this after MODEL_SIZE (FSDP2 requires > 1).
 
 GPUS_PER_NODE=$(python3 -c "import torch; print(torch.cuda.device_count())")
 RUN_ENV="${RUN_ENV:-cluster}"
@@ -105,6 +110,8 @@ fi
 
 # --- training / parallel defaults (Primus-style; override with env) ---
 PR=${PR:-bf16}
+# When PR=fp8: delayed (default), tensorwise, mxfp8 (TE ROCm: NVTE_ROCM_ENABLE_MXFP8), blockwise
+FP8_RECIPE="${FP8_RECIPE:-delayed}"
 TP=${TP:-1}
 PP=${PP:-1}
 CP=${CP:-1}
@@ -125,8 +132,8 @@ GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 ENABLE_DEEP_EP="${ENABLE_DEEP_EP:-false}"
 PROFILE=${PROFILE:-false}
 PROFILE_SYNC=${PROFILE_SYNC:-false}
-PROFILE_START=${PROFILE_START:-6}
-PROFILE_END=${PROFILE_END:-7}
+PROFILE_START=${PROFILE_START:-3}
+PROFILE_END=${PROFILE_END:-4}
 FORCE_BALANCE=${FORCE_BALANCE:-false}
 
 OPTIMIZER_OFFLOAD=false
@@ -138,7 +145,6 @@ ROPE_THETA=${ROPE_THETA:-1000000}
 KV_CHANNELS=128
 
 IS_MOE=0
-MOE_LAYER_RECOMPUTE_OPT=""
 EMBED_OPT=""
 DO=true
 USE_FSDP2=false
@@ -154,21 +160,20 @@ case $MODEL_SIZE in
 235B_A22B | 235B)
     IS_MOE=1
     TOKENIZER_MODEL="${HF_MODEL_CKPT:-Qwen/Qwen3-235B-A22B}"
-    NUM_LAYERS=94
+    NUM_LAYERS=${NUM_LAYERS:-94}
     HIDDEN_SIZE=4096
     INTERMEDIATE_SIZE=12288
     NUM_ATTN_HEADS=64
     NUM_QUERY_GROUPS=4
-    NUM_EXPERTS=128
+    NUM_EXPERTS=${NUM_EXPERTS:-128}
     MOE_INTERMEDIATE_SIZE=1536
-    ROUTER_TOPK=8
+    ROUTER_TOPK=${ROUTER_TOPK:-8}
     MOE_AUX_LOSS=1e-3
-    MOE_LAYER_RECOMPUTE_OPT="--moe-layer-recompute"
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
     EP=${EP:-8}
-    SEQ_LEN="${PRIMUS_SEQ_LENGTH:-${SEQ_LEN:-2048}}"
-    MAX_POSITION_EMBEDDINGS="${PRIMUS_MAX_POSITION_EMBEDDINGS:-131072}"
+    SEQ_LEN="${SEQ_LENGTH:-${SEQ_LEN:-2048}}"
+    MAX_POSITION_EMBEDDINGS="${MAX_POSITION_EMBEDDINGS:-131072}"
     MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-1}
     GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-32}
     LR=${LR:-1e-4}
@@ -196,11 +201,11 @@ case $MODEL_SIZE in
     MOE_AUX_LOSS=1e-3
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
-    EP=${PRIMUS_EP:-${EP:-8}}
-    TP=${PRIMUS_TP:-${TP:-1}}
-    PP=${PRIMUS_PP:-${PP:-1}}
-    SEQ_LEN="${PRIMUS_SEQ_LENGTH:-${SEQ_LEN:-4096}}"
-    MAX_POSITION_EMBEDDINGS="${PRIMUS_MAX_POSITION_EMBEDDINGS:-4096}"
+    EP=${EP:-${EP:-8}}
+    TP=${TP:-${TP:-1}}
+    PP=${PP:-${PP:-1}}
+    SEQ_LEN="${SEQ_LENGTH:-${SEQ_LEN:-4096}}"
+    MAX_POSITION_EMBEDDINGS="${MAX_POSITION_EMBEDDINGS:-4096}"
     MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-2}
     GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-256}
     LR=${LR:-1e-5}
@@ -225,8 +230,8 @@ case $MODEL_SIZE in
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
     EP=1
-    SEQ_LEN="${PRIMUS_SEQ_LENGTH:-${SEQ_LEN:-2048}}"
-    MAX_POSITION_EMBEDDINGS="${PRIMUS_MAX_POSITION_EMBEDDINGS:-40960}"
+    SEQ_LEN="${SEQ_LENGTH:-${SEQ_LEN:-2048}}"
+    MAX_POSITION_EMBEDDINGS="${MAX_POSITION_EMBEDDINGS:-40960}"
     MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-16}
     GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-128}
     LR=${LR:-1e-5}
@@ -304,8 +309,8 @@ case $MODEL_SIZE in
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
     EP=1
-    SEQ_LEN="${PRIMUS_SEQ_LENGTH:-${SEQ_LEN:-2048}}"
-    MAX_POSITION_EMBEDDINGS="${PRIMUS_MAX_POSITION_EMBEDDINGS:-40960}"
+    SEQ_LEN="${SEQ_LENGTH:-${SEQ_LEN:-2048}}"
+    MAX_POSITION_EMBEDDINGS="${MAX_POSITION_EMBEDDINGS:-40960}"
     MICRO_BATCH_SIZE=${MICRO_BATCH_SIZE:-4}
     GLOBAL_BATCH_SIZE=${GLOBAL_BATCH_SIZE:-32}
     LR=${LR:-1e-5}
@@ -341,6 +346,10 @@ echo "TOKENIZER_MODEL: $TOKENIZER_MODEL"
 echo "TRAIN_ITERS: $TRAIN_ITERS LR_WARMUP_ITERS: $LR_WARMUP_ITERS LR_DECAY_ITERS: $LR_DECAY_ITERS"
 echo "SEQ_LEN: $SEQ_LEN GLOBAL_BATCH_SIZE: $GLOBAL_BATCH_SIZE MICRO_BATCH_SIZE: $MICRO_BATCH_SIZE"
 echo "TP: $TP PP: $PP EP: $EP IS_MOE: $IS_MOE USE_FSDP2: $USE_FSDP2"
+echo "PR: $PR"
+if [ "$PR" = fp8 ]; then
+    echo "FP8_RECIPE: $FP8_RECIPE"
+fi
 echo ""
 
 if [ "$NVTE_CK_USES_BWD_V3" -eq 1 ]; then
@@ -359,10 +368,28 @@ else
     TRANSFORMER_IMPL=local
 fi
 
+if [ -n "${PP_LAYOUT:-}" ] && [ -n "${MP_VP:-}" ]; then
+    echo "Error: PP_LAYOUT and MP_VP are mutually exclusive (see megatron --pipeline-model-parallel-layout)."
+    exit 1
+fi
+
 if [ -z "${MP_VP:-}" ]; then
     vp_options=""
 else
     vp_options=" --num-layers-per-virtual-pipeline-stage ${MP_VP}"
+fi
+
+pp_layout_suffix=""
+if [ -n "${PP_LAYOUT:-}" ]; then
+    pp_layout_suffix=" --pipeline-model-parallel-layout ${PP_LAYOUT}"
+fi
+
+pao_options=""
+if [ "${USE_PRECISION_AWARE_OPTIMIZER:-false}" = true ] || [ "${USE_PRECISION_AWARE_OPTIMIZER:-0}" = 1 ]; then
+    MAIN_GRADS_DTYPE=${MAIN_GRADS_DTYPE:-bf16}
+    EXP_AVG_DTYPE=${EXP_AVG_DTYPE:-bf16}
+    EXP_AVG_SQ_DTYPE=${EXP_AVG_SQ_DTYPE:-bf16}
+    pao_options=" --use-precision-aware-optimizer --main-grads-dtype ${MAIN_GRADS_DTYPE} --exp-avg-dtype ${EXP_AVG_DTYPE} --exp-avg-sq-dtype ${EXP_AVG_SQ_DTYPE}"
 fi
 
 # MoE options (Qwen3 MoE; DeepSeek-specific MLA flags are not used)
@@ -376,14 +403,18 @@ if [ "$IS_MOE" -eq 1 ]; then
         --moe-router-load-balancing-type aux_loss \
         --expert-model-parallel-size ${EP} \
         --expert-tensor-parallel-size ${ETP} \
-        ${MOE_LAYER_RECOMPUTE_OPT} \
     "
     if [ "$USE_GROUPED_GEMM" = true ]; then
         moe_options="${moe_options} --moe-grouped-gemm"
     fi
-    if [ "$MOE_USE_LEGACY_GROUPED_GEMM" = true ]; then
+    if [ $MOE_USE_LEGACY_GROUPED_GEMM = true ]; then
         moe_options="${moe_options} --moe-use-legacy-grouped-gemm"
+    else
+        # disable gemm tuning when using TE Group GEMM.
+        GEMM_TUNING=0
+        echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
     fi
+
     if [ "$ENABLE_DEEP_EP" = true ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-deepep"
     else
@@ -432,7 +463,42 @@ elif [ "$PR" = bf16 ]; then
     pr_options=" --bf16"
 elif [ "$PR" = fp8 ]; then
     TRANSFORMER_IMPL=transformer_engine
-    pr_options=" --bf16 --fp8-format hybrid --fp8-amax-compute-algo max --fp8-amax-history-len 1024"
+    case "$FP8_RECIPE" in
+    delayed)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe delayed \
+        --fp8-format hybrid \
+        --fp8-margin 0 \
+        --fp8-interval 1 \
+        --fp8-amax-compute-algo max \
+        --fp8-amax-history-len 1024 \
+        --attention-softmax-in-fp32"
+        ;;
+    tensorwise)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe tensorwise \
+        --fp8-format hybrid"
+        ;;
+    mxfp8)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe mxfp8 \
+        --fp8-format e4m3"
+        export NVTE_ROCM_ENABLE_MXFP8=1
+        ;;
+    blockwise)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe blockwise \
+        --fp8-format hybrid"
+        ;;
+    *)
+        echo "Unsupported FP8_RECIPE=${FP8_RECIPE} (use delayed, tensorwise, mxfp8, or blockwise)."
+        exit 1
+        ;;
+    esac
 fi
 
 if [ "$DO" = true ]; then
@@ -474,7 +540,11 @@ fi
 
 sft_option="--train-mode pretrain"
 
-NAME="${RUN_ENV}-qwen3-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}-tp-${TP}-pp-${PP}-ep-${EP}-ac-${AC}-${TIMESTAMP}"
+FP8_RUN_SUFFIX=""
+if [ "$PR" = fp8 ]; then
+    FP8_RUN_SUFFIX="-fp8recipe-${FP8_RECIPE}"
+fi
+NAME="${RUN_ENV}-qwen3-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}${FP8_RUN_SUFFIX}-tp-${TP}-pp-${PP}-ep-${EP}-ac-${AC}-${TIMESTAMP}"
 OUTPUT_BASEPATH=${OUTPUT_BASEPATH:-"output/${EXPERIMENT}-${NAME}"}
 TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/"
 CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint"
@@ -489,6 +559,13 @@ echo ""
 # Flash / fused attention
 flash_options=" --use-flash-attn"
 
+# RoPE fusion: Primus enables apply_rope_fusion + enable_experimental; default here stays --no-rope-fusion unless APPLY_ROPE_FUSION is set.
+if [ "${APPLY_ROPE_FUSION:-false}" = true ] || [ "${APPLY_ROPE_FUSION:-0}" = 1 ]; then
+    qwen_rope_experimental_opts=" --enable-experimental"
+else
+    qwen_rope_experimental_opts=" --no-rope-fusion"
+fi
+
 qwen_base_options=" \
     --use-mcore-models \
     --tokenizer-type HuggingFaceTokenizer \
@@ -500,7 +577,7 @@ qwen_base_options=" \
     --no-masked-softmax-fusion \
     --disable-bias-linear \
     --position-embedding-type rope \
-    --no-rope-fusion \
+    ${qwen_rope_experimental_opts} \
     --qk-layernorm \
     --group-query-attention \
     --num-query-groups ${NUM_QUERY_GROUPS} \
@@ -560,6 +637,8 @@ megatron_options=" \
     ${qwen_base_options} \
     ${fsdp_option} \
     ${CE_FUSION_ARGS} \
+    ${pao_options} \
+    ${pp_layout_suffix} \
 "
 
 if [ "$PROFILE" = true ]; then
@@ -580,7 +659,7 @@ else
 fi
 
 if [ -n "${WANDB_API_KEY:-}" ]; then
-    WANDB_PROJECT=${WANDB_PROJECT:-"Primus_Qwen3_Pretrain"}
+    WANDB_PROJECT=${WANDB_PROJECT:-"Qwen3_Pretrain"}
     LOGGING_ARGS="--wandb-project=${WANDB_PROJECT} \
         --wandb-exp-name=qwen3_${MODEL_SIZE} \
         --wandb-save-dir logs/wandb"

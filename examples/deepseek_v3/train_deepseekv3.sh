@@ -107,6 +107,8 @@ MIN_LR=${MIN_LR:-1e-6}
 SEQ_LEN="${SEQ_LEN:-4096}"
 PAD_LEN=4096
 PR=${PR:-bf16} # bf16, fp16, fp8
+# When PR=fp8: delayed (default, scaling recipe), tensorwise, mxfp8 (TE ROCm: NVTE_ROCM_ENABLE_MXFP8), blockwise
+FP8_RECIPE="${FP8_RECIPE:-delayed}"
 TP=${TP:-1}  
 ETP=${ETP:-1}
 PP=${PP:-1}  
@@ -133,6 +135,10 @@ fi
 echo "TRAIN_ITERS: $TRAIN_ITERS"
 echo "LR_WARMUP_ITERS: $LR_WARMUP_ITERS"
 echo "LR_DECAY_ITERS: $LR_DECAY_ITERS"
+echo "PR: $PR"
+if [ "$PR" = fp8 ]; then
+    echo "FP8_RECIPE: $FP8_RECIPE"
+fi
 echo ""
 
 # perf options
@@ -171,7 +177,11 @@ echo "PROFILE_END: $PROFILE_END"
 echo "FORCE_BALANCE: $FORCE_BALANCE"
 echo ""
 
-NAME="${RUN_ENV}-mcore-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}-tp-${TP}-pp-${PP}-etp-${ETP}-ep-${EP}-ac-${AC}-do-${DO}-sp-${SP}-profile${PROFILE}-sync${PROFILE_SYNC}-${TIMESTAMP}"
+FP8_RUN_SUFFIX=""
+if [ "$PR" = fp8 ]; then
+    FP8_RUN_SUFFIX="-fp8recipe-${FP8_RECIPE}"
+fi
+NAME="${RUN_ENV}-mcore-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}${FP8_RUN_SUFFIX}-tp-${TP}-pp-${PP}-etp-${ETP}-ep-${EP}-ac-${AC}-do-${DO}-sp-${SP}-profile${PROFILE}-sync${PROFILE_SYNC}-${TIMESTAMP}"
 OUTPUT_BASEPATH=output/${EXPERIMENT}-${NAME}
 
 TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/"
@@ -423,11 +433,41 @@ elif [ $PR = bf16 ]; then
         --bf16"
 elif [ $PR = fp8 ]; then
     TRANSFORMER_IMPL=transformer_engine
-    pr_options=" \
-        --bf16
+    case "$FP8_RECIPE" in
+    delayed)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe delayed \
         --fp8-format hybrid \
+        --fp8-margin 0 \
         --fp8-amax-compute-algo max \
-        --fp8-amax-history-len 1024"
+        --fp8-amax-history-len 1024 \
+        --attention-softmax-in-fp32"
+        ;;
+    tensorwise)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe tensorwise \
+        --fp8-format hybrid"
+        ;;
+    mxfp8)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe mxfp8 \
+        --fp8-format e4m3"
+        export NVTE_ROCM_ENABLE_MXFP8=1
+        ;;
+    blockwise)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe blockwise \
+        --fp8-format hybrid"
+        ;;
+    *)
+        echo "Unsupported FP8_RECIPE=${FP8_RECIPE} (use delayed, tensorwise, mxfp8, or blockwise)."
+        exit 1
+        ;;
+    esac
 fi
 
 if [ $OPTIMIZER_OFFLOAD != false ] && [ $DO = false ]; then
