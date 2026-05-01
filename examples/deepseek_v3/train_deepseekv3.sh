@@ -146,6 +146,13 @@ OPTIMIZER_OFFLOAD=false
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
 MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
+# FP8 MoE requires TE grouped GEMM; legacy grouped_gemm does not implement FP8 expert matmuls.
+if [ "$PR" = fp8 ]; then
+    if [ "$MOE_USE_LEGACY_GROUPED_GEMM" = true ]; then
+        echo "[INFO] PR=fp8: disabling legacy grouped GEMM (TE grouped GEMM required for FP8 MoE)."
+    fi
+    MOE_USE_LEGACY_GROUPED_GEMM=false
+fi
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 echo "GEMM_TUING: $GEMM_TUNING"
@@ -351,6 +358,12 @@ else
             --moe-token-dispatcher-type alltoall \
             --moe-shared-expert-overlap \
     "
+fi
+
+# MXFP8: pad per-expert token counts for FP8 grouped GEMM (requires FP8 + non-allgather dispatcher).
+if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
+    moe_options="${moe_options} --moe-router-padding-for-fp8"
+    echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
 fi
 
 if [ $WINDOW_SIZE != none ]; then

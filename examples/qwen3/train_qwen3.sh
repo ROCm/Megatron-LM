@@ -19,7 +19,8 @@
 #
 # Override any default via environment, e.g. SEQ_LENGTH, EP, TP, LR, TRAIN_ITERS.
 # For 235B proxy runs: export NUM_LAYERS / NUM_EXPERTS (and optionally ROUTER_TOPK <= NUM_EXPERTS) before launch.
-# FP8: PR=fp8 and FP8_RECIPE=delayed|tensorwise|mxfp8|blockwise (mxfp8 sets NVTE_ROCM_ENABLE_MXFP8=1).
+# FP8: PR=fp8 and FP8_RECIPE=delayed|tensorwise|mxfp8|blockwise (mxfp8 sets NVTE_ROCM_ENABLE_MXFP8=1;
+#   mxfp8 MoE adds --moe-router-padding-for-fp8 automatically).
 #################################################################################
 
 set -e
@@ -392,6 +393,14 @@ if [ "${USE_PRECISION_AWARE_OPTIMIZER:-false}" = true ] || [ "${USE_PRECISION_AW
     pao_options=" --use-precision-aware-optimizer --main-grads-dtype ${MAIN_GRADS_DTYPE} --exp-avg-dtype ${EXP_AVG_DTYPE} --exp-avg-sq-dtype ${EXP_AVG_SQ_DTYPE}"
 fi
 
+# FP8 MoE requires TE grouped GEMM; legacy grouped_gemm does not implement FP8 expert matmuls.
+if [ "$PR" = fp8 ]; then
+    if [ "${MOE_USE_LEGACY_GROUPED_GEMM:-false}" = true ]; then
+        echo "[INFO] PR=fp8: disabling legacy grouped GEMM (TE grouped GEMM required for FP8 MoE)."
+    fi
+    MOE_USE_LEGACY_GROUPED_GEMM=false
+fi
+
 # MoE options (Qwen3 MoE; DeepSeek-specific MLA flags are not used)
 if [ "$IS_MOE" -eq 1 ]; then
     moe_options=" \
@@ -419,6 +428,12 @@ if [ "$IS_MOE" -eq 1 ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-deepep"
     else
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
+    fi
+
+    # MXFP8: pad per-expert token counts for MXFP8 grouped GEMM (see --moe-router-padding-for-fp8 in arguments.py).
+    if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
+        moe_options="${moe_options} --moe-router-padding-for-fp8"
+        echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
     fi
 else
     moe_options=""
