@@ -48,6 +48,7 @@ export MOE_SHARED_EXPERT_OVERLAP=false
 
 # --- MoE / DeepEP / grouped GEMM ---
 export ENABLE_DEEP_EP=false
+export ENABLE_MORI=true
 export MOE_USE_LEGACY_GROUPED_GEMM=false
 export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true

@@ -3629,6 +3629,14 @@ def _add_moe_args(parser):
                        help='[Experimental] Enable DeepSeek/DeepEP for efficient token dispatching and combine in MoE models. Only works with flex token dispatcher by setting --moe-token-dispatcher-type=flex.')
     group.add_argument('--moe-deepep-num-sms', type=int, default=20,
                        help='Number of SMs to use for DeepEP.')
+    group.add_argument('--moe-enable-mori', action='store_true',
+                       help='[Experimental] Enable MORI EP for efficient token dispatching and combine in MoE models on AMD GPUs. Alternative to DeepEP. Only works with flex token dispatcher by setting --moe-token-dispatcher-type=flex.')
+    group.add_argument('--moe-mori-kernel-type', type=str, default=None,
+                       choices=['IntraNode', 'InterNode', 'InterNodeV1', 'InterNodeV1LL', 'AsyncLL'],
+                       help='MORI EP kernel type. Auto-selected based on world size if not specified.')
+    group.add_argument('--moe-mori-max-tokens-per-rank', type=int, default=8192,
+                       help='Maximum number of input tokens per rank for MORI EP buffer allocation. '
+                            'Must be >= seq_length * micro_batch_size.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
     # Token dropping arguments

@@ -262,3 +262,334 @@ else:
     fused_dispatch = None
     fused_combine = None
     set_deepep_num_sms = None
+
+
+try:
+    import mori
+    import mori.ops
+    import mori.shmem
+
+    HAVE_MORI = True
+except ImportError:
+    HAVE_MORI = False
+
+
+_mori_op = None
+_mori_shmem_initialized = False
+
+
+def init_mori_shmem(group: torch.distributed.ProcessGroup):
+    """Initialize MORI shared memory using the given process group.
+
+    Must be called once before any MORI EP operations. Uses PyTorch's
+    distributed process group for symmetric memory initialization.
+    """
+    global _mori_shmem_initialized
+    if _mori_shmem_initialized:
+        return
+    torch._C._distributed_c10d._register_process_group("mori_ep", group)
+    mori.shmem.shmem_torch_process_group_init("mori_ep")
+    _mori_shmem_initialized = True
+
+
+def get_mori_op(
+    group: torch.distributed.ProcessGroup,
+    hidden_dim: int,
+    num_local_experts: int,
+    router_topk: int,
+    max_num_tokens_per_rank: int,
+    data_type: torch.dtype = torch.bfloat16,
+    kernel_type=None,
+    fp8_dispatch: bool = False,
+):
+    """Get or create the MORI EpDispatchCombineOp.
+
+    Lazily creates the operator on first call. Subsequent calls return the
+    cached operator.
+
+    Args:
+        group: Process group for EP communication.
+        hidden_dim: Hidden dimension of token embeddings.
+        num_local_experts: Number of experts per rank.
+        router_topk: Number of experts selected per token.
+        max_num_tokens_per_rank: Maximum input tokens per rank.
+        data_type: Token data type.
+        kernel_type: MORI kernel type. Auto-selected if None.
+        fp8_dispatch: Whether dispatch uses FP8.
+    """
+    global _mori_op
+
+    if _mori_op is not None:
+        return _mori_op
+
+    init_mori_shmem(group)
+
+    world_size = group.size()
+    rank = torch.distributed.get_rank(group)
+
+    if kernel_type is None:
+        if world_size <= 8:
+            kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
+        else:
+            kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+
+    dispatch_dtype = torch.float8_e4m3fnuz if fp8_dispatch else data_type
+    scale_dim = hidden_dim // 128 if fp8_dispatch else 0
+
+    config = mori.ops.EpDispatchCombineConfig(
+        data_type=dispatch_dtype,
+        rank=rank,
+        world_size=world_size,
+        hidden_dim=hidden_dim,
+        scale_dim=scale_dim,
+        scale_type_size=torch.tensor([], dtype=torch.float8_e4m3fnuz).element_size(),
+        max_token_type_size=torch.tensor([], dtype=torch.float32).element_size(),
+        max_num_inp_token_per_rank=max_num_tokens_per_rank,
+        num_experts_per_rank=num_local_experts,
+        num_experts_per_token=router_topk,
+        kernel_type=kernel_type,
+    )
+
+    _mori_op = mori.ops.EpDispatchCombineOp(config)
+    return _mori_op
+
+
+def reset_mori_op():
+    """Reset the MORI operator state between iterations."""
+    global _mori_op
+    if _mori_op is not None:
+        _mori_op.reset()
+
+
+class MoriDispatch(torch.autograd.Function):
+    """Fused dispatch using MORI EP backend.
+
+    Performs inter-rank all-to-all via op.dispatch(). Returns the received
+    tokens, their routing indices, probs, and per-expert token counts.
+    The local permutation (grouping by expert) is handled separately in
+    the token dispatcher layer.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        token_indices,
+        token_probs,
+        num_experts,
+        group,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+    ):
+        """Forward pass: dispatch tokens to correct ranks via MORI."""
+        hidden_dim = x.shape[1]
+        op = get_mori_op(
+            group=group,
+            hidden_dim=hidden_dim,
+            num_local_experts=num_local_experts,
+            router_topk=router_topk,
+            max_num_tokens_per_rank=max_num_tokens_per_rank,
+            data_type=x.dtype,
+            fp8_dispatch=fp8_dispatch,
+        )
+
+        scales = torch.empty(x.shape[0], 0, dtype=torch.float8_e4m3fnuz, device=x.device)
+
+        dispatch_out, dispatch_weights, dispatch_scales, dispatch_indices, recv_num_token = (
+            op.dispatch(x, token_probs.float(), scales, token_indices.to(torch.int32))
+        )
+
+        total_recv = recv_num_token[0].item()
+        recv_x = dispatch_out[:total_recv]
+        recv_token_indices = dispatch_indices[:total_recv]
+        recv_token_probs = dispatch_weights[:total_recv]
+
+        # Compute per-expert token counts
+        all_expert_ids = recv_token_indices.flatten()
+        valid = all_expert_ids >= 0
+        tokens_per_expert = torch.bincount(
+            all_expert_ids[valid], minlength=num_local_experts
+        )[:num_local_experts]
+
+        ctx.group = group
+        ctx.num_local_experts = num_local_experts
+        ctx.router_topk = router_topk
+        ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.save_for_backward(token_indices, token_probs)
+
+        return (recv_x, recv_token_indices, recv_token_probs, tokens_per_expert, None)
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_indices, grad_probs, grad_tpe, grad_handle):
+        """Backward pass: combine gradients back using MORI."""
+        token_indices, token_probs = ctx.saved_tensors
+        op = get_mori_op(
+            group=ctx.group,
+            hidden_dim=grad_output.shape[1],
+            num_local_experts=ctx.num_local_experts,
+            router_topk=ctx.router_topk,
+            max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
+            data_type=grad_output.dtype,
+            fp8_dispatch=ctx.fp8_dispatch,
+        )
+        combined_x, _ = op.combine(
+            grad_output.contiguous(),
+            token_probs.float(),
+            token_indices.to(torch.int32),
+            call_reset=True,
+        )
+        return combined_x, None, None, None, None, None, None, None, None
+
+
+class MoriCombine(torch.autograd.Function):
+    """Fused combine operation using MORI EP backend.
+
+    Performs the reverse all-to-all to send expert outputs back to
+    their original ranks via op.combine().
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        group,
+        token_indices,
+        token_probs,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+    ):
+        """Forward pass: combine expert outputs back to original ranks via MORI."""
+        op = get_mori_op(
+            group=group,
+            hidden_dim=x.shape[1],
+            num_local_experts=num_local_experts,
+            router_topk=router_topk,
+            max_num_tokens_per_rank=max_num_tokens_per_rank,
+            data_type=x.dtype,
+            fp8_dispatch=fp8_dispatch,
+        )
+        combined_x, _ = op.combine(
+            x.contiguous(),
+            token_probs.float(),
+            token_indices.to(torch.int32),
+            call_reset=True,
+        )
+        ctx.group = group
+        ctx.num_local_experts = num_local_experts
+        ctx.router_topk = router_topk
+        ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.save_for_backward(token_indices, token_probs)
+        return combined_x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Backward pass: dispatch gradients using MORI."""
+        token_indices, token_probs = ctx.saved_tensors
+        op = get_mori_op(
+            group=ctx.group,
+            hidden_dim=grad_output.shape[1],
+            num_local_experts=ctx.num_local_experts,
+            router_topk=ctx.router_topk,
+            max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
+            data_type=grad_output.dtype,
+            fp8_dispatch=ctx.fp8_dispatch,
+        )
+        scales = torch.empty(
+            grad_output.shape[0], 0, dtype=torch.float8_e4m3fnuz, device=grad_output.device
+        )
+        dispatch_out, _, _, _, recv_num_token = op.dispatch(
+            grad_output.contiguous(),
+            token_probs.float(),
+            scales,
+            token_indices.to(torch.int32),
+        )
+        total_recv = recv_num_token[0].item()
+        return dispatch_out[:total_recv], None, None, None, None, None, None, None
+
+
+if HAVE_MORI:
+
+    def mori_dispatch(
+        x,
+        token_indices,
+        token_probs,
+        num_experts,
+        group,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+    ):
+        """Perform fused dispatch using MORI EP backend.
+
+        Args:
+            x: Input tensor [num_tokens, hidden_size]
+            token_indices: Token routing indices [num_tokens, topk]
+            token_probs: Token routing probabilities [num_tokens, topk]
+            num_experts: Total number of experts
+            group: Process group
+            num_local_experts: Experts per rank
+            router_topk: Top-K experts per token
+            max_num_tokens_per_rank: Max tokens per rank for buffer sizing
+            fp8_dispatch: Whether to use FP8 dispatch
+
+        Returns:
+            Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert, handle)
+        """
+        return MoriDispatch.apply(
+            x.contiguous(),
+            token_indices,
+            token_probs,
+            num_experts,
+            group,
+            num_local_experts,
+            router_topk,
+            max_num_tokens_per_rank,
+            fp8_dispatch,
+        )
+
+    def mori_combine(
+        x,
+        group,
+        token_indices,
+        token_probs,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+    ):
+        """Perform fused combine using MORI EP backend.
+
+        Args:
+            x: Input tensor from expert computation
+            group: Process group
+            token_indices: Original token routing indices
+            token_probs: Original token routing probabilities
+            num_local_experts: Experts per rank
+            router_topk: Top-K experts per token
+            max_num_tokens_per_rank: Max tokens per rank for buffer sizing
+            fp8_dispatch: Whether to use FP8 dispatch
+
+        Returns:
+            Combined output tensor
+        """
+        return MoriCombine.apply(
+            x,
+            group,
+            token_indices,
+            token_probs,
+            num_local_experts,
+            router_topk,
+            max_num_tokens_per_rank,
+            fp8_dispatch,
+        )
+
+else:
+    mori_dispatch = None
+    mori_combine = None

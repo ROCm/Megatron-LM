@@ -561,6 +561,18 @@ class TransformerConfig(ModelParallelConfig):
     moe_enable_deepep: bool = False
     """[Experimental] Enable DeepEP for efficient token dispatching and combine in MoE models."""
 
+    moe_enable_mori: bool = False
+    """[Experimental] Enable MORI EP for efficient token dispatching and combine in MoE models.
+    Alternative to DeepEP, optimized for AMD GPUs. See https://github.com/ROCm/mori"""
+
+    moe_mori_kernel_type: Optional[str] = None
+    """MORI EP kernel type. Options: 'IntraNode', 'InterNode', 'InterNodeV1',
+    'InterNodeV1LL', 'AsyncLL'. Auto-selected based on world size if None."""
+
+    moe_mori_max_tokens_per_rank: int = 8192
+    """Maximum number of input tokens per rank for MORI EP buffer allocation.
+    Must be >= (seq_length * micro_batch_size) to avoid out-of-bounds writes."""
+
     moe_per_layer_logging: bool = False
     """Enable per-layer logging for MoE, currently supports auxiliary loss and z loss."""
 
@@ -832,6 +844,15 @@ class TransformerConfig(ModelParallelConfig):
         if self.moe_enable_deepep:
             if self.moe_token_dispatcher_type != "flex":
                 raise ValueError("DeepEP backend is only supported with flex token dispatcher.")
+
+        if self.moe_enable_mori:
+            if self.moe_token_dispatcher_type != "flex":
+                raise ValueError("MORI EP backend is only supported with flex token dispatcher.")
+            if self.moe_enable_deepep:
+                raise ValueError(
+                    "Cannot enable both DeepEP and MORI EP simultaneously. "
+                    "Please choose one backend."
+                )
 
         if self.moe_token_dispatcher_type == "flex":
             if self.moe_pad_expert_input_to_capacity:
