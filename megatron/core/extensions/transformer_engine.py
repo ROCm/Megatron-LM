@@ -2735,7 +2735,6 @@ try:
         return general_gemm(
             A,
             B,
-            workspace=get_workspace(),
             out_dtype=out_dtype,
             quantization_params=None,
             gelu=None,

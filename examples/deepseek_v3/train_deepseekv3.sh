@@ -22,7 +22,12 @@ echo ""
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
-NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+NCCL_IB_HCA_LIST=$(rdma link -j 2>/dev/null | python3 -c "import json, sys
+try:
+    links = json.load(sys.stdin)
+    print(*[links[i][\"ifname\"] for i in range(min(8, len(links)))], sep=',')
+except Exception:
+    pass") || NCCL_IB_HCA_LIST=""
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
@@ -102,6 +107,8 @@ MIN_LR=${MIN_LR:-1e-6}
 SEQ_LEN="${SEQ_LEN:-4096}"
 PAD_LEN=4096
 PR=${PR:-bf16} # bf16, fp16, fp8
+# When PR=fp8: delayed (default, scaling recipe), tensorwise, mxfp8 (TE ROCm: NVTE_ROCM_ENABLE_MXFP8), blockwise
+FP8_RECIPE="${FP8_RECIPE:-delayed}"
 TP=${TP:-1}  
 ETP=${ETP:-1}
 PP=${PP:-1}  
@@ -128,6 +135,10 @@ fi
 echo "TRAIN_ITERS: $TRAIN_ITERS"
 echo "LR_WARMUP_ITERS: $LR_WARMUP_ITERS"
 echo "LR_DECAY_ITERS: $LR_DECAY_ITERS"
+echo "PR: $PR"
+if [ "$PR" = fp8 ]; then
+    echo "FP8_RECIPE: $FP8_RECIPE"
+fi
 echo ""
 
 # perf options
@@ -135,6 +146,13 @@ OPTIMIZER_OFFLOAD=false
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
 MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
+# FP8 MoE requires TE grouped GEMM; legacy grouped_gemm does not implement FP8 expert matmuls.
+if [ "$PR" = fp8 ]; then
+    if [ "$MOE_USE_LEGACY_GROUPED_GEMM" = true ]; then
+        echo "[INFO] PR=fp8: disabling legacy grouped GEMM (TE grouped GEMM required for FP8 MoE)."
+    fi
+    MOE_USE_LEGACY_GROUPED_GEMM=false
+fi
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 echo "GEMM_TUING: $GEMM_TUNING"
@@ -159,14 +177,24 @@ PROFILE_SYNC=${PROFILE_SYNC:-false}
 PROFILE_START=${PROFILE_START:-6}
 PROFILE_END=${PROFILE_END:-7}
 FORCE_BALANCE=${FORCE_BALANCE:-false}
-MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-false}
+MOE_PERMUTE_FUSION=${MOE_PERMUTE_FUSION:-true}
+USE_PRECISION_AWARE_OPTIMIZER="${USE_PRECISION_AWARE_OPTIMIZER:-false}"
+APPLY_ROPE_FUSION="${APPLY_ROPE_FUSION:-false}"
+MOE_ROUTER_FUSION="${MOE_ROUTER_FUSION:-false}"
+MOE_SHARED_EXPERT_OVERLAP="${MOE_SHARED_EXPERT_OVERLAP:-false}"
+GA_FUSION="${GA_FUSION:-false}"
+CE_FUSION_ARGS="${CE_FUSION_ARGS:-}"
 echo "PROFILE: $PROFILE"
 echo "PROFILE_START: $PROFILE_START"
 echo "PROFILE_END: $PROFILE_END"
 echo "FORCE_BALANCE: $FORCE_BALANCE"
 echo ""
 
-NAME="${RUN_ENV}-mcore-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}-tp-${TP}-pp-${PP}-etp-${ETP}-ep-${EP}-ac-${AC}-do-${DO}-sp-${SP}-profile${PROFILE}-sync${PROFILE_SYNC}-${TIMESTAMP}"
+FP8_RUN_SUFFIX=""
+if [ "$PR" = fp8 ]; then
+    FP8_RUN_SUFFIX="-fp8recipe-${FP8_RECIPE}"
+fi
+NAME="${RUN_ENV}-mcore-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}${FP8_RUN_SUFFIX}-tp-${TP}-pp-${PP}-etp-${ETP}-ep-${EP}-ac-${AC}-do-${DO}-sp-${SP}-profile${PROFILE}-sync${PROFILE_SYNC}-${TIMESTAMP}"
 OUTPUT_BASEPATH=output/${EXPERIMENT}-${NAME}
 
 TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/"
@@ -225,8 +253,8 @@ if [ $MODEL_SIZE = 671B ]; then
     NUM_EXPERTS=256 # change from 160 to 256 experts
     ROUTER_TOPK=8 # change from 6 to 8 experts
     NUM_SHARED_EXPERTS=1 # 1 epxert shared
-    # MOE_LAYER_FREQ='([0]*1+[1]*2)'  # 3 layer example
-    MOE_LAYER_FREQ=1 # use '([0]*3+[1]*58)' for full model
+    # MOE_LAYER_FREQ: set via proxy_mi355x_deepseekv3_671B.sh (or export before launch). Default 1 = every layer MoE.
+    MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
@@ -255,7 +283,7 @@ elif [ $MODEL_SIZE = 236B ]; then
     NUM_EXPERTS=160
     ROUTER_TOPK=6
     NUM_SHARED_EXPERTS=2
-    MOE_LAYER_FREQ=1
+    MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-1}
 
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
@@ -281,13 +309,21 @@ elif [ $MODEL_SIZE = 16B ]; then
     NUM_EXPERTS=64
     ROUTER_TOPK=6
     NUM_SHARED_EXPERTS=2
-    MOE_LAYER_FREQ=([0]*3+[1]*24)
+    MOE_LAYER_FREQ=${MOE_LAYER_FREQ:-"([0]*3+[1]*24)"}
     
     moe_options=" \
         --q-lora-rank ${Q_LORA_RANK} \
         --moe-router-num-groups ${EP} \
     "
 fi
+
+# RoPE fusion (Primus-style): enable experimental + fused RoPE when APPLY_ROPE_FUSION is true.
+if [ "${APPLY_ROPE_FUSION:-false}" = true ] || [ "${APPLY_ROPE_FUSION:-0}" = 1 ]; then
+    ROPE_FUSION_OPTS=" --enable-experimental"
+else
+    ROPE_FUSION_OPTS=" --no-rope-fusion"
+fi
+
 if [ $MOE_PERMUTE_FUSION != false ]; then
     moe_permute_fustion_options=" \
             --moe-permute-fusion "
@@ -321,7 +357,7 @@ moe_options=" \
     --qk-pos-emb-head-dim ${QK_ROPE_HEAD_DIM} \
     --v-head-dim ${V_HEAD_DIM} \
     --kv-channels ${V_HEAD_DIM} \
-    --no-rope-fusion \
+    ${ROPE_FUSION_OPTS} \
     "
 
 if [ $ENABLE_DEEP_EP = true ]; then
@@ -334,8 +370,22 @@ else
     moe_options=" \
             ${moe_options} \
             --moe-token-dispatcher-type alltoall \
-            --moe-shared-expert-overlap \
-    "
+            "
+    if [ "${MOE_SHARED_EXPERT_OVERLAP:-false}" = true ] || [ "${MOE_SHARED_EXPERT_OVERLAP:-0}" = 1 ]; then
+        moe_options="${moe_options} --moe-shared-expert-overlap"
+    fi
+fi
+
+# MXFP8: pad per-expert token counts for FP8 grouped GEMM (requires FP8 + non-allgather dispatcher).
+if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
+    moe_options="${moe_options} --moe-router-padding-for-fp8"
+    echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
+fi
+
+# Fused TopK router + aux (TE >= 2.7); maps to Primus moe_use_fused_router_with_aux_score.
+if [ "${MOE_ROUTER_FUSION:-false}" = true ] || [ "${MOE_ROUTER_FUSION:-0}" = 1 ]; then
+    moe_options="${moe_options} --moe-router-fusion"
+    echo "[INFO] MoE: --moe-router-fusion"
 fi
 
 if [ $WINDOW_SIZE != none ]; then
@@ -418,11 +468,41 @@ elif [ $PR = bf16 ]; then
         --bf16"
 elif [ $PR = fp8 ]; then
     TRANSFORMER_IMPL=transformer_engine
-    pr_options=" \
-        --bf16
+    case "$FP8_RECIPE" in
+    delayed)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe delayed \
         --fp8-format hybrid \
+        --fp8-margin 0 \
         --fp8-amax-compute-algo max \
-        --fp8-amax-history-len 1024"
+        --fp8-amax-history-len 1024 \
+        --attention-softmax-in-fp32"
+        ;;
+    tensorwise)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe tensorwise \
+        --fp8-format hybrid"
+        ;;
+    mxfp8)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe mxfp8 \
+        --fp8-format e4m3"
+        export NVTE_ROCM_ENABLE_MXFP8=1
+        ;;
+    blockwise)
+        pr_options=" \
+        --bf16 \
+        --fp8-recipe blockwise \
+        --fp8-format hybrid"
+        ;;
+    *)
+        echo "Unsupported FP8_RECIPE=${FP8_RECIPE} (use delayed, tensorwise, mxfp8, or blockwise)."
+        exit 1
+        ;;
+    esac
 fi
 
 if [ $OPTIMIZER_OFFLOAD != false ] && [ $DO = false ]; then
@@ -477,9 +557,23 @@ fi
 
 sft_option="--train-mode pretrain"
 
+pao_options=""
+if [ "${USE_PRECISION_AWARE_OPTIMIZER:-false}" = true ] || [ "${USE_PRECISION_AWARE_OPTIMIZER:-0}" = 1 ]; then
+    MAIN_GRADS_DTYPE=${MAIN_GRADS_DTYPE:-bf16}
+    EXP_AVG_DTYPE=${EXP_AVG_DTYPE:-bf16}
+    EXP_AVG_SQ_DTYPE=${EXP_AVG_SQ_DTYPE:-bf16}
+    pao_options=" --use-precision-aware-optimizer --main-grads-dtype ${MAIN_GRADS_DTYPE} --exp-avg-dtype ${EXP_AVG_DTYPE} --exp-avg-sq-dtype ${EXP_AVG_SQ_DTYPE}"
+fi
+
+if [ "${GA_FUSION:-false}" = true ] || [ "${GA_FUSION:-0}" = 1 ]; then
+    ga_fusion_opt=""
+else
+    ga_fusion_opt=" --no-gradient-accumulation-fusion"
+fi
+
 megatron_options="  \
 	--log-throughput \
-	--no-gradient-accumulation-fusion \
+	${ga_fusion_opt} \
 	--no-async-tensor-model-parallel-allreduce \
 	${data_args} \
         --lr ${LR} \
@@ -520,8 +614,8 @@ megatron_options="  \
         --num-workers 8 \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
         --tokenizer-type DeepSeekV3Tokenizer \
-        --tokenizer-model ${TOKENIZER_MODEL}\
-        --legacy-tokenizer
+        --tokenizer-model ${TOKENIZER_MODEL} \
+        --legacy-tokenizer \
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --normalization RMSNorm \
@@ -536,7 +630,9 @@ megatron_options="  \
         $USE_GROUPED_GEMM_OPTION \
         $USE_LEGACY_GROUPED_GEMM_OPTION \
         --distributed-timeout-minutes 60 \
-        --eod-mask-loss
+        --eod-mask-loss \
+        ${pao_options} \
+        ${CE_FUSION_ARGS} \
         "
         # --save ${CHECKPOINT_PATH} \
 
