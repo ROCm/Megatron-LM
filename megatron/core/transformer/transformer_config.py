@@ -569,9 +569,14 @@ class TransformerConfig(ModelParallelConfig):
     """MORI EP kernel type. Options: 'IntraNode', 'InterNode', 'InterNodeV1',
     'InterNodeV1LL', 'AsyncLL'. Auto-selected based on world size if None."""
 
-    moe_mori_max_tokens_per_rank: int = 8192
+    moe_mori_max_tokens_per_rank: Optional[int] = None
     """Maximum number of input tokens per rank for MORI EP buffer allocation.
-    Must be >= (seq_length * micro_batch_size) to avoid out-of-bounds writes."""
+    Must be >= the per-rank row count entering the MoE layer (i.e.
+    micro_batch_size * seq_length divided by sequence-parallel TP and by
+    context-parallel size, when applicable). When None, the training entry
+    point auto-derives this in `validate_args` from the runtime parallelism
+    config; pass an explicit value only to pre-allocate a larger SHMEM heap
+    for variable-batch scenarios."""
 
     moe_per_layer_logging: bool = False
     """Enable per-layer logging for MoE, currently supports auxiliary loss and z loss."""
