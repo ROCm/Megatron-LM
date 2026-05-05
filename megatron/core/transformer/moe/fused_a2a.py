@@ -283,6 +283,58 @@ except ImportError:
 
 _mori_op = None
 
+# Process-wide CUDA stream dedicated to MORI dispatch/combine kernel launches.
+# Mirrors DeepEP's `allocate_on_comm_stream` pattern so that op.dispatch() and
+# op.combine() can run concurrently with non-dependent work on the default
+# (compute) stream when the caller passes async_finish=True. The host wait at
+# `recv_num_token[0].item()` inside `MoriDispatch.forward` still blocks until
+# the dispatch kernel drains, so the practical wall-time win from this alone
+# is limited until that .item() is deferred — see TODO in MoriDispatch.forward.
+_mori_comm_stream = None
+
+
+def _get_mori_comm_stream():
+    """Return a process-wide CUDA stream dedicated to MORI launches.
+
+    Lazily allocated on the active CUDA device; cached for the lifetime of
+    the process. Priority is set to high (-1) so MORI's communication kernels
+    aren't preempted by lower-priority compute work on the default stream.
+    """
+    global _mori_comm_stream
+    if _mori_comm_stream is None and torch.cuda.is_available():
+        _mori_comm_stream = torch.cuda.Stream(
+            device=torch.cuda.current_device(), priority=-1
+        )
+    return _mori_comm_stream
+
+
+def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool):
+    """Execute a MORI op (dispatch/combine) on the comm stream when requested.
+
+    Honors the (async_finish, allocate_on_comm_stream) contract from
+    `_MoriManager.dispatch` / `combine` and matches the DeepEP-side semantics:
+    when both flags are True we move the launch to the dedicated comm stream,
+    bracket it with the appropriate `wait_stream()` calls so the comm stream
+    sees the producer of `fn`'s inputs and the compute stream sees the
+    op's outputs, then return whatever `fn()` returned. Otherwise we run
+    `fn()` synchronously on the current stream (legacy behavior).
+    """
+    if not (async_finish and allocate_on_comm_stream and torch.cuda.is_available()):
+        return fn()
+    comm_stream = _get_mori_comm_stream()
+    if comm_stream is None:
+        return fn()
+    current_stream = torch.cuda.current_stream()
+    # Comm stream must wait for inputs (e.g., the contiguous() copy of x and
+    # the prior layer's writes to token_indices/probs) to be visible.
+    comm_stream.wait_stream(current_stream)
+    with torch.cuda.stream(comm_stream):
+        result = fn()
+    # Compute stream must wait for the dispatch/combine output before any
+    # downstream op consumes it (slicing, .item(), bincount, ...).
+    current_stream.wait_stream(comm_stream)
+    return result
+
 
 
 
@@ -374,6 +426,8 @@ class MoriDispatch(torch.autograd.Function):
         router_topk,
         max_num_tokens_per_rank,
         fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
     ):
         """Forward pass: dispatch tokens to correct ranks via MORI."""
         hidden_dim = x.shape[1]
@@ -387,16 +441,30 @@ class MoriDispatch(torch.autograd.Function):
             fp8_dispatch=fp8_dispatch,
         )
 
-        scales = torch.empty(x.shape[0], 0, dtype=torch.float8_e4m3fnuz, device=x.device)
-
         # x -> [num_tokens, hidden_dim]
         # token_probs -> [num_tokens, router_topk]
-        # scales -> [num_tokens, 0]
         # token_indices -> [num_tokens, router_topk]
+        # scales=None: BF16 path uses scale_dim=0, so MORI ignores this arg
+        # (see dispatch_combine.py:477-479). For an FP8 dispatch we'd need a
+        # real [num_tokens, scale_dim] tensor in float8_e4m3fnuz.
+        # When async_finish=True the launch is moved onto a dedicated comm
+        # stream so it can overlap with non-dependent compute. The .item()
+        # below still serializes on the host, however — eliminating that is
+        # tracked separately (would require returning the un-sliced full
+        # buffer + on-device row_valid mask to downstream consumers).
         dispatch_out, dispatch_weights, dispatch_scales, dispatch_indices, recv_num_token = (
-            op.dispatch(x, token_probs.float(), scales, token_indices.to(torch.int32))
+            _run_mori_op_on_stream(
+                lambda: op.dispatch(
+                    x, token_probs.float(), None, token_indices.to(torch.int32)
+                ),
+                async_finish,
+                allocate_on_comm_stream,
+            )
         )
 
+        # TODO(mori-overlap): defer this .item() out of the autograd Function
+        # so dispatch can actually overlap with compute. See comment above and
+        # the comm-stream notes in docs/design/mori_ep_integration.md.
         total_recv = recv_num_token[0].item()
         recv_x = dispatch_out[:total_recv]
         recv_token_indices_global = dispatch_indices[:total_recv]
@@ -438,6 +506,10 @@ class MoriDispatch(torch.autograd.Function):
         ctx.router_topk = router_topk
         ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
         ctx.fp8_dispatch = fp8_dispatch
+        # Stash comm-stream flags for backward — backward can't receive new
+        # arguments via apply(), so we have to carry them through ctx.
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
         # Save the RECEIVER-side topk probs (not sender-side `token_probs`) for
         # backward. The dispatch-backward calls `op.combine`, whose IntraNode
         # kernel reads `weights` indexed by totalRecvTokenNum (~43k) — see
@@ -462,17 +534,33 @@ class MoriDispatch(torch.autograd.Function):
             fp8_dispatch=ctx.fp8_dispatch,
         )
         num_tokens = token_indices.shape[0]
-        combined_x, _ = op.combine(
-            grad_output.contiguous(),
-            recv_token_probs.float(),
-            token_indices.to(torch.int32),
-            call_reset=True,
+        combined_x, _ = _run_mori_op_on_stream(
+            lambda: op.combine(
+                grad_output.contiguous(),
+                recv_token_probs.float(),
+                token_indices.to(torch.int32),
+                call_reset=True,
+            ),
+            ctx.async_finish,
+            ctx.allocate_on_comm_stream,
         )
         # See MoriCombine.forward: op.combine() returns the full
         # [max_num_inp_token_per_rank, hidden_dim] buffer; slice to the
         # sender-side row count so the gradient matches `x`'s shape.
         combined_x = combined_x[:num_tokens]
-        return combined_x, None, None, None, None, None, None, None, None
+        return (
+            combined_x,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 class MoriCombine(torch.autograd.Function):
@@ -493,6 +581,8 @@ class MoriCombine(torch.autograd.Function):
         router_topk,
         max_num_tokens_per_rank,
         fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
     ):
         """Forward pass: combine expert outputs back to original ranks via MORI."""
         op = get_mori_op(
@@ -509,11 +599,15 @@ class MoriCombine(torch.autograd.Function):
         # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
         num_tokens = token_indices.shape[0]
 
-        combined_x, _ = op.combine(
-            x.contiguous(),
-            token_probs.float(),
-            token_indices.to(torch.int32),
-            call_reset=True,
+        combined_x, _ = _run_mori_op_on_stream(
+            lambda: op.combine(
+                x.contiguous(),
+                token_probs.float(),
+                token_indices.to(torch.int32),
+                call_reset=True,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
         # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim]
         # buffer view. Slice down to the actual sender-side row count so
@@ -526,6 +620,19 @@ class MoriCombine(torch.autograd.Function):
         ctx.router_topk = router_topk
         ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
         ctx.fp8_dispatch = fp8_dispatch
+        # Stash comm-stream flags for backward — backward can't receive new
+        # arguments via apply(), so we have to carry them through ctx.
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        # Stash the receiver-side row count for backward. By the time we get
+        # here, x.shape[0] is the same `total_recv` that MoriDispatch.forward
+        # already paid the .item() sync for — it's the row count of `recv_x`
+        # that propagated through unpermute → expert outputs → here. Saving
+        # it on ctx lets backward skip the redundant
+        # `recv_num_token[0].item()` host-sync after the grad dispatch.
+        # Since routing is deterministic given the same indices, this is the
+        # exact total_recv backward's op.dispatch will produce.
+        ctx.total_recv = x.shape[0]
         ctx.save_for_backward(token_indices, token_probs)
         return combined_x
 
@@ -542,17 +649,32 @@ class MoriCombine(torch.autograd.Function):
             data_type=grad_output.dtype,
             fp8_dispatch=ctx.fp8_dispatch,
         )
-        scales = torch.empty(
-            grad_output.shape[0], 0, dtype=torch.float8_e4m3fnuz, device=grad_output.device
+        dispatch_out, _, _, _, _ = _run_mori_op_on_stream(
+            lambda: op.dispatch(
+                grad_output.contiguous(),
+                token_probs.float(),
+                None,
+                token_indices.to(torch.int32),
+            ),
+            ctx.async_finish,
+            ctx.allocate_on_comm_stream,
         )
-        dispatch_out, _, _, _, recv_num_token = op.dispatch(
-            grad_output.contiguous(),
-            token_probs.float(),
-            scales,
-            token_indices.to(torch.int32),
+        # Reuse the total_recv saved in forward instead of calling
+        # `recv_num_token[0].item()` here — that .item() forces a host sync
+        # waiting on the dispatch kernel and was the ~1ms-per-layer cost
+        # diagnosed in the MoRI EP profiling notes.
+        return (
+            dispatch_out[: ctx.total_recv],
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
-        total_recv = recv_num_token[0].item()
-        return dispatch_out[:total_recv], None, None, None, None, None, None, None
 
 
 if HAVE_MORI:
@@ -567,6 +689,8 @@ if HAVE_MORI:
         router_topk,
         max_num_tokens_per_rank,
         fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
     ):
         """Perform fused dispatch using MORI EP backend.
 
@@ -580,6 +704,11 @@ if HAVE_MORI:
             router_topk: Top-K experts per token
             max_num_tokens_per_rank: Max tokens per rank for buffer sizing
             fp8_dispatch: Whether to use FP8 dispatch
+            async_finish: When True (and allocate_on_comm_stream=True),
+                MORI's op.dispatch is launched on a dedicated CUDA comm
+                stream so it can overlap with non-dependent compute on the
+                default stream. Mirrors DeepEP's flag of the same name.
+            allocate_on_comm_stream: See `async_finish`.
 
         Returns:
             Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert, handle)
@@ -594,6 +723,8 @@ if HAVE_MORI:
             router_topk,
             max_num_tokens_per_rank,
             fp8_dispatch,
+            async_finish,
+            allocate_on_comm_stream,
         )
 
     def mori_combine(
@@ -605,6 +736,8 @@ if HAVE_MORI:
         router_topk,
         max_num_tokens_per_rank,
         fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
     ):
         """Perform fused combine using MORI EP backend.
 
@@ -617,6 +750,11 @@ if HAVE_MORI:
             router_topk: Top-K experts per token
             max_num_tokens_per_rank: Max tokens per rank for buffer sizing
             fp8_dispatch: Whether to use FP8 dispatch
+            async_finish: When True (and allocate_on_comm_stream=True),
+                MORI's op.combine is launched on a dedicated CUDA comm
+                stream so it can overlap with non-dependent compute on the
+                default stream. Mirrors DeepEP's flag of the same name.
+            allocate_on_comm_stream: See `async_finish`.
 
         Returns:
             Combined output tensor
@@ -630,6 +768,8 @@ if HAVE_MORI:
             router_topk,
             max_num_tokens_per_rank,
             fp8_dispatch,
+            async_finish,
+            allocate_on_comm_stream,
         )
 
 else:

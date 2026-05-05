@@ -1242,6 +1242,8 @@ class _MoriManager(_DispatchManager):
                 self.num_local_experts,
                 self.router_topk,
                 self.max_num_tokens_per_rank,
+                async_finish=async_finish,
+                allocate_on_comm_stream=allocate_on_comm_stream,
             )
         )
         self.tokens_per_expert = num_tokens_per_expert
@@ -1304,6 +1306,8 @@ class _MoriManager(_DispatchManager):
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
+            async_finish=async_finish,
+            allocate_on_comm_stream=allocate_on_comm_stream,
         )
         return hidden_states
 
