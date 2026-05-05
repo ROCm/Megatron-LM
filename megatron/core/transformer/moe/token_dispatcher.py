@@ -1208,7 +1208,9 @@ class _MoriManager(_DispatchManager):
 
         routing_map = routing_map.reshape(num_tokens, self.num_experts)
         probs = probs.reshape(num_tokens, self.num_experts)
+        # Convert the format of routing map from multihot to indices.
         self.token_probs, self.token_indices = torch.topk(probs, self.router_topk, dim=-1)
+        # Mask the indices of dropped tokens with -1
         if self.capacity_factor is not None:
             mask = self.token_probs == 0
             self.token_indices = self.token_indices.masked_fill(mask, -1)
@@ -1219,19 +1221,16 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
-        #TODO: Check this!
+        # MORI EP only supports float32 probs (matches DeepEP path)
         if self.token_probs.dtype != torch.float32:
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
                 print("MORI EP only supports float32 probs, please set --moe-router-dtype=fp32")
             self.token_probs = self.token_probs.float()
 
-        print("hidden_states shape:", hidden_states.shape)
-        print("token_indices shape:", self.token_indices.shape)
-        print("token_probs shape:", self.token_probs.shape)
-        print("num_experts:", self.num_experts)
-        print("num_local_experts:", self.num_local_experts)
-        print("router_topk:", self.router_topk)
-        print("max_num_tokens_per_rank:", self.max_num_tokens_per_rank)
+        # Capture sender-side num_tokens BEFORE dispatch — needed at combine time
+        # to slice op.combine()'s output (which is shaped to the full
+        # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
+        self._sender_num_tokens = hidden_states.shape[0]
 
         hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, _ = (
             mori_dispatch(
@@ -1248,6 +1247,14 @@ class _MoriManager(_DispatchManager):
         self.tokens_per_expert = num_tokens_per_expert
         self.dispatched_indices = dispatched_indices
         self.dispatched_probs = dispatched_probs
+        # Snapshot the receiver-side topk probs BEFORE _indices_to_multihot
+        # overwrites self.dispatched_probs. MORI's op.combine() reads the
+        # `weights` arg as a [total_recv, topk] receiver-side buffer (see
+        # intranode.hpp:281-286 — indexed by totalRecvTokenNum, not by sender
+        # count). Passing self.token_probs (sender-side, [N, topk]) here
+        # caused a ~1.1 MiB OOB read per combine and the Memory access fault
+        # by GPU we observed on the second forward dispatch.
+        self._raw_dispatched_probs = dispatched_probs
 
         return hidden_states
 
@@ -1282,16 +1289,22 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
+        # NOTE: pass self._raw_dispatched_probs (receiver-side, [total_recv, topk])
+        # rather than self.token_probs (sender-side, [N, topk]). The IntraNode
+        # combine kernel reads weights indexed by totalRecvTokenNum; passing the
+        # smaller sender buffer caused the GPU page fault triaged in
+        # docs/design/mori_ep_integration.md.
+        # call_reset=True inside MoriCombine.forward already triggers MORI's
+        # internal reset, so no explicit reset_mori_op() is needed here.
         hidden_states = mori_combine(
             hidden_states,
             self.group,
             self.token_indices,
-            self.token_probs,
+            self._raw_dispatched_probs,
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
         )
-        reset_mori_op()
         return hidden_states
 
     def _pad_routing_map(
@@ -1346,6 +1359,7 @@ class _MoriManager(_DispatchManager):
         )
         if self.router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
+
         return hidden_states, permuted_probs
 
     def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:

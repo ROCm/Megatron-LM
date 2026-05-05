@@ -80,6 +80,10 @@ class FusedDispatch(torch.autograd.Function):
         allocate_on_comm_stream=False,
     ):
         """Forward pass of fused dispatch."""
+
+        # x -> [num_tokens, hidden_dim]
+        # token_indices -> [num_tokens, topk]
+        # token_probs -> [num_tokens, topk]
         previous_event = None
         if async_finish:
             previous_event = EventOverlap(EventHandle())
@@ -121,7 +125,10 @@ class FusedDispatch(torch.autograd.Function):
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
-
+        # recv_x -> [num_recv_tokens, hidden_dim]
+        # recv_token_indices -> [num_recv_tokens, topk]
+        # recv_token_probs -> [num_recv_tokens, topk]
+        # num_recv_tokens_per_expert_list -> [num_experts]
         # Make sure current stream is synchronized
         if async_finish:
             after_event_overlap.current_stream_wait()
@@ -382,20 +389,48 @@ class MoriDispatch(torch.autograd.Function):
 
         scales = torch.empty(x.shape[0], 0, dtype=torch.float8_e4m3fnuz, device=x.device)
 
+        # x -> [num_tokens, hidden_dim]
+        # token_probs -> [num_tokens, router_topk]
+        # scales -> [num_tokens, 0]
+        # token_indices -> [num_tokens, router_topk]
         dispatch_out, dispatch_weights, dispatch_scales, dispatch_indices, recv_num_token = (
             op.dispatch(x, token_probs.float(), scales, token_indices.to(torch.int32))
         )
 
         total_recv = recv_num_token[0].item()
         recv_x = dispatch_out[:total_recv]
-        recv_token_indices = dispatch_indices[:total_recv]
+        recv_token_indices_global = dispatch_indices[:total_recv]
         recv_token_probs = dispatch_weights[:total_recv]
 
-        # Compute per-expert token counts
-        all_expert_ids = recv_token_indices.flatten()
-        valid = all_expert_ids >= 0
+        # MORI's dispatch returns the original GLOBAL expert ids in [0, num_experts)
+        # for every topk slot of every received token, with no -1 sentinel for
+        # non-local slots. Megatron's downstream pipeline (specifically
+        # `_MoriManager._indices_to_multihot`) follows the DeepEP contract, which
+        # expects values in the LOCAL expert space [0, num_local_experts) with
+        # `-1` marking non-local slots. Without the rebase below, the advanced-
+        # indexing assignment in `_indices_to_multihot` writes out of bounds and
+        # triggers `HSA_STATUS_ERROR_EXCEPTION 0x1016` from the underlying
+        # `at::native::index_put_kernel`.
+        my_rank = torch.distributed.get_rank(group)
+        local_id_start = my_rank * num_local_experts
+        local_id_end = local_id_start + num_local_experts
+        is_local = (recv_token_indices_global >= local_id_start) & (
+            recv_token_indices_global < local_id_end
+        )
+        recv_token_indices = (recv_token_indices_global - local_id_start).to(torch.int64)
+        recv_token_indices = torch.where(
+            is_local,
+            recv_token_indices,
+            torch.full_like(recv_token_indices, -1),
+        )
+
+        # Per-local-expert token counts (matches DeepEP's
+        # num_recv_tokens_per_expert_list contract). Filter -1 sentinels via the
+        # `is_local` mask before bincount so we don't accidentally count global
+        # expert ids that fall in [0, num_local_experts) but belong to other ranks.
+        local_ids_flat = recv_token_indices[is_local]
         tokens_per_expert = torch.bincount(
-            all_expert_ids[valid], minlength=num_local_experts
+            local_ids_flat, minlength=num_local_experts
         )[:num_local_experts]
 
         ctx.group = group
@@ -403,14 +438,20 @@ class MoriDispatch(torch.autograd.Function):
         ctx.router_topk = router_topk
         ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
         ctx.fp8_dispatch = fp8_dispatch
-        ctx.save_for_backward(token_indices, token_probs)
+        # Save the RECEIVER-side topk probs (not sender-side `token_probs`) for
+        # backward. The dispatch-backward calls `op.combine`, whose IntraNode
+        # kernel reads `weights` indexed by totalRecvTokenNum (~43k) — see
+        # intranode.hpp:281-286. Passing sender-side probs of shape [N, topk]
+        # would re-introduce the same ~1.1 MiB OOB read that caused the
+        # forward-side `Memory access fault by GPU`, just inside backward.
+        ctx.save_for_backward(token_indices, recv_token_probs)
 
         return (recv_x, recv_token_indices, recv_token_probs, tokens_per_expert, None)
 
     @staticmethod
     def backward(ctx, grad_output, grad_indices, grad_probs, grad_tpe, grad_handle):
         """Backward pass: combine gradients back using MORI."""
-        token_indices, token_probs = ctx.saved_tensors
+        token_indices, recv_token_probs = ctx.saved_tensors
         op = get_mori_op(
             group=ctx.group,
             hidden_dim=grad_output.shape[1],
@@ -420,12 +461,17 @@ class MoriDispatch(torch.autograd.Function):
             data_type=grad_output.dtype,
             fp8_dispatch=ctx.fp8_dispatch,
         )
+        num_tokens = token_indices.shape[0]
         combined_x, _ = op.combine(
             grad_output.contiguous(),
-            token_probs.float(),
+            recv_token_probs.float(),
             token_indices.to(torch.int32),
             call_reset=True,
         )
+        # See MoriCombine.forward: op.combine() returns the full
+        # [max_num_inp_token_per_rank, hidden_dim] buffer; slice to the
+        # sender-side row count so the gradient matches `x`'s shape.
+        combined_x = combined_x[:num_tokens]
         return combined_x, None, None, None, None, None, None, None, None
 
 
@@ -458,12 +504,23 @@ class MoriCombine(torch.autograd.Function):
             data_type=x.dtype,
             fp8_dispatch=fp8_dispatch,
         )
+        # Sender-side num_tokens — needed both as ctx for backward and to
+        # slice op.combine()'s output (which is shaped to the full
+        # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
+        num_tokens = token_indices.shape[0]
+
         combined_x, _ = op.combine(
             x.contiguous(),
             token_probs.float(),
             token_indices.to(torch.int32),
             call_reset=True,
         )
+        # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim]
+        # buffer view. Slice down to the actual sender-side row count so
+        # combine_postprocess()'s view(self.hidden_shape) is correct whenever
+        # max_num_inp_token_per_rank != num_tokens.
+        combined_x = combined_x[:num_tokens]
+
         ctx.group = group
         ctx.num_local_experts = num_local_experts
         ctx.router_topk = router_topk

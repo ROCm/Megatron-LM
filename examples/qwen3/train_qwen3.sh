@@ -449,7 +449,7 @@ if [ "$IS_MOE" -eq 1 ]; then
         echo "[INFO] MORI EP: MORI_SHMEM_HEAP_SIZE=${MORI_SHMEM_HEAP_SIZE}"
         echo "[INFO] MORI EP: MORI_SHMEM_LOG_LEVEL=${MORI_SHMEM_LOG_LEVEL}"
         echo "[INFO] MORI EP: ulimit -l = $(ulimit -l)"
-        moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-mori --moe-mori-max-tokens-per-rank 32768"
+        moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-mori --moe-mori-max-tokens-per-rank 8192"
     else
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
     fi
