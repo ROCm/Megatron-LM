@@ -369,11 +369,31 @@ if [ $ENABLE_DEEP_EP = true ]; then
         "
 elif [ $ENABLE_MORI = true ]; then
     MORI_MAX_TOKENS=$((SEQ_LEN * MICRO_BATCH_SIZE))
+    # MORI registers its symmetric heap (32G) with libibverbs / RDMA, which
+    # requires pinning that memory. The default `ulimit -l` of 8 MB makes
+    # `ibv_reg_mr` fail and the failure manifests as a glibc
+    # `free(): invalid size` SIGABRT deep in MORI's shmem init.
+    # Bump to unlimited (matches DeepEP/HPC RDMA conventions).
+    ulimit -l unlimited 2>/dev/null || echo "[WARN] MORI EP: failed to raise ulimit -l (current: $(ulimit -l)). RDMA pin may fail."
+    # MORI symmetric heap must be large enough for dispatch/combine buffers
+    # across all EP ranks. 32G matches MORI's own ops test config
+    # (tests/python/ops/conftest.py) and is the known-good value for the
+    # full MoE config matrix. Smaller values (e.g. 6G/8G) cause
+    # `free(): invalid size` heap corruption during shmem init.
+    # Override here so a stale shell value cannot under-size the heap.
+    if [ -n "$MORI_SHMEM_HEAP_SIZE" ] && [ "$MORI_SHMEM_HEAP_SIZE" != "32G" ]; then
+        echo "[WARN] MORI EP: overriding MORI_SHMEM_HEAP_SIZE=${MORI_SHMEM_HEAP_SIZE} -> 32G"
+    fi
+    export MORI_SHMEM_HEAP_SIZE="32G"
+    export MORI_SHMEM_LOG_LEVEL="${MORI_SHMEM_LOG_LEVEL:-INFO}"
+    echo "[INFO] MORI EP: MORI_SHMEM_HEAP_SIZE=${MORI_SHMEM_HEAP_SIZE}"
+    echo "[INFO] MORI EP: MORI_SHMEM_LOG_LEVEL=${MORI_SHMEM_LOG_LEVEL}"
+    echo "[INFO] MORI EP: ulimit -l = $(ulimit -l)"
     moe_options=" \
             ${moe_options} \
             --moe-token-dispatcher-type flex \
             --moe-enable-mori \
-            --moe-mori-max-tokens-per-rank ${MORI_MAX_TOKENS} \
+            --moe-mori-max-tokens-per-rank 32768 \
         "
 else 
     moe_options=" \

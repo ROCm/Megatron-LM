@@ -275,21 +275,8 @@ except ImportError:
 
 
 _mori_op = None
-_mori_shmem_initialized = False
 
 
-def init_mori_shmem(group: torch.distributed.ProcessGroup):
-    """Initialize MORI shared memory using the given process group.
-
-    Must be called once before any MORI EP operations. Uses PyTorch's
-    distributed process group for symmetric memory initialization.
-    """
-    global _mori_shmem_initialized
-    if _mori_shmem_initialized:
-        return
-    torch._C._distributed_c10d._register_process_group("mori_ep", group)
-    mori.shmem.shmem_torch_process_group_init("mori_ep")
-    _mori_shmem_initialized = True
 
 
 def get_mori_op(
@@ -321,8 +308,6 @@ def get_mori_op(
 
     if _mori_op is not None:
         return _mori_op
-
-    init_mori_shmem(group)
 
     world_size = group.size()
     rank = torch.distributed.get_rank(group)

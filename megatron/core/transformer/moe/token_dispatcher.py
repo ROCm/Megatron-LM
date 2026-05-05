@@ -1219,16 +1219,25 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
+        #TODO: Check this!
         if self.token_probs.dtype != torch.float32:
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
                 print("MORI EP only supports float32 probs, please set --moe-router-dtype=fp32")
             self.token_probs = self.token_probs.float()
 
+        print("hidden_states shape:", hidden_states.shape)
+        print("token_indices shape:", self.token_indices.shape)
+        print("token_probs shape:", self.token_probs.shape)
+        print("num_experts:", self.num_experts)
+        print("num_local_experts:", self.num_local_experts)
+        print("router_topk:", self.router_topk)
+        print("max_num_tokens_per_rank:", self.max_num_tokens_per_rank)
+
         hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, _ = (
             mori_dispatch(
-                hidden_states,
-                self.token_indices,
-                self.token_probs,
+                hidden_states, # [num_tokens, hidden_dim]
+                self.token_indices, # [num_tokens, topk]
+                self.token_probs, # [num_tokens, topk]
                 self.num_experts,
                 self.group,
                 self.num_local_experts,
