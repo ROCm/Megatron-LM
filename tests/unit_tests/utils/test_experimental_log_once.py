@@ -4,7 +4,7 @@ import torch
 
 from megatron.core import config
 from megatron.core import utils as mcore_utils
-
+from megatron.core._rank_utils import safe_get_rank
 # Message emitted by experimental_fn wrapper when EXPERIMENTAL flag is enabled.
 _LOG_MSG = "ENABLE_EXPERIMENTAL is True, running experimental code."
 
@@ -37,19 +37,16 @@ def test_experimental_fn_logs_once(caplog):
     records = [
         rec for rec in caplog.records if rec.name == logger.name and _LOG_MSG in rec.getMessage()
     ]
-    if torch.distributed.is_initialized():
-        if torch.distributed.get_rank() == 0:
-            assert (
-                len(records) == 1
-            ), "Expected exactly one log record for experimental fn enable message"
-        else:
-            assert (
-                len(records) == 0
-            ), "Expected no log on rank != 0 for experimental fn enable message"
-    else:
+
+    if safe_get_rank() == 0:
         assert (
             len(records) == 1
         ), "Expected exactly one log record for experimental fn enable message"
+    else:
+        assert (
+            len(records) == 0
+        ), "Expected no log on rank != 0 for experimental fn enable message"
+
 
     # Reset flag so it does not leak to other tests.
     config.set_experimental_flag(False)
@@ -76,17 +73,14 @@ def test_experimental_cls_logs_once(caplog):
     records = [
         rec for rec in caplog.records if rec.name == logger.name and _LOG_MSG in rec.getMessage()
     ]
-    if torch.distributed.is_initialized():
-        if torch.distributed.get_rank() == 0:
-            assert (
+    if safe_get_rank() == 0:
+        assert (
                 len(records) == 1
             ), "Expected exactly one log record for experimental cls enable message"
-        else:
-            assert (
-                len(records) == 0
-            ), "Expected no log on rank != 0 for experimental cls enable message"
     else:
         assert (
-            len(records) == 1
-        ), "Expected exactly one log record for experimental cls enable message"
+                len(records) == 0
+            ), "Expected no log on rank != 0 for experimental cls enable message"
+
+
     config.set_experimental_flag(False)
