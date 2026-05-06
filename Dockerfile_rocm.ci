@@ -12,6 +12,16 @@ RUN mkdir -p $WORKSPACE_DIR
 RUN mkdir -p ${STAGE_DIR}
 WORKDIR $WORKSPACE_DIR
 
+# Check python3 version and install respective python3-dev
+RUN PY3_VER="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" && \
+    if apt-cache show "python${PY3_VER}-dev" >/dev/null 2>&1; then \
+        apt-get install -y --no-install-recommends "python${PY3_VER}-dev"; \
+        # Overwrite python3-config to point to the correct version to prevent mismatch during Megatron-DeepSpeed build
+        ln -sf /usr/bin/python${PY3_VER}-config /usr/bin/python3-config; \
+    else \
+        apt-get install -y --no-install-recommends python3-dev; \
+    fi
+
 RUN pip3 install \
 scipy \
 wheel \
