@@ -28,13 +28,14 @@ from megatron.core import mpu, tensor_parallel
 from megatron.core.tokenizers import MegatronTokenizer
 
 
-def model_provider(pre_process=True, post_process=True, vp_stage=None):
+def model_provider(pre_process=True, post_process=True, vp_stage=None, config=None, pg_collection=None):
     """Build the model."""
 
     print_rank_0('building BERT model ...')
 
     args = get_args()
-    config = core_transformer_config_from_args(args)
+    if config is None:
+        config = core_transformer_config_from_args(args)
     num_tokentypes = 2 if args.bert_binary_head else 0
 
     if args.use_legacy_models:
@@ -172,6 +173,7 @@ def train_valid_test_datasets_provider(train_val_test_num_samples, vp_stage=None
         masking_use_geometric_distribution=False,
         classification_head=args.bert_binary_head,
         mid_level_dataset_surplus=args.mid_level_dataset_surplus,
+        allow_ambiguous_pad_tokens=args.allow_ambiguous_pad_tokens,
     )
 
     print_rank_0('> building train, validation, and test datasets '

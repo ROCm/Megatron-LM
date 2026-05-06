@@ -66,7 +66,12 @@ to accumulate the encoder_hidden_state gradient across skip connections
 
 
 def model_provider(
-    pre_process=True, post_process=True, add_encoder=True, add_decoder=True
+    pre_process=True,
+    post_process=True,
+    add_encoder=True,
+    add_decoder=True,
+    config=None,
+    pg_collection=None,
 ) -> Union[megatron.legacy.model.T5Model, T5Model]:
     """Builds the model.
 
@@ -83,7 +88,8 @@ def model_provider(
 
     args = get_args()
     
-    config = core_transformer_config_from_args(args)
+    if config is None:
+        config = core_transformer_config_from_args(args)
     if args.use_legacy_models:
         model = megatron.legacy.model.T5Model(
             config=config,
@@ -233,6 +239,7 @@ def train_valid_test_datasets_provider(train_val_test_num_samples: int):
         masking_use_longer_ngrams=False,
         masking_use_geometric_distribution=True,
         mid_level_dataset_surplus=args.mid_level_dataset_surplus,
+        allow_ambiguous_pad_tokens=args.allow_ambiguous_pad_tokens,
     )
 
     print_rank_0('> building train, validation, and test datasets for T5 ...')
