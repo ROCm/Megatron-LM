@@ -46,6 +46,7 @@ except ImportError:
 from megatron.core import config
 from megatron.core._rank_utils import log_single_rank
 from megatron.core.package_info import __version__ as mcore_version
+from megatron.core.packed_seq_params import PackedSeqParams
 
 try:
     from torch.distributed._tensor import DTensor
@@ -306,28 +307,6 @@ def experimental_cls(introduced_with_version: str):
         return wrapped_func(cls)
 
     return validator
-
-
-def get_torch_version():
-    """Get pytorch version from __version__; if not available use pip's. Use caching."""
-
-    if not HAVE_PACKAGING:
-        raise ImportError(
-            "packaging is not installed. Please install it with `pip install packaging`."
-        )
-
-    def get_torch_version_str():
-        import torch
-
-        if hasattr(torch, "__version__"):
-            return str(torch.__version__)
-        else:
-            return version("torch")
-
-    global _torch_version
-    if _torch_version is None:
-        _torch_version = PkgVersion(get_torch_version_str())
-    return _torch_version
 
 
 def get_te_version():
@@ -2081,8 +2060,8 @@ def get_thd_batch_on_this_cp_rank(
         max_seqlen_kv=int(max_seqlen[0].item()),
     )
 
-    cp_size = get_context_parallel_world_size() if cp_size is None else cp_size
-    cp_rank = get_context_parallel_rank() if cp_rank is None else cp_rank
+    cp_size = parallel_state.get_context_parallel_world_size() if cp_size is None else cp_size
+    cp_rank = parallel_state.get_context_parallel_rank() if cp_rank is None else cp_rank
     if cp_size > 1:  # slice batch along sequence dimension for context parallelism
         assert tex is not None and is_te_min_version("1.10.0"), (
             "Please update Transformer Engine to >= 1.10 to use "

@@ -61,6 +61,7 @@ from typing import Any, Optional, Dict
 import torch.distributed
 
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
+from megatron.core.optimizer_param_scheduler import get_canonical_lr_for_logging
 from .log_handler import CustomHandler
 
 # Make default logging level INFO, but filter out all log messages not from MCore.
@@ -234,20 +235,10 @@ def num_floating_point_operations(args, batch_size):
     def calculate_layer_counts():
         """Calculate the number of attention, Mamba, and MLP layers."""
         if args.hybrid_override_pattern:
-            from megatron.core.ssm.mamba_hybrid_layer_allocation import parse_hybrid_pattern
-            # Parse unified pattern to separate main and MTP components
-            parsed = parse_hybrid_pattern(args.hybrid_override_pattern)
-            counts = {'M': 0, '*': 0, '-': 0, 'E': 0}
-            # Count main decoder layers
-            if parsed.main_pattern:
-                for layer_type in parsed.main_pattern:
-                    if layer_type in counts:
-                        counts[layer_type] += 1
-            # Count MTP layers (pattern repeated mtp_num_depths times)
-            if parsed.mtp_pattern and parsed.mtp_num_depths > 0:
-                for layer_type in parsed.mtp_pattern:
-                    if layer_type in counts:
-                        counts[layer_type] += parsed.mtp_num_depths
+            counts = {'M': 0, '*': 0, '-': 0, 'E':0}
+            for layer_type in args.hybrid_override_pattern:
+                if layer_type in counts:
+                    counts[layer_type] += 1
             return counts['*'], counts['M'], counts['-'], counts['E']
         else:
             num_attn_layers = round(args.num_layers * args.hybrid_attention_ratio)
@@ -324,7 +315,7 @@ def num_floating_point_operations(args, batch_size):
                      mlp_expansion=4.0, swiglu=False,
                      moe_latent_size=None,
                      moe_ffn_hidden_size=2048, shared_expert_ffn_hidden_size=2048, num_experts_routed_to=1,
-                     vocab_size=256000, mtp_num_layers=0):
+                     vocab_size=256000):
         """Calculate total FLOPs for the hybrid model."""
         flops_fwd = (
                 num_attn_layers * attn_layer_flops(batch_size, seq_len, hidden_size,
@@ -337,7 +328,7 @@ def num_floating_point_operations(args, batch_size):
                 num_moe_layers * moe_layer_flops(batch_size, seq_len, hidden_size, moe_ffn_hidden_size,
                                                  shared_expert_ffn_hidden_size, num_experts_routed_to,
                                                  moe_latent_size, swiglu) +
-                (2 * batch_size * seq_len * hidden_size * vocab_size * (1 + mtp_num_layers))  # logits computation
+                (2 * batch_size * seq_len * hidden_size * vocab_size)  # logits computation
         )
         return flops_fwd * 3
 
@@ -628,7 +619,6 @@ def num_floating_point_operations(args, batch_size):
                                            else args.moe_shared_expert_intermediate_size),
             num_experts_routed_to=args.moe_router_topk,
             vocab_size=args.padded_vocab_size,
-            mtp_num_layers=args.mtp_num_layers,
         )
     else:
         # Compute standard Transformer model FLOPs.
@@ -1796,7 +1786,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 def training_log(
     loss_dict,
     total_loss_dict,
-    learning_rate,
+    learning_rate: float | None,
     iteration,
     loss_scale,
     report_memory_flag,
@@ -1897,15 +1887,16 @@ def training_log(
     total_iterations = total_loss_dict[advanced_iters_key] + total_loss_dict[skipped_iters_key]
 
     # learning rate will be None on ranks without trainable params, so we must gather across mp ranks
-    learning_rate = reduce_max_stat_across_model_parallel_group(learning_rate)
+    learning_rate: float | None = reduce_max_stat_across_model_parallel_group(learning_rate)
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0):
         if wandb_writer:
             wandb_writer.log({'samples vs steps': args.consumed_train_samples}, iteration)
-        writer.add_scalar('learning-rate', learning_rate, iteration)
-        writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
-        if wandb_writer:
-            wandb_writer.log({'learning-rate': learning_rate}, iteration)
+        if learning_rate is not None:
+            writer.add_scalar('learning-rate', learning_rate, iteration)
+            writer.add_scalar('learning-rate vs samples', learning_rate, args.consumed_train_samples)
+            if wandb_writer:
+                wandb_writer.log({'learning-rate': learning_rate}, iteration)
         if args.skipped_train_samples > 0:
             writer.add_scalar('skipped-train-samples', args.skipped_train_samples, iteration)
             if wandb_writer:
@@ -2924,12 +2915,7 @@ def train(
 
         if args.log_params_norm:
             params_norm = calc_params_l2_norm(model)
-        learning_rate = None
-        for param_group in optimizer.param_groups:
-            if len(param_group['params']) == 0:
-                continue
-            if param_group['default_config']:
-                learning_rate = param_group['lr']
+        learning_rate = get_canonical_lr_for_logging(optimizer.param_groups)
         report_memory_flag = training_log(
             loss_dict,
             total_loss_dict,

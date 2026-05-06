@@ -1,4 +1,4 @@
-# Copyright (c) 2019-2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025, NVIDIA CORPORATION.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-name: Build, test, and publish a PyPi wheel (to testpypi).
+name: Build docs
 
 on:
   push:
@@ -20,51 +20,37 @@ on:
       - main
       - "pull-request/[0-9]+"
       - "deploy-release/*"
-  merge_group:
-    types: [checks_requested]
 
-defaults:
-  run:
-    shell: bash -x -e -u -o pipefail {0}
-
-permissions:
-  id-token: write
-  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name || 'main' }}-${{ github.event_name }}
+  cancel-in-progress: true
 
 jobs:
   pre-flight:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@v0.65.5
-    if: github.repository == 'NVIDIA/Megatron-LM'
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cicd_preflight.yml@v0.73.2
 
-  build-test-publish-wheels:
+  build-docs:
     needs: [pre-flight]
-    uses: ./.github/workflows/_build_test_publish_wheel.yml
-    with:
-      no-publish: true
-    secrets:
-      TWINE_PASSWORD: ${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/r')) && secrets.SVC_PYPI_TOKEN || secrets.SVC_PYPI_TEST_TOKEN }}
+    if: needs.pre-flight.outputs.is_deployment_workflow != 'true'
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_build_docs.yml@v0.57.0
 
-  build-test-publish-wheel-summary:
-    needs: [pre-flight, build-test-publish-wheels]
+  build-docs-summary:
+    needs: [pre-flight, build-docs]
     if: |
       (
-        needs.pre-flight.outputs.docs_only == 'true'
-        || needs.pre-flight.outputs.is_merge_group == 'true'
-        || needs.pre-flight.outputs.is_deployment_workflow == 'true'
+        needs.pre-flight.outputs.is_deployment_workflow == 'true'
         || always()
       )
-      && github.repository == 'NVIDIA/Megatron-LM'
       && !cancelled()
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Result
+      - name: Get workflow result
+        id: result
+        shell: bash -x -e -u -o pipefail {0}
         env:
           GH_TOKEN: ${{ github.token }}
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          SKIPPING_IS_ALLOWED: true
+          RUN_ID: ${{ github.run_id }}
+          SKIPPING_IS_ALLOWED: ${{ needs.pre-flight.outputs.docs_only == 'true' || needs.pre-flight.outputs.is_deployment_workflow == 'true' }}
         run: |
           FAILED_JOBS=$(gh run view $GITHUB_RUN_ID --json jobs --jq '[.jobs[] | select(.status == "completed" and .conclusion != "success")] | length') || echo 0
 
