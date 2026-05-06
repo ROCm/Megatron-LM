@@ -163,4 +163,3 @@ jobs:
           docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
           rm -f "${{ runner.temp }}/megatron-ci-image.tar"
 
-
