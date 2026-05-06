@@ -1,13 +1,16 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterable
+from typing import Generic, TypeVar
 
 import numpy as np
 from pydantic import BaseModel
 
-from ..__init__ import Request, trace_async_exceptions
+from megatron.core.utils import trace_async_exceptions
+
+from ..__init__ import Request, TypeLookupable
 from ..inference import (
     ChatInferenceInterface,
     ChatInferenceRequest,
@@ -43,8 +46,8 @@ class GroupedRolloutRequest(Request):
 class Rollout(AgentBaseModel):
     """Data for language-based Rollout."""
 
-    trajectory: str
-    prompt_length: int | None = None
+    trajectory: list[str]
+    prompt_length: list[int] | None = None
     reward: float = None
     env_id: str | None = None
     problem_id: str | None = None
@@ -53,10 +56,10 @@ class Rollout(AgentBaseModel):
 class TokenRollout(AgentBaseModel):
     """Tokenized representation of a language-based Rollout."""
 
-    trajectory: list[int]
+    trajectory: list[list[int]]
     reward: list[float] | float
-    generation_mask: list[list[int]] | list[bool] | None = None
-    logprobs: list[float] | None = None
+    generation_mask: list[list[bool]] | None = None
+    logprobs: list[list[float]] | None = None
     env_id: str | None = None
     problem_id: str | None = None
 
@@ -64,8 +67,8 @@ class TokenRollout(AgentBaseModel):
 class ContrastiveRollout(AgentBaseModel):
     """Contrastive/Preference data for language-based Rollout."""
 
-    chosen_trajectory: str
-    rejected_trajectory: str
+    chosen_trajectory: list[str]
+    rejected_trajectory: list[str]
 
 
 class Head2HeadRolloutRequest(Request):
@@ -85,9 +88,22 @@ class EvaluationRequest(Request):
     validation: bool = True
 
 
-class EvaluationResponse(AgentBaseModel):
+class EvaluationResult(AgentBaseModel):
+    prompt: str | list[LLMChatMessage]
+    response: str | LLMChatMessage
+
+
+class RewardEvaluationResult(EvaluationResult):
+    reward: float
+    problem_id: str | None = None
+
+
+T = TypeVar('T', bound=EvaluationResult)
+
+
+class EvaluationResponse(AgentBaseModel, TypeLookupable, Generic[T]):
     env_id: str | None = None
-    results: list[AgentBaseModel]
+    results: list[T]
 
     def metrics(self):
         raise NotImplementedError(f"{type(self)} did not provide metric aggregation.")
@@ -158,6 +174,11 @@ class GroupedRolloutGenerator(Agent, ABC):
     parallel_generation_tasks: int = 512
     buffer_size: int = 10
 
+    def __init__(self, *, parallel_generation_tasks: int | None = None, **kwargs):
+        super().__init__(**kwargs)
+        if parallel_generation_tasks is not None:
+            self.parallel_generation_tasks = parallel_generation_tasks
+
     @abstractmethod
     async def group_rollout(self, request: GroupedRolloutRequest) -> list[Rollout]: ...
 
@@ -178,7 +199,7 @@ class GroupedRolloutGenerator(Agent, ABC):
         )
         submitted_groups = 0
 
-        @trace_async_exceptions
+        @trace_async_exceptions(verbose=True)
         async def group_task():
             nonlocal submitted_groups
             while request.num_groups == -1 or submitted_groups < request.num_groups:
