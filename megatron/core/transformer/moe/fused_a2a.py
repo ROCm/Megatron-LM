@@ -347,6 +347,7 @@ def get_mori_op(
     data_type: torch.dtype = torch.bfloat16,
     kernel_type=None,
     fp8_dispatch: bool = False,
+    use_standard_api: bool = False,
 ):
     """Get or create the MORI EpDispatchCombineOp.
 
@@ -362,6 +363,11 @@ def get_mori_op(
         data_type: Token data type.
         kernel_type: MORI kernel type. Auto-selected if None.
         fp8_dispatch: Whether dispatch uses FP8.
+        use_standard_api: When True, downstream callers will use MORI's
+            standard MoE APIs (dispatch_standard_moe / combine_standard_moe).
+            Those kernels are only implemented for IntraNode and
+            InterNodeV1LL, so kernel-type auto-selection is constrained
+            accordingly when this flag is set.
     """
     global _mori_op
 
@@ -374,8 +380,39 @@ def get_mori_op(
     if kernel_type is None:
         if world_size <= 8:
             kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
+        elif use_standard_api:
+            # dispatch_standard_moe / combine_standard_moe only support
+            # IntraNode + InterNodeV1LL (see mori/ops/dispatch_combine.py
+            # `dispatch_standard_moe only supports IntraNode/InterNodeV1LL`).
+            # Force InterNodeV1LL for multi-node std-API runs.
+            kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1LL
         else:
             kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+
+    if use_standard_api:
+        # Hard constraint, not a recommendation: MORI only compiles the
+        # `_stdmoe` kernel variants for IntraNode and InterNodeV1LL (gated
+        # on ENABLE_STANDARD_MOE_ADAPT=ON). Any other kernel_type fails at
+        # the C++ launch with `ValueError: dispatch_standard_moe only
+        # supports IntraNode/InterNodeV1LL` (mori/ops/dispatch_combine.py
+        # raises this in both dispatch_standard_moe and
+        # combine_standard_moe). Fail fast here with a Megatron-side
+        # message instead of letting the launch fail mid-iteration.
+        _STD_API_KERNELS = (
+            mori.ops.EpDispatchCombineKernelType.IntraNode,
+            mori.ops.EpDispatchCombineKernelType.InterNodeV1LL,
+        )
+        if kernel_type not in _STD_API_KERNELS:
+            raise ValueError(
+                "use_standard_api=True requires kernel_type in "
+                "(IntraNode, InterNodeV1LL); got "
+                f"{getattr(kernel_type, 'name', kernel_type)}. "
+                "MORI's standard MoE adaptor only compiles _stdmoe kernel "
+                "variants for those two transports. Either drop "
+                "--moe-mori-kernel-type to use Megatron's auto-selection "
+                "(IntraNode for world_size<=8, InterNodeV1LL otherwise), "
+                "or pick one of IntraNode / InterNodeV1LL explicitly."
+            )
 
     dispatch_dtype = torch.float8_e4m3fnuz if fp8_dispatch else data_type
     scale_dim = hidden_dim // 128 if fp8_dispatch else 0
@@ -677,6 +714,269 @@ class MoriCombine(torch.autograd.Function):
         )
 
 
+class MoriDispatchStandard(torch.autograd.Function):
+    """Fused dispatch using MORI's standard MoE API (3-D pre-binned output).
+
+    Calls `op.dispatch_standard_moe`, which performs the all-to-all and the
+    expert-bin packing in a single kernel launch. Returns:
+
+    - `packed_recv_x` of shape `[num_local_experts, max_tokens_per_expert,
+      hidden_dim]`, with rows `[e, :counts[e], :]` containing the actual
+      tokens routed to local expert `e`. Slots beyond `counts[e]` are
+      undefined and must be masked out by the consumer.
+    - `packed_recv_count` of shape `[num_local_experts]`, dtype `int32`,
+      containing per-expert receive counts. This is a non-owning view into
+      MORI's internal state and is cloned here so it survives across
+      iterations.
+
+    Routing weights are NOT applied to data inside this kernel. They are
+    applied at combine time by `op.combine_standard_moe`. The forward
+    therefore preserves the same token-wise math as the raw 2-D path —
+    `output_token = sum_e prob_{token,e} * expert_e(x_token)` — by
+    deferring the weight multiplication to combine. Consumers feeding the
+    expert MLP should pass `permuted_probs = ones_like(...)` (or skip the
+    output-weighting step) so weights are not applied twice.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,
+        token_indices,
+        token_probs,
+        num_experts,
+        group,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
+    ):
+        """Forward pass: dispatch tokens via MORI's standard 3-D API."""
+        hidden_dim = x.shape[1]
+        op = get_mori_op(
+            group=group,
+            hidden_dim=hidden_dim,
+            num_local_experts=num_local_experts,
+            router_topk=router_topk,
+            max_num_tokens_per_rank=max_num_tokens_per_rank,
+            data_type=x.dtype,
+            fp8_dispatch=fp8_dispatch,
+            use_standard_api=True,
+        )
+
+        # `dispatch_standard_moe` requires MORI built with
+        # ENABLE_STANDARD_MOE_ADAPT=ON. Surface a clearer error than the
+        # bare `RuntimeError("dispatch_standard_moe is not available...")`
+        # raised by the Python wrapper.
+        if not hasattr(op, "dispatch_standard_moe"):
+            raise RuntimeError(
+                "MORI's dispatch_standard_moe is unavailable on this build. "
+                "Rebuild MORI with ENABLE_STANDARD_MOE_ADAPT=ON, or disable "
+                "--moe-mori-use-standard-api."
+            )
+
+        packed_recv_x, packed_recv_count, packed_recv_src_info, packed_recv_layout_range = (
+            _run_mori_op_on_stream(
+                lambda: op.dispatch_standard_moe(
+                    x, token_probs.float(), None, token_indices.to(torch.int32)
+                ),
+                async_finish,
+                allocate_on_comm_stream,
+            )
+        )
+
+        # `packed_recv_count` is a non-owning view into MORI's internal
+        # symmetric heap (see `from_gpu_ptr` in
+        # mori/ops/dispatch_combine.py:get_standard_moe_packed_recv_count_ptr).
+        # The next iteration's reset will clobber it; clone so the value
+        # survives across the boundary that downstream Python code crosses.
+        packed_recv_count = packed_recv_count.clone()
+
+        ctx.group = group
+        ctx.num_local_experts = num_local_experts
+        ctx.router_topk = router_topk
+        ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        # Save sender-side indices/probs for backward; these are what
+        # combine_standard_moe needs to reverse the routing.
+        ctx.save_for_backward(token_indices, token_probs)
+
+        return (
+            packed_recv_x,
+            packed_recv_count,
+            packed_recv_src_info,
+            packed_recv_layout_range,
+        )
+
+    @staticmethod
+    def backward(
+        ctx,
+        grad_packed_x,
+        grad_count,
+        grad_src_info,
+        grad_layout_range,
+    ):
+        """Backward pass: route grads back via combine_standard_moe."""
+        token_indices, token_probs = ctx.saved_tensors
+        op = get_mori_op(
+            group=ctx.group,
+            hidden_dim=grad_packed_x.shape[2],
+            num_local_experts=ctx.num_local_experts,
+            router_topk=ctx.router_topk,
+            max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
+            data_type=grad_packed_x.dtype,
+            fp8_dispatch=ctx.fp8_dispatch,
+            use_standard_api=True,
+        )
+        num_tokens = token_indices.shape[0]
+        # combine_standard_moe applies `weights` to data while reducing.
+        # Pass token_probs to mirror the existing raw-path backward, which
+        # invokes `op.combine(grad_output, weights=recv_token_probs, ...)`
+        # — semantics: gradient of weighted sum-combine is the dispatch of
+        # weighted grads back to the source position.
+        combined_x, _ = _run_mori_op_on_stream(
+            lambda: op.combine_standard_moe(
+                grad_packed_x.contiguous(),
+                token_probs.float(),
+                token_indices.to(torch.int32),
+                call_reset=True,
+            ),
+            ctx.async_finish,
+            ctx.allocate_on_comm_stream,
+        )
+        # combine_standard_moe returns a non-owning view sized to
+        # [max_num_inp_token_per_rank, hidden_dim]; slice + clone so the
+        # gradient survives MORI's reset and matches `x`'s shape.
+        combined_x = combined_x[:num_tokens].clone()
+        return (
+            combined_x,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
+class MoriCombineStandard(torch.autograd.Function):
+    """Fused combine using MORI's standard MoE API (3-D input layout).
+
+    Inverse of `MoriDispatchStandard`. Accepts a 3-D
+    `[num_local_experts, max_tokens_per_expert, hidden_dim]` buffer where
+    rows `[e, :counts[e], :]` are the expert outputs for local expert `e`,
+    and routes them back to the original sender ranks. Routing weights
+    `token_probs` (sender-side `[num_tokens, topk]`) are applied by the
+    kernel as part of the weighted reduction.
+    """
+
+    @staticmethod
+    def forward(
+        ctx,
+        x,  # [num_local_experts, max_tokens_per_expert, hidden_dim]
+        group,
+        token_indices,
+        token_probs,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
+    ):
+        """Forward pass: combine 3-D expert outputs back to sender ranks."""
+        hidden_dim = x.shape[2]
+        op = get_mori_op(
+            group=group,
+            hidden_dim=hidden_dim,
+            num_local_experts=num_local_experts,
+            router_topk=router_topk,
+            max_num_tokens_per_rank=max_num_tokens_per_rank,
+            data_type=x.dtype,
+            fp8_dispatch=fp8_dispatch,
+            use_standard_api=True,
+        )
+
+        if not hasattr(op, "combine_standard_moe"):
+            raise RuntimeError(
+                "MORI's combine_standard_moe is unavailable on this build. "
+                "Rebuild MORI with ENABLE_STANDARD_MOE_ADAPT=ON, or disable "
+                "--moe-mori-use-standard-api."
+            )
+
+        num_tokens = token_indices.shape[0]
+        combined_x, _ = _run_mori_op_on_stream(
+            lambda: op.combine_standard_moe(
+                x.contiguous(),
+                token_probs.float(),
+                token_indices.to(torch.int32),
+                call_reset=True,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
+        )
+        # See MoriDispatchStandard.backward: output is a non-owning view
+        # sized to the full max_num_inp_token_per_rank capacity. Slice and
+        # clone so combine_postprocess()'s `view(self.hidden_shape)` is
+        # correct and the buffer survives MORI's reset.
+        combined_x = combined_x[:num_tokens].clone()
+
+        ctx.group = group
+        ctx.num_local_experts = num_local_experts
+        ctx.router_topk = router_topk
+        ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
+        ctx.fp8_dispatch = fp8_dispatch
+        ctx.async_finish = async_finish
+        ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        ctx.save_for_backward(token_indices, token_probs)
+        return combined_x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Backward pass: dispatch grads via dispatch_standard_moe (3-D)."""
+        token_indices, token_probs = ctx.saved_tensors
+        op = get_mori_op(
+            group=ctx.group,
+            hidden_dim=grad_output.shape[1],
+            num_local_experts=ctx.num_local_experts,
+            router_topk=ctx.router_topk,
+            max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
+            data_type=grad_output.dtype,
+            fp8_dispatch=ctx.fp8_dispatch,
+            use_standard_api=True,
+        )
+        packed_grad_x, _, _, _ = _run_mori_op_on_stream(
+            lambda: op.dispatch_standard_moe(
+                grad_output.contiguous(),
+                token_probs.float(),
+                None,
+                token_indices.to(torch.int32),
+            ),
+            ctx.async_finish,
+            ctx.allocate_on_comm_stream,
+        )
+        return (
+            packed_grad_x,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+
+
 if HAVE_MORI:
 
     def mori_dispatch(
@@ -772,6 +1072,79 @@ if HAVE_MORI:
             allocate_on_comm_stream,
         )
 
+    def mori_dispatch_standard(
+        x,
+        token_indices,
+        token_probs,
+        num_experts,
+        group,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
+    ):
+        """Standard-API dispatch: returns 3-D pre-binned packed_recv_x.
+
+        Wraps `MoriDispatchStandard.apply`. The dispatcher consumes
+        `packed_recv_x [num_local_experts, max_tokens_per_expert, hidden_dim]`
+        + `packed_recv_count [num_local_experts]` directly, replacing the
+        Python-side `_indices_to_multihot` + `permute` chain with a single
+        mask-and-gather. See `MoriDispatchStandard` for the trade-off.
+
+        Returns:
+            Tuple of (packed_recv_x, packed_recv_count, packed_recv_src_info,
+            packed_recv_layout_range).
+        """
+        return MoriDispatchStandard.apply(
+            x.contiguous(),
+            token_indices,
+            token_probs,
+            num_experts,
+            group,
+            num_local_experts,
+            router_topk,
+            max_num_tokens_per_rank,
+            fp8_dispatch,
+            async_finish,
+            allocate_on_comm_stream,
+        )
+
+    def mori_combine_standard(
+        x,  # [num_local_experts, max_tokens_per_expert, hidden_dim]
+        group,
+        token_indices,
+        token_probs,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        fp8_dispatch=False,
+        async_finish=True,
+        allocate_on_comm_stream=True,
+    ):
+        """Standard-API combine: takes 3-D expert outputs, returns 2-D.
+
+        Wraps `MoriCombineStandard.apply`. Routing weights `token_probs`
+        (sender-side) are applied by the kernel during the weighted
+        reduction, so the upstream expert MLP should NOT pre-multiply
+        outputs by per-token-per-expert probs.
+        """
+        return MoriCombineStandard.apply(
+            x,
+            group,
+            token_indices,
+            token_probs,
+            num_local_experts,
+            router_topk,
+            max_num_tokens_per_rank,
+            fp8_dispatch,
+            async_finish,
+            allocate_on_comm_stream,
+        )
+
 else:
     mori_dispatch = None
     mori_combine = None
+    mori_dispatch_standard = None
+    mori_combine_standard = None

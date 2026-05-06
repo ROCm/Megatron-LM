@@ -1109,6 +1109,36 @@ def validate_args(args, defaults={}):
                 flush=True,
             )
 
+    # --moe-mori-use-standard-api preconditions: only meaningful with MORI
+    # enabled, and the only kernel-types it supports are IntraNode +
+    # InterNodeV1LL. Bail early so users don't waste a launch finding out.
+    if getattr(args, 'moe_mori_use_standard_api', False):
+        assert getattr(args, 'moe_enable_mori', False), (
+            '--moe-mori-use-standard-api requires --moe-enable-mori.'
+        )
+        kt = getattr(args, 'moe_mori_kernel_type', None)
+        if kt is not None and kt not in ('IntraNode', 'InterNodeV1LL'):
+            raise AssertionError(
+                f'--moe-mori-use-standard-api only supports kernel-types '
+                f'IntraNode and InterNodeV1LL (got {kt}). '
+                'Either drop --moe-mori-kernel-type to let Megatron auto-select, '
+                'or pick one of the two supported kernels.'
+            )
+        # combine_standard_moe applies routing weights itself, so the
+        # standard-API path sets `dispatched_probs = None`. The fine-grained
+        # MoE scheduler in `fine_grained_callables.py` detaches and
+        # re-attaches `dispatched_probs` between the dispatch and expert
+        # nodes, which would fail on None. Disallow the combination
+        # explicitly until the scheduler grows a "weights applied at
+        # combine" mode.
+        assert not getattr(args, 'overlap_moe_expert_parallel_comm', False), (
+            '--moe-mori-use-standard-api is not yet compatible with '
+            '--overlap-moe-expert-parallel-comm. The standard-API combine '
+            'applies routing weights inline, so the dispatcher returns '
+            'None for dispatched_probs and the fine-grained scheduler '
+            'cannot detach/re-attach them.'
+        )
+
     # Distributed checkpointing checks
     if args.use_dist_ckpt and args.use_legacy_models:
         raise RuntimeError('--use-dist-ckpt is not supported in legacy models.')
@@ -3670,6 +3700,19 @@ def _add_moe_args(parser):
                             'context_parallel_size, which is the exact upper bound on the per-rank '
                             'row count entering the MoE layer. Pass a value explicitly only to '
                             'pre-allocate a larger SHMEM buffer (e.g., for variable batch sizes).')
+    group.add_argument('--moe-mori-use-standard-api', action='store_true',
+                       help='[Experimental] Use MORI\'s standard MoE APIs (dispatch_standard_moe / '
+                            'combine_standard_moe) instead of the raw 2-D dispatch path. The standard '
+                            'APIs return a 3-D pre-binned [num_local_experts, max_tokens_per_expert, '
+                            'hidden_dim] buffer that is already grouped by local expert, which lets '
+                            'the dispatcher replace _indices_to_multihot + permute (5 kernels, plus a '
+                            'tokens_per_expert.sum().item() host sync) with a single fused mask-and-'
+                            'gather. Routing weights are applied at combine time by the kernel. Costs '
+                            '~num_local_experts x more peak dispatch buffer memory (each per-expert '
+                            'bin is sized for the worst case). Requires MORI built with '
+                            'ENABLE_STANDARD_MOE_ADAPT=ON. Only IntraNode and InterNodeV1LL kernel '
+                            'types are supported by the standard API; multi-node runs are forced to '
+                            'InterNodeV1LL when this flag is set.')
     group.add_argument('--moe-permute-fusion', action='store_true',
                        help='Fuse token rearrangement ops during token dispatching.')
     # Token dropping arguments

@@ -21,7 +21,9 @@ from megatron.core.transformer.moe.fused_a2a import (
     fused_combine,
     fused_dispatch,
     mori_combine,
+    mori_combine_standard,
     mori_dispatch,
+    mori_dispatch_standard,
     reset_mori_op,
     set_deepep_num_sms,
 )
@@ -1192,15 +1194,35 @@ class _MoriManager(_DispatchManager):
         self.capacity_factor = config.moe_expert_capacity_factor
         self.permute_fusion = config.moe_permute_fusion
         self.max_num_tokens_per_rank = config.moe_mori_max_tokens_per_rank
+        # When True, dispatch via MORI's standard MoE APIs (3-D pre-binned
+        # output) and replace the multihot+permute pipeline with a fused
+        # mask+gather. See MoriDispatchStandard in fused_a2a.py.
+        self.use_standard_api = getattr(config, "moe_mori_use_standard_api", False)
 
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
         self.handle = None
+        # Standard-API path stash (populated only when use_standard_api).
+        # `_packed_recv_x` is a 3-D [num_local_experts, max_tokens_per_expert,
+        # hidden_dim] buffer; `_packed_recv_count` is [num_local_experts]
+        # int32 (cloned, owning). `_compact_select_e/_compact_select_t`
+        # cache the (expert_idx, slot_idx) pairs that the gather selects so
+        # restoration can scatter back to the same slots without rebuilding
+        # the mask.
+        self._packed_recv_x: Optional[torch.Tensor] = None
+        self._packed_recv_count: Optional[torch.Tensor] = None
+        self._compact_select_e: Optional[torch.Tensor] = None
+        self._compact_select_t: Optional[torch.Tensor] = None
 
         if mori_dispatch is None:
             raise ImportError(
                 "MORI is not installed. Please install MORI package from "
                 "https://github.com/ROCm/mori."
+            )
+        if self.use_standard_api and mori_dispatch_standard is None:
+            raise ImportError(
+                "--moe-mori-use-standard-api requires MORI built with "
+                "ENABLE_STANDARD_MOE_ADAPT=ON."
             )
 
     def setup_metadata(self, routing_map: torch.Tensor, probs: torch.Tensor):
@@ -1231,6 +1253,39 @@ class _MoriManager(_DispatchManager):
         # to slice op.combine()'s output (which is shaped to the full
         # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
         self._sender_num_tokens = hidden_states.shape[0]
+
+        if self.use_standard_api:
+            # Standard-API path: receive 3-D pre-binned packed_recv_x +
+            # per-expert counts. The compaction to 2-D is deferred to
+            # get_permuted_hidden_states_by_experts so that we can also
+            # build the (expert_idx, slot_idx) selector tensors there and
+            # cache them for restoration.
+            packed_recv_x, packed_recv_count, _packed_src_info, _packed_layout = (
+                mori_dispatch_standard(
+                    hidden_states,  # [num_tokens, hidden_dim]
+                    self.token_indices,  # [num_tokens, topk]
+                    self.token_probs,  # [num_tokens, topk]
+                    self.num_experts,
+                    self.group,
+                    self.num_local_experts,
+                    self.router_topk,
+                    self.max_num_tokens_per_rank,
+                    async_finish=async_finish,
+                    allocate_on_comm_stream=allocate_on_comm_stream,
+                )
+            )
+            self._packed_recv_x = packed_recv_x
+            # `packed_recv_count` is already cloned by MoriDispatchStandard.
+            # Convert to int64 for downstream consumers (TE GroupedMLP
+            # expects int64 m_splits / tokens_per_expert).
+            self._packed_recv_count = packed_recv_count.to(torch.int64)
+            self.tokens_per_expert = self._packed_recv_count
+            # No receiver-side dispatched_indices/probs in this path —
+            # weights are applied by combine_standard_moe at combine time.
+            self.dispatched_indices = None
+            self.dispatched_probs = None
+            self._raw_dispatched_probs = None
+            return packed_recv_x
 
         hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, _ = (
             mori_dispatch(
@@ -1291,6 +1346,24 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
+        if self.use_standard_api:
+            # Standard-API combine takes the 3-D [E_local, T_max, H] buffer
+            # with sender-side `token_indices` + `token_probs`. The kernel
+            # applies `token_probs` to the data while reducing, so the
+            # expert MLP must NOT pre-weight outputs (the dispatcher above
+            # passes ones for permuted_probs to satisfy that contract).
+            return mori_combine_standard(
+                hidden_states,  # [E_local, T_max, H]
+                self.group,
+                self.token_indices,
+                self.token_probs,
+                self.num_local_experts,
+                self.router_topk,
+                self.max_num_tokens_per_rank,
+                async_finish=async_finish,
+                allocate_on_comm_stream=allocate_on_comm_stream,
+            )
+
         # NOTE: pass self._raw_dispatched_probs (receiver-side, [total_recv, topk])
         # rather than self.token_probs (sender-side, [N, topk]). The IntraNode
         # combine kernel reads weights indexed by totalRecvTokenNum; passing the
@@ -1339,6 +1412,57 @@ class _MoriManager(_DispatchManager):
         return routing_map, tokens_per_expert
 
     def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.use_standard_api:
+            # Standard-API path: `hidden_states` is already 3-D
+            # [E_local, T_max, H], grouped by local expert. Compact to a
+            # 2-D [sum(counts), H] buffer that downstream TE GroupedMLP
+            # expects, using a single mask + fancy index instead of
+            # _indices_to_multihot + permute. We also cache the (e, t)
+            # selectors so get_restored_hidden_states_by_experts can scatter
+            # the expert outputs back to the same 3-D slots without
+            # rebuilding the mask.
+            assert hidden_states.dim() == 3, (
+                "use_standard_api expects packed_recv_x [E_local, T_max, H] "
+                f"from MoriDispatchStandard, got shape {hidden_states.shape}"
+            )
+            num_local_experts, t_max, hidden_dim = hidden_states.shape
+            counts = self._packed_recv_count  # [E_local], int64, on device
+            # mask[e, t] = (t < counts[e])
+            arange_t = torch.arange(t_max, device=hidden_states.device)
+            mask = arange_t.unsqueeze(0) < counts.unsqueeze(1)  # [E_local, T_max]
+            # Cache selectors as int64 for advanced indexing on the
+            # restoration side. nonzero() introduces a small device sync
+            # to materialize the index list, but it replaces the much
+            # heavier _indices_to_multihot + permute path AND removes the
+            # `tokens_per_expert.sum().item()` host barrier the old
+            # `permute()` call required.
+            sel = mask.nonzero(as_tuple=True)
+            self._compact_select_e = sel[0]
+            self._compact_select_t = sel[1]
+
+            self.hidden_shape_before_permute = hidden_states.shape
+            permuted_input = hidden_states[self._compact_select_e, self._compact_select_t, :]
+
+            # combine_standard_moe applies token_probs at combine time, so
+            # the expert MLP gets unweighted inputs/outputs. Hand
+            # downstream a unit-prob tensor that matches the permuted layout
+            # and dtype expected by SequentialMLP / TEGroupedMLP. Using
+            # ones is mathematically correct iff the expert MLP applies
+            # `permuted_probs` multiplicatively to its output (or as a
+            # right-multiplication on the up/gate projection), since
+            #     sum_e w_e * expert_e(x_token)
+            # is bilinear in (w_e, expert_e). If a future MLP variant
+            # treats permuted_probs nonlinearly, this assumption will need
+            # revisiting.
+            permuted_probs = torch.ones(
+                permuted_input.shape[0],
+                dtype=torch.float32,
+                device=hidden_states.device,
+            )
+            if self.router_dtype == "fp64":
+                permuted_probs = permuted_probs.to(torch.float64)
+            return permuted_input, permuted_probs
+
         if is_experimental_enabled() and self.permute_fusion:
             self.dispatched_routing_map, self.dispatched_probs = fused_indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs, self.num_local_experts
@@ -1367,6 +1491,25 @@ class _MoriManager(_DispatchManager):
         return hidden_states, permuted_probs
 
     def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.use_standard_api:
+            # Inverse of the compaction above. `hidden_states` is the
+            # expert output [sum(counts), H]; scatter back to the 3-D
+            # [E_local, T_max, H] layout combine_standard_moe expects.
+            # Slots beyond counts[e] are left zero — the kernel never
+            # reads them (it walks tokens by sender-side metadata, not by
+            # iterating the full bin).
+            assert self._compact_select_e is not None and self._compact_select_t is not None, (
+                "get_restored_hidden_states_by_experts called before "
+                "get_permuted_hidden_states_by_experts under use_standard_api"
+            )
+            restored = torch.zeros(
+                self.hidden_shape_before_permute,
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
+            restored[self._compact_select_e, self._compact_select_t, :] = hidden_states
+            return restored
+
         hidden_states = unpermute(
             hidden_states,
             self.reversed_mapping_for_combine,

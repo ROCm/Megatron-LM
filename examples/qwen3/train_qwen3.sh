@@ -438,6 +438,18 @@ if [ "$IS_MOE" -eq 1 ]; then
         # SEQ_LEN, TP, SP, and CP. Pass an explicit value here only to
         # over-provision the symmetric SHMEM heap (e.g. for variable batch).
         moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-mori"
+        # Optional: opt into MORI's standard MoE APIs (3-D pre-binned
+        # dispatch + fused weighted combine). Eliminates the
+        # _indices_to_multihot + permute pipeline (5 kernels + a
+        # tokens_per_expert.sum().item() host sync) at the cost of
+        # ~num_local_experts x more peak dispatch buffer memory. Requires
+        # MORI built with ENABLE_STANDARD_MOE_ADAPT=ON. Multi-node runs
+        # auto-select InterNodeV1LL since dispatch_standard_moe doesn't
+        # support InterNodeV1.
+        if [ "${ENABLE_MORI_STANDARD_API:-false}" = true ]; then
+            moe_options="${moe_options} --moe-mori-use-standard-api"
+            echo "[INFO] MORI EP: --moe-mori-use-standard-api enabled"
+        fi
     else
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
     fi

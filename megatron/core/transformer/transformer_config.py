@@ -578,6 +578,20 @@ class TransformerConfig(ModelParallelConfig):
     config; pass an explicit value only to pre-allocate a larger SHMEM heap
     for variable-batch scenarios."""
 
+    moe_mori_use_standard_api: bool = False
+    """[Experimental] Use MORI's standard MoE APIs (dispatch_standard_moe /
+    combine_standard_moe) instead of the raw 2-D dispatch path. The standard
+    APIs return a 3-D pre-binned [num_local_experts, max_tokens_per_expert,
+    hidden_dim] buffer that is already grouped by local expert; the dispatcher
+    then replaces _indices_to_multihot + permute (5 kernels + a host
+    `tokens_per_expert.sum().item()` sync) with a single fused mask-and-gather.
+    Routing weights are applied at combine time by combine_standard_moe.
+    Costs ~num_local_experts x more peak dispatch buffer memory because each
+    per-expert bin is sized for the worst case (no slack-sharing across bins).
+    Requires MORI built with ENABLE_STANDARD_MOE_ADAPT=ON. Only IntraNode and
+    InterNodeV1LL kernel types are supported by the standard API (multi-node
+    runs are forced to InterNodeV1LL when this flag is set)."""
+
     moe_per_layer_logging: bool = False
     """Enable per-layer logging for MoE, currently supports auxiliary loss and z loss."""
 
