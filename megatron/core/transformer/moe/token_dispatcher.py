@@ -2,10 +2,12 @@
 
 import logging
 from abc import ABC, abstractmethod
+import os
 from typing import List, Optional, Tuple
 
 import torch
 
+from megatron.core import utils
 from megatron.core.config import is_experimental_enabled
 from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.fusions.fused_indices_converter import fused_indices_to_multihot
@@ -21,7 +23,7 @@ from megatron.core.transformer.moe.fused_a2a import (
     set_deepep_num_sms,
 )
 from megatron.core.transformer.moe.moe_utils import (
-    ModelCommProcessGroups,
+    ProcessGroupCollection,
     get_capacity,
     maybe_move_tensor_to_cpu,
     pad_routing_map,
@@ -49,26 +51,26 @@ class MoETokenDispatcher:
     """
 
     def __init__(
-        self, config: TransformerConfig, model_comm_pgs: Optional[ModelCommProcessGroups] = None
+        self, config: TransformerConfig, pg_collection: Optional[ProcessGroupCollection] = None
     ) -> None:
         """
         Initialize the MoE Token Dispatcher.
 
         Args:
             config (TransformerConfig): Configuration for the MoE layer.
-            model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
         self.config = config
         self.shared_experts: Optional[SharedExpertMLP] = None
 
-        self.ep_group = model_comm_pgs.ep
-        # use model_comm_pgs.expt_tp_group as tensor parallel group in this module.
-        self.tp_group = model_comm_pgs.expt_tp
-        self.tp_ep_group = model_comm_pgs.tp_ep
+        self.ep_group = pg_collection.ep
+        # use pg_collection.expt_tp_group as tensor parallel group in this module.
+        self.tp_group = pg_collection.expt_tp
+        self.tp_ep_group = pg_collection.tp_ep
 
-        self.tp_size = self.tp_group.size()
-        self.tp_rank = self.tp_group.rank()
-        self.ep_size = self.ep_group.size()
+        self.tp_size = utils.get_pg_size(self.tp_group)
+        self.tp_rank = utils.get_pg_rank(self.tp_group)
+        self.ep_size = utils.get_pg_size(self.ep_group)
 
     @abstractmethod
     def dispatch_preprocess(
@@ -204,7 +206,7 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         num_local_experts: int,
         local_expert_indices: List[int],
         config: TransformerConfig,
-        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
     ) -> None:
         """Initialize the AllGather based token dispatcher.
 
@@ -212,9 +214,9 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
             num_local_experts (int): Number of local experts.
             local_expert_indices (List[int]): Indices of local experts.
             config (TransformerConfig): Configuration for the MoE layer.
-            model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
-        super().__init__(config=config, model_comm_pgs=model_comm_pgs)
+        super().__init__(config=config, pg_collection=pg_collection)
         self.num_local_experts = num_local_experts
         assert self.num_local_experts > 0, "Expected at least one expert"
         self.local_expert_indices = local_expert_indices
@@ -351,7 +353,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         num_local_experts: int,
         local_expert_indices: List[int],
         config: TransformerConfig,
-        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
     ) -> None:
         """
         Initialize the AlltoAll token dispatcher.
@@ -360,9 +362,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             num_local_experts (int): Number of local experts on the current device.
             local_expert_indices (List[int]): Indices of local experts on the current device.
             config (TransformerConfig): Configuration for the transformer model.
-            model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
-        super().__init__(config=config, model_comm_pgs=model_comm_pgs)
+        super().__init__(config=config, pg_collection=pg_collection)
         self.num_local_experts = num_local_experts
         assert config.num_moe_experts is not None
         self.num_experts = config.num_moe_experts
@@ -580,6 +582,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             else:
                 self.routing_map = pad_routing_map(self.routing_map, pad_multiple)
         self.tokens_per_expert = self.preprocess(self.routing_map)
+        self.tokens_per_expert_gpu = self.tokens_per_expert
 
         if self.shared_experts is not None:
             self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
@@ -700,7 +703,12 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             "before_finish", self.tokens_per_expert
         )
         self.tokens_per_expert = None
+        if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON") == "1":
+            tokens_per_expert_gpu = self.tokens_per_expert_gpu.to(torch.int32)
+            self.tokens_per_expert_gpu = None
+            return global_input_tokens, (tokens_per_expert, tokens_per_expert_gpu), global_probs
         return global_input_tokens, tokens_per_expert, global_probs
+        
 
     def combine_preprocess(self, hidden_states):
         """Prepares hidden states for token combination after expert computations.
@@ -1145,7 +1153,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         num_local_experts: int,
         local_expert_indices: List[int],
         config: TransformerConfig,
-        model_comm_pgs: Optional[ModelCommProcessGroups] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         """
         Initialize the Flex token dispatcher.
@@ -1154,9 +1162,9 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             num_local_experts (int): Number of local experts on the current device.
             local_expert_indices (List[int]): Indices of local experts on the current device.
             config (TransformerConfig): Configuration for the transformer model.
-            model_comm_pgs (ModelCommProcessGroups, optional): Process groups for MoE operations.
+            pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
         """
-        super().__init__(config=config, model_comm_pgs=model_comm_pgs)
+        super().__init__(config=config, pg_collection=pg_collection)
 
         self.num_local_experts = num_local_experts
         self.local_expert_indices = local_expert_indices

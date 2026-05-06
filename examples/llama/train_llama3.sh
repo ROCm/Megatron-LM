@@ -1,6 +1,6 @@
 #!/bin/bash
 ###############################################################################
-# Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2024 - 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 #################################################################################
@@ -10,7 +10,12 @@
 export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
 export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
 export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
-NCCL_IB_HCA_LIST=$(rdma link -j | python3 -c "import sys, json; links=json.load(sys.stdin);names=[links[i]['ifname'] for i in range(8)]; print(*names,sep=',')")
+NCCL_IB_HCA_LIST=$(rdma link -j 2>/dev/null | python3 -c "import json, sys
+try:
+    links = json.load(sys.stdin)
+    print(*[links[i][\"ifname\"] for i in range(min(8, len(links)))], sep=',')
+except Exception:
+    pass") || NCCL_IB_HCA_LIST=""
 export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
 export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
 export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
@@ -35,7 +40,7 @@ TIME_STAMP=$(date +"%Y-%m-%d_%H-%M-%S")
 EXP_NAME="${EXP_NAME:-perf}"
 
 TEE_OUTPUT="${TEE_OUTPUT:-1}"
-USE_FLASH_ATTN="${USE_FLASH_ATTN:-1}"
+USE_FLASH_ATTN="${USE_FLASH_ATTN:-0}"
 NO_TRAINING="${NO_TRAINING:-0}" # NO_TRAINING=1: for computing metrics only
 ENABLE_PROFILING="${ENABLE_PROFILING:-0}" #enable pytorch profiling
 echo "NO_TRAINING=$NO_TRAINING"
@@ -88,6 +93,8 @@ DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
+ENABLE_HSDP="${ENABLE_HSDP:-0}"
+HSDP_NUM_REPLICAS="${HSDP_NUM_REPLICAS:-2}"
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
@@ -95,6 +102,18 @@ if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
         echo "Resetting TP=$TP"
+    fi
+fi
+
+if [ "$ENABLE_HSDP" -eq 1 ]; then
+    if [ "$MEGATRON_FSDP" -ne 1 ]; then
+        echo "Error: HSDP requires MEGATRON_FSDP=1"
+        exit 1
+    fi
+    
+    if [ "$HSDP_NUM_REPLICAS" -lt 2 ]; then
+        echo "Error: HSDP_NUM_REPLICAS must be >= 2 when ENABLE_HSDP=1."
+        exit 1
     fi
 fi
 
@@ -281,6 +300,8 @@ fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-flash-attn"
+else
+    EXTRA_ARGS="$EXTRA_ARGS --attention-backend fused"
 fi
 
 if [ "$SEQ_PARALLEL" -eq 1 ]; then
@@ -350,6 +371,11 @@ fi
 
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
+    
+    if [ "$ENABLE_HSDP" -eq 1 ]; then
+        echo "Megatron HSDP is enabled with $HSDP_NUM_REPLICAS DP outer replicas"
+        EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_REPLICAS"
+    fi
 fi
 
 run_cmd="

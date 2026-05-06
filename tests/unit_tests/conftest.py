@@ -64,12 +64,19 @@ def tmp_path_dist_ckpt(tmp_path_factory) -> Path:
     tmp_dir = tmp_path_factory.mktemp('ignored', numbered=False)
     tmp_dir = tmp_dir.parent.parent / 'tmp_dist_ckpt'
 
+    # Ensure directory exists for all ranks
+    os.makedirs(tmp_dir, exist_ok=True)
+    
     if Utils.rank == 0:
         with TempNamedDir(tmp_dir, sync=False):
             yield tmp_dir
+            if torch.distributed.is_initialized():
+                torch.distributed.barrier()
 
     else:
         yield tmp_dir
+        if torch.distributed.is_initialized():
+            torch.distributed.barrier()
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -95,3 +102,17 @@ def ensure_test_data():
             # Don't fail the tests, just warn
     else:
         print("Test data already available at /opt/data")
+
+
+@pytest.fixture(autouse=True)
+def reset_env_vars():
+    """Reset environment variables"""
+    # Store the original environment variables before the test
+    original_env = dict(os.environ)
+
+    # Run the test
+    yield
+
+    # After the test, restore the original environment
+    os.environ.clear()
+    os.environ.update(original_env)
