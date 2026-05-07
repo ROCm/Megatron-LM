@@ -1,4 +1,4 @@
-ARG BASE_DOCKER=rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+ARG BASE_DOCKER=registry-sc-harbor.amd.com/framework/te-ci:rocm-7.2_ubuntu22.04_py3.11_pytorch_release-2.8_08d38866_jax_0.8.0_fa_2.8.1_aiter_77455e3ecf
 FROM $BASE_DOCKER
 
 ARG PYTORCH_ROCM_ARCH_OVERRIDE="gfx942"
@@ -106,6 +106,60 @@ RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
     cd Emerging-Optimizers &&\
     git checkout v0.1.0 &&\
     pip install --no-build-isolation .
+
+# ── Build rocSHMEM ─────────────────────────────────────────────────
+ARG ROCSHMEM_BACKEND=mlx5
+WORKDIR ${STAGE_DIR}
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        autoconf automake libtool flex locales libibverbs-dev && \
+    locale-gen en_US.UTF-8 && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/ROCm/rocSHMEM.git
+
+WORKDIR ${STAGE_DIR}/rocSHMEM/build
+RUN if [ "${ROCSHMEM_BACKEND}" = "mlx5" ]; then \
+        export CMAKE_PREFIX_PATH=/opt/rocm/lib/cmake/ && \
+        ../scripts/build_configs/gda_mlx5 -DUSE_IPC=ON; \
+    else \
+        ../scripts/build_configs/ro_ipc; \
+    fi
+
+ENV BUILD_DIR=${STAGE_DIR}/dependencies
+WORKDIR ${STAGE_DIR}/rocSHMEM
+RUN bash scripts/install_dependencies.sh
+
+ENV MPI_ROOT=${STAGE_DIR}/dependencies/install/ompi \
+    OMPI_DIR=${STAGE_DIR}/dependencies/install/ompi
+ENV PATH=${MPI_ROOT}/bin:${MPI_ROOT}/sbin:${PATH} \
+    LD_LIBRARY_PATH=${MPI_ROOT}/lib:${LD_LIBRARY_PATH:-} \
+    C_INCLUDE_PATH=${MPI_ROOT}/include:${C_INCLUDE_PATH:-} \
+    CPLUS_INCLUDE_PATH=${MPI_ROOT}/include:${CPLUS_INCLUDE_PATH:-} \
+    PKG_CONFIG_PATH=${MPI_ROOT}/lib/pkgconfig:${PKG_CONFIG_PATH:-} \
+    MANPATH=${MPI_ROOT}/share/man:${MANPATH:-} \
+    CMAKE_C_COMPILER=${MPI_ROOT}/bin/mpicc \
+    CMAKE_CXX_COMPILER=${MPI_ROOT}/bin/mpicxx
+
+# ── Build & install DeepEP ─────────────────────────────────────────
+ARG DEEPEP_REPO=public
+WORKDIR ${STAGE_DIR}
+RUN if [ "${DEEPEP_REPO}" = "private" ]; then \
+        git clone https://github.com/ROCm/deepEP_private.git && \
+        cd deepEP_private && git checkout develop; \
+    else \
+        git clone https://github.com/ROCm/DeepEP.git && \
+        cd DeepEP; \
+    fi
+
+RUN REPO_DIR=$([ "${DEEPEP_REPO}" = "private" ] && echo "deepEP_private" || echo "DeepEP") && \
+    cd ${STAGE_DIR}/${REPO_DIR} && \
+    ROCSHMEM_DIR=/root/rocshmem \
+    OMPI_DIR=${STAGE_DIR}/dependencies/install/ompi \
+    CFLAGS="-O3 -fPIC" \
+    CXXFLAGS="-O3 -fPIC --offload-arch=${PYTORCH_ROCM_ARCH}" \
+    HIP_CXX_FLAGS="-O3 -fPIC" \
+    python setup.py --variant rocm build develop
 
 WORKDIR $WORKSPACE_DIR
 COPY . Megatron-LM
