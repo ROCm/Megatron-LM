@@ -112,7 +112,7 @@ ARG ROCSHMEM_BACKEND=mlx5
 WORKDIR ${STAGE_DIR}
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        autoconf automake libtool flex locales libibverbs-dev && \
+        cmake autoconf automake libtool flex locales libibverbs-dev && \
     locale-gen en_US.UTF-8 && \
     rm -rf /var/lib/apt/lists/*
 
