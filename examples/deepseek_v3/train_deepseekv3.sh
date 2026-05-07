@@ -375,7 +375,7 @@ elif [ $ENABLE_MORI = true ]; then
     moe_options=" \
             ${moe_options} \
             --moe-token-dispatcher-type flex \
-            --moe-enable-mori \
+            --moe-flex-dispatcher-backend mori \
         "
 else 
     moe_options=" \

@@ -623,6 +623,12 @@ def get_mori_op(
     if _mori_op is not None:
         return _mori_op
 
+    if max_num_tokens_per_rank is None:
+        raise ValueError(
+            "max_num_tokens_per_rank must not be None for MORI EP. "
+            "Set --moe-mori-max-tokens-per-rank (e.g. to micro_batch_size * seq_length)."
+        )
+
     world_size = group.size()
     rank = torch.distributed.get_rank(group)
 

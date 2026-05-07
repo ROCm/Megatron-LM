@@ -1148,7 +1148,7 @@ def validate_args(args, defaults={}):
     # over-allocates the symmetric SHMEM heap (linear in this value), so
     # default to the exact upper bound and let the user override it for
     # variable-batch scenarios.
-    if getattr(args, 'moe_enable_mori', False) and args.moe_mori_max_tokens_per_rank is None:
+    if getattr(args, 'moe_flex_dispatcher_backend', None) == 'mori' and args.moe_mori_max_tokens_per_rank is None:
         per_rank_tokens = args.micro_batch_size * args.seq_length
         if args.context_parallel_size > 1:
             per_rank_tokens //= args.context_parallel_size

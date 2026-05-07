@@ -437,7 +437,7 @@ if [ "$IS_MOE" -eq 1 ]; then
         # `megatron/training/arguments.py:validate_args` from MICRO_BATCH_SIZE,
         # SEQ_LEN, TP, SP, and CP. Pass an explicit value here only to
         # over-provision the symmetric SHMEM heap (e.g. for variable batch).
-        moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-mori"
+        moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-flex-dispatcher-backend mori"
     else
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
     fi

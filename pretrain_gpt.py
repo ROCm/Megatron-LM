@@ -22,7 +22,15 @@ def _mori_early_bootstrap():
     import os as _os
     import sys as _sys
 
-    if not any(arg == "--moe-enable-mori" for arg in _sys.argv):
+    _mori_requested = (
+        any(
+            _sys.argv[i] == "--moe-flex-dispatcher-backend"
+            and i + 1 < len(_sys.argv)
+            and _sys.argv[i + 1] == "mori"
+            for i in range(len(_sys.argv))
+        )
+    )
+    if not _mori_requested:
         return
     if not all(k in _os.environ for k in ("RANK", "WORLD_SIZE", "LOCAL_RANK")):
         return

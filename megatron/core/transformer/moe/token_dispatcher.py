@@ -1602,10 +1602,11 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
                 config=self.config,
             )
             self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.routing_map']
-        elif self.config.moe_flex_dispatcher_backend == "hybridep":
+        elif self.config.moe_flex_dispatcher_backend == "mori":
             self._comm_manager = _MoriManager(
                 group=self.tp_ep_group,
                 num_local_experts=self.num_local_experts,
+                router_topk=self.tp_size * self.config.moe_router_topk,
                 num_experts=self.tp_size * self.config.num_moe_experts,
                 config=self.config,
             )
@@ -1614,7 +1615,8 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             raise ValueError(
                 f"Invalid backend: {self.config.moe_flex_dispatcher_backend}"
                 "Please set --moe-flex-dispatcher-backend=deepep or "
-                "--moe-flex-dispatcher-backend=hybridep"
+                "--moe-flex-dispatcher-backend=hybridep or "
+                "--moe-flex-dispatcher-backend=mori"
             )
 
     def set_shared_experts(self, shared_experts):
