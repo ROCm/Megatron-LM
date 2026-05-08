@@ -628,10 +628,14 @@ def get_mori_op(
     kernel_type=None,
     fp8_dispatch: bool = False,
 ):
-    """Get or create the MORI EpDispatchCombineOp.
+    """Return the process-wide :class:`EpDispatchCombineOp`, creating it once.
 
-    Lazily creates the operator on first call. Subsequent calls return the
-    cached operator.
+    Dispatch and combine in the same forward pass share this instance; do not
+    call :func:`reset_mori_op` between dispatch and combine.
+
+    Call :func:`reset_mori_op` when MoE layout or sizing changes (e.g. pytest
+    teardown between parametrized ``(tp_size, ep_size)`` cases) so the next
+    call builds a new op with the right ``num_experts_per_rank`` / buffers.
 
     Args:
         group: Process group for EP communication.
@@ -645,23 +649,24 @@ def get_mori_op(
     """
     global _mori_op
 
-    if _mori_op is not None:
-        return _mori_op
-
     if max_num_tokens_per_rank is None:
         raise ValueError(
             "max_num_tokens_per_rank must not be None for MORI EP. "
             "Set --moe-mori-max-tokens-per-rank (e.g. to micro_batch_size * seq_length)."
         )
 
+    if _mori_op is not None:
+        return _mori_op
+
     world_size = group.size()
     rank = torch.distributed.get_rank(group)
 
-    if kernel_type is None:
+    resolved_kernel_type = kernel_type
+    if resolved_kernel_type is None:
         if world_size <= 8:
-            kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
+            resolved_kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
         else:
-            kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+            resolved_kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
 
     dispatch_dtype = torch.float8_e4m3fnuz if fp8_dispatch else data_type
     scale_dim = hidden_dim // 128 if fp8_dispatch else 0
@@ -677,7 +682,7 @@ def get_mori_op(
         max_num_inp_token_per_rank=max_num_tokens_per_rank,
         num_experts_per_rank=num_local_experts,
         num_experts_per_token=router_topk,
-        kernel_type=kernel_type,
+        kernel_type=resolved_kernel_type,
     )
 
     _mori_op = mori.ops.EpDispatchCombineOp(config)
@@ -685,10 +690,16 @@ def get_mori_op(
 
 
 def reset_mori_op():
-    """Reset the MORI operator state between iterations."""
+    """Clear the global MORI op so the next :func:`get_mori_op` allocates fresh.
+
+    Calls :meth:`~mori.ops.EpDispatchCombineOp.reset` when present, then drops
+    the reference. Use after tests or when changing EP/TP layout so config
+    (e.g. ``num_experts_per_rank``) cannot mismatch the cached handle.
+    """
     global _mori_op
     if _mori_op is not None:
         _mori_op.reset()
+    _mori_op = None
 
 
 class MoriDispatch(torch.autograd.Function):
