@@ -1377,6 +1377,12 @@ class _MoriManager(_DispatchManager):
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
         self.handle = None
+        # Receiver-side caches populated in dispatch() and consumed by
+        # combine(). MORI's op.combine() needs the receiver-side global
+        # `dispatched_indices_global` and receiver-side `_raw_dispatched_probs`
+        # — see the matching note in `dispatch()` for the rationale.
+        self._raw_dispatched_probs: Optional[torch.Tensor] = None
+        self._raw_dispatched_indices: Optional[torch.Tensor] = None
 
         if mori_dispatch is None:
             raise ImportError(
@@ -1413,19 +1419,23 @@ class _MoriManager(_DispatchManager):
         # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
         self._sender_num_tokens = hidden_states.shape[0]
 
-        hidden_states, dispatched_indices, dispatched_probs, num_tokens_per_expert, _ = (
-            mori_dispatch(
-                hidden_states, # [num_tokens, hidden_dim]
-                self.token_indices, # [num_tokens, topk]
-                self.token_probs, # [num_tokens, topk]
-                self.num_experts,
-                self.group,
-                self.num_local_experts,
-                self.router_topk,
-                self.max_num_tokens_per_rank,
-                async_finish=async_finish,
-                allocate_on_comm_stream=allocate_on_comm_stream,
-            )
+        (
+            hidden_states,
+            dispatched_indices,
+            dispatched_probs,
+            num_tokens_per_expert,
+            dispatched_indices_global,
+        ) = mori_dispatch(
+            hidden_states,  # [num_tokens, hidden_dim]
+            self.token_indices,  # [num_tokens, topk]
+            self.token_probs,  # [num_tokens, topk]
+            self.num_experts,
+            self.group,
+            self.num_local_experts,
+            self.router_topk,
+            self.max_num_tokens_per_rank,
+            async_finish=async_finish,
+            allocate_on_comm_stream=allocate_on_comm_stream,
         )
         self.tokens_per_expert = num_tokens_per_expert
         self.dispatched_indices = dispatched_indices
@@ -1438,6 +1448,14 @@ class _MoriManager(_DispatchManager):
         # caused a ~1.1 MiB OOB read per combine and the Memory access fault
         # by GPU we observed on the second forward dispatch.
         self._raw_dispatched_probs = dispatched_probs
+        # Snapshot the receiver-side GLOBAL indices [total_recv, topk]
+        # (no -1 sentinels, GLOBAL expert ids in [0, num_experts)). MORI's
+        # op.combine() expects this format for its `indices` arg — passing
+        # the sender-side `self.token_indices` made the kernel sum only one
+        # source PE per token, producing `0.5x` instead of `x` for topk=2.
+        # This mirrors dispatch_combine_test_utils.py:427 which passes
+        # `dispatch_indices` (receiver-side) to `op.combine()`.
+        self._raw_dispatched_indices = dispatched_indices_global
 
         return hidden_states
 
@@ -1460,7 +1478,7 @@ class _MoriManager(_DispatchManager):
         multihot_probs[row_indices, valid_indices] = probs[mask]
         return multihot_routing_map.bool(), multihot_probs
 
-    def get_dispached_metadata(self) -> torch.Tensor:
+    def get_dispatched_metadata(self) -> torch.Tensor:
         return self.dispatched_indices, self.dispatched_probs
 
     def get_number_of_tokens_per_expert(self) -> torch.Tensor:
@@ -1477,12 +1495,19 @@ class _MoriManager(_DispatchManager):
         # combine kernel reads weights indexed by totalRecvTokenNum; passing the
         # smaller sender buffer caused the GPU page fault triaged in
         # docs/design/mori_ep_integration.md.
+        # Likewise, pass self._raw_dispatched_indices (receiver-side global,
+        # [total_recv, topk]) — MORI's op.combine() expects receiver-side
+        # global indices (matches dispatch_combine_test_utils.py:427).
+        # Sender-side self.token_indices is also forwarded so MoriCombine can
+        # slice its output to the sender row count and so the backward path
+        # can re-dispatch grads using the original sender-side routing.
         # call_reset=True inside MoriCombine.forward already triggers MORI's
         # internal reset, so no explicit reset_mori_op() is needed here.
         hidden_states = mori_combine(
             hidden_states,
             self.group,
             self.token_indices,
+            self._raw_dispatched_indices,
             self._raw_dispatched_probs,
             self.num_local_experts,
             self.router_topk,
@@ -1610,7 +1635,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
                 num_experts=self.tp_size * self.config.num_moe_experts,
                 config=self.config,
             )
-            self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.routing_map']
+            self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.token_indices']
         else:
             raise ValueError(
                 f"Invalid backend: {self.config.moe_flex_dispatcher_backend}"
