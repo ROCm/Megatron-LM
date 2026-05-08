@@ -591,6 +591,31 @@ def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool
     return result
 
 
+def _ensure_combine_weights_non_empty(
+    weights: torch.Tensor, router_topk: int, device: torch.device
+) -> torch.Tensor:
+    """Workaround MORI's `weights.size(0) != 0` gate in op.combine().
+
+    MORI's python wrapper sets ``weight_ptr=0`` (→ kernel's
+    ``args.weightsBuf=nullptr``) when the passed weights tensor has
+    ``size(0) == 0``. On ranks that received zero tokens during dispatch
+    (highly imbalanced routing), the receiver-side probs slice is exactly
+    that 0-row tensor — and the resulting null weightsBuf breaks the
+    combine kernel's slot-1 contribution path for those ranks' senders,
+    producing only PE 0's contribution instead of the sum across all
+    unique destinations. Reproduced standalone in
+    ``mori_zero_recv_repro.py``.
+
+    This helper substitutes a 1-row dummy of zeros when the input is
+    empty so ``weight_ptr`` stays non-null. The kernel only reads the
+    first ``totalRecvTokenNum`` rows, so the dummy is never dereferenced
+    on the data path.
+    """
+    if weights.size(0) > 0:
+        return weights
+    return torch.zeros(
+        (1, router_topk), dtype=weights.dtype, device=device
+    )
 
 
 def get_mori_op(
@@ -812,10 +837,13 @@ class MoriDispatch(torch.autograd.Function):
         # the comment in MoriDispatch.forward where we save them and the
         # matching pattern in dispatch_combine_test_utils.py:427 which
         # passes the receiver-side `dispatch_indices` to `op.combine()`.
+        combine_weights = _ensure_combine_weights_non_empty(
+            recv_token_probs.float(), ctx.router_topk, grad_output.device
+        )
         combined_x, _ = _run_mori_op_on_stream(
             lambda: op.combine(
                 grad_output.contiguous(),
-                recv_token_probs.float(),
+                combine_weights,
                 recv_token_indices_global.to(torch.int32),
                 call_reset=True,
             ),
@@ -891,10 +919,13 @@ class MoriCombine(torch.autograd.Function):
         # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
         num_tokens = token_indices.shape[0]
 
+        combine_weights = _ensure_combine_weights_non_empty(
+            token_probs.float(), router_topk, x.device
+        )
         combined_x, _ = _run_mori_op_on_stream(
             lambda: op.combine(
                 x.contiguous(),
-                token_probs.float(),
+                combine_weights,
                 recv_token_indices.to(torch.int32),
                 call_reset=True,
             ),

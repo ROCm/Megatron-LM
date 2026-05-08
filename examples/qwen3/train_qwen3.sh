@@ -429,7 +429,6 @@ if [ "$IS_MOE" -eq 1 ]; then
     if [ "$ENABLE_DEEP_EP" = true ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-deepep"
     elif [ "$ENABLE_MORI" = true ]; then
-        export MORI_SHMEM_MODE=vmm_heap
         export MORI_SHMEM_LOG_LEVEL="${MORI_SHMEM_LOG_LEVEL:-INFO}"
         echo "[INFO] MORI EP: MORI_SHMEM_MODE=${MORI_SHMEM_MODE}"
         echo "[INFO] MORI EP: MORI_SHMEM_LOG_LEVEL=${MORI_SHMEM_LOG_LEVEL}"

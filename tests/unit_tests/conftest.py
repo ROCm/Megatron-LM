@@ -1,5 +1,117 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+# ---------------------------------------------------------------------------
+# MORI early bootstrap (must run before any megatron / TransformerEngine
+# import below). Mirrors `pretrain_gpt.py:21-84`.
+#
+# THIS IS A WORKAROUND, NOT A ROOT-CAUSE FIX. The proper fix lives
+# upstream in MORI (or in how MORI drives HIP relative to a primary
+# context that already has loaded modules + allocations). Until that
+# lands, we sidestep the bug here by ordering imports.
+#
+# What we know empirically:
+#   * Symptom: glibc `free(): invalid size` SIGABRT, with no Python
+#     exception — the log just shows `Fatal Python error: Aborted`.
+#   * Crash site: `mori_cpp.load_shmem_module(hsaco)` called from
+#     `mori/shmem/api.py:39 _ensure_shmem_module`, which is in turn
+#     called from `shmem_torch_process_group_init`.
+#   * Trigger: TransformerEngine has already been imported before that
+#     point (which happens transitively via any `from megatron.core ...`
+#     below this block, since the MoE / attention modules pull in TE).
+#   * Workaround: init MORI shmem first, while HIP's module table and
+#     allocator are still untouched by TE. No crash.
+#
+# What we DO NOT know (would need ASAN/Valgrind on the failing process,
+# or a MORI source review, to nail down):
+#   * Which MORI-side buffer is being overrun.
+#   * Whether the bug is in MORI's hsaco-blob handling, its hipModuleLoad
+#     wrapper, the `__device__ globalGpuStates` symbol-patching path, or
+#     glibc cleanup along an internal MORI error edge.
+#
+# The function is gated on:
+#   1. Being launched under `torchrun` (RANK / WORLD_SIZE / LOCAL_RANK set),
+#      so plain `pytest` invocations stay no-op.
+#   2. The `mori` package being importable.
+#   3. The argv mentioning "mori" or "test_token_dispatcher" — cheap heuristic
+#      that avoids burning ~32 GiB of symmetric heap on test runs that
+#      don't exercise the MORI backend.
+# ---------------------------------------------------------------------------
+def _mori_early_bootstrap_for_pytest():
+    import os as _os
+    import sys as _sys
+
+    if not all(k in _os.environ for k in ("RANK", "WORLD_SIZE", "LOCAL_RANK")):
+        return
+    _argv_str = " ".join(_sys.argv).lower()
+    if "mori" not in _argv_str and "test_token_dispatcher" not in _argv_str:
+        return
+
+    try:
+        import torch as _torch
+        import torch.distributed as _dist
+    except ImportError:
+        return
+    try:
+        import mori.shmem as _mori_shmem
+    except ImportError:
+        return
+
+    # Match the production env (`examples/qwen3/train_qwen3.sh:432-433`):
+    # `vmm_heap` switches MORI's symmetric-heap allocator from
+    # `hipExtMallocWithFlags` to the VMM path (`hipMemAddressReserve` +
+    # `hipMemCreate` + `hipMemMap`). VMM is also what HSA uses internally
+    # for primary-context-owned allocations, so the heap shares a single
+    # virtual-address namespace with TE/torch's allocations and avoids the
+    # double-mmap collision that the old `hipExtMallocWithFlags` path was
+    # prone to. `setdefault` lets the user override on the command line.
+    # _os.environ.setdefault("MORI_SHMEM_MODE", "vmm_heap")
+    _os.environ.setdefault("MORI_SHMEM_LOG_LEVEL", "INFO")
+
+    rank = int(_os.environ["RANK"])
+    local_rank = int(_os.environ["LOCAL_RANK"])
+    world_size = int(_os.environ["WORLD_SIZE"])
+
+    _torch.cuda.set_device(local_rank)
+    device = _torch.device(f"cuda:{local_rank}")
+
+    if not _dist.is_initialized():
+        _dist.init_process_group(
+            backend="nccl",
+            rank=rank,
+            world_size=world_size,
+            device_id=device,
+        )
+
+    mori_group = _dist.new_group(list(range(world_size)), backend="gloo")
+    _torch._C._distributed_c10d._register_process_group("mori", mori_group)
+
+    try:
+        _mori_shmem.shmem_torch_process_group_init("mori")
+    except Exception:
+        try:
+            _mori_shmem.shmem_finalize()
+        except Exception:
+            pass
+        _dist.destroy_process_group()
+        raise
+
+    # Signal to test code (test_token_dispatcher.py::_ensure_mori_shmem) that
+    # it should skip its own bootstrap and treat shmem as already-initialized.
+    _os.environ["MEGATRON_MORI_SHMEM_BOOTSTRAPPED"] = "1"
+
+    if rank == 0:
+        print(
+            f"[MORI BOOTSTRAP] shmem init OK"
+            f" (world_size={world_size}"
+            f", MORI_SHMEM_MODE={_os.environ.get('MORI_SHMEM_MODE')}"
+            f", MORI_SHMEM_HEAP_SIZE={_os.environ.get('MORI_SHMEM_HEAP_SIZE')})",
+            flush=True,
+        )
+
+
+_mori_early_bootstrap_for_pytest()
+del _mori_early_bootstrap_for_pytest
+
 import os
 from pathlib import Path
 
