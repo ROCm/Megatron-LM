@@ -1383,6 +1383,10 @@ class _MoriManager(_DispatchManager):
         # — see the matching note in `dispatch()` for the rationale.
         self._raw_dispatched_probs: Optional[torch.Tensor] = None
         self._raw_dispatched_indices: Optional[torch.Tensor] = None
+        # Live recv count from the latest dispatch — threaded into
+        # MoriCombine.forward so its backward can mask the padded dispatch
+        # tail without a host sync. Populated in self.dispatch().
+        self._mori_recv_num_token: Optional[torch.Tensor] = None
 
         if mori_dispatch is None:
             raise ImportError(
@@ -1425,6 +1429,7 @@ class _MoriManager(_DispatchManager):
             dispatched_probs,
             num_tokens_per_expert,
             dispatched_indices_global,
+            self._mori_recv_num_token,
         ) = mori_dispatch(
             hidden_states,  # [num_tokens, hidden_dim]
             self.token_indices,  # [num_tokens, topk]
@@ -1514,6 +1519,7 @@ class _MoriManager(_DispatchManager):
             self.max_num_tokens_per_rank,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            recv_num_token=self._mori_recv_num_token,
         )
         return hidden_states
 
@@ -1560,11 +1566,27 @@ class _MoriManager(_DispatchManager):
 
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
+        # Clamp ``num_out_tokens`` to ``>= 1`` so the fused permute kernel
+        # always allocates at least one output row. When this rank receives
+        # no tokens (cold rank in sparse routing), ``tokens_per_expert.sum()``
+        # is 0 — without the clamp the permute output is ``[0, h]`` empty,
+        # which trips TE's ``_moe_unpermute_mask_map.forward`` short-circuit
+        # (returns ``inp`` without setting ``ctx.num_tokens`` etc.). The
+        # downstream backward then takes the main path with the padded
+        # ``[max_num_tokens_to_recv, h]`` grad, hits the unset ctx, and
+        # raises ``AttributeError`` — surfaced in tests as a silent FAILED.
+        # The dummy row is uninitialized (routing_map has no 1s, so the
+        # permute kernel never writes to it) but is never read either —
+        # unpermute's per-row ``n_routed`` is 0 for every row, so the
+        # accumulator stays at 0 regardless of the dummy's content.
+        num_out_tokens = self.tokens_per_expert.sum().item()
+        if num_out_tokens == 0:
+            num_out_tokens = 1
         hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
             hidden_states,
             self.dispatched_routing_map,
             probs=self.dispatched_probs,
-            num_out_tokens=self.tokens_per_expert.sum().item(),
+            num_out_tokens=num_out_tokens,
             fused=self.permute_fusion,
         )
         if self.router_dtype == "fp64":

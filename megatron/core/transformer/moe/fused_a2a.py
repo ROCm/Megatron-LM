@@ -541,10 +541,7 @@ _mori_op = None
 # Process-wide CUDA stream dedicated to MORI dispatch/combine kernel launches.
 # Mirrors DeepEP's `allocate_on_comm_stream` pattern so that op.dispatch() and
 # op.combine() can run concurrently with non-dependent work on the default
-# (compute) stream when the caller passes async_finish=True. The host wait at
-# `recv_num_token[0].item()` inside `MoriDispatch.forward` still blocks until
-# the dispatch kernel drains, so the practical wall-time win from this alone
-# is limited until that .item() is deferred — see TODO in MoriDispatch.forward.
+# (compute) stream when the caller passes async_finish=True.
 _mori_comm_stream = None
 
 
@@ -591,31 +588,6 @@ def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool
     return result
 
 
-def _ensure_combine_weights_non_empty(
-    weights: torch.Tensor, router_topk: int, device: torch.device
-) -> torch.Tensor:
-    """Workaround MORI's `weights.size(0) != 0` gate in op.combine().
-
-    MORI's python wrapper sets ``weight_ptr=0`` (→ kernel's
-    ``args.weightsBuf=nullptr``) when the passed weights tensor has
-    ``size(0) == 0``. On ranks that received zero tokens during dispatch
-    (highly imbalanced routing), the receiver-side probs slice is exactly
-    that 0-row tensor — and the resulting null weightsBuf breaks the
-    combine kernel's slot-1 contribution path for those ranks' senders,
-    producing only PE 0's contribution instead of the sum across all
-    unique destinations. Reproduced standalone in
-    ``mori_zero_recv_repro.py``.
-
-    This helper substitutes a 1-row dummy of zeros when the input is
-    empty so ``weight_ptr`` stays non-null. The kernel only reads the
-    first ``totalRecvTokenNum`` rows, so the dummy is never dereferenced
-    on the data path.
-    """
-    if weights.size(0) > 0:
-        return weights
-    return torch.zeros(
-        (1, router_topk), dtype=weights.dtype, device=device
-    )
 
 
 def get_mori_op(
@@ -745,10 +717,7 @@ class MoriDispatch(torch.autograd.Function):
         # (see dispatch_combine.py:477-479). For an FP8 dispatch we'd need a
         # real [num_tokens, scale_dim] tensor in float8_e4m3fnuz.
         # When async_finish=True the launch is moved onto a dedicated comm
-        # stream so it can overlap with non-dependent compute. The .item()
-        # below still serializes on the host, however — eliminating that is
-        # tracked separately (would require returning the un-sliced full
-        # buffer + on-device row_valid mask to downstream consumers).
+        # stream so it can overlap with non-dependent compute.
         dispatch_out, dispatch_weights, dispatch_scales, dispatch_indices, recv_num_token = (
             _run_mori_op_on_stream(
                 lambda: op.dispatch(
@@ -759,13 +728,28 @@ class MoriDispatch(torch.autograd.Function):
             )
         )
 
-        # TODO(mori-overlap): defer this .item() out of the autograd Function
-        # so dispatch can actually overlap with compute. See comment above and
-        # the comm-stream notes in docs/design/mori_ep_integration.md.
-        total_recv = recv_num_token[0].item()
-        recv_x = dispatch_out[:total_recv]
-        recv_token_indices_global = dispatch_indices[:total_recv]
-        recv_token_probs = dispatch_weights[:total_recv]
+        # Mask invalid tail rows (rows beyond ``recv_num_token[0]``):
+        #   - ``recv_x``: write 0 so permute / expert / unpermute treat the row
+        #     as inert. We use ``masked_fill`` (an *overwrite*) rather than a
+        #     multiplicative mask because MORI's recv buffer tail is
+        #     uninitialized BF16 memory that may contain NaN/Inf, and IEEE
+        #     ``0 * NaN = NaN`` would propagate NaNs into combine.
+        #   - ``recv_token_indices_global``: write the ``-1`` sentinel so the
+        #     ``is_local`` rebase below and ``_indices_to_multihot`` downstream
+        #     treat the row as "no expert selected".
+        #   - ``recv_token_probs``: write 0 so any padded slot's contribution
+        #     to op.combine is zero. (MORI's combine kernel only reads the
+        #     first ``recv_num_token`` rows, but we keep the tensor numerically
+        #     clean for any non-MORI consumer.)
+        num_rows = dispatch_out.shape[0]
+        device = dispatch_out.device
+        recv_count = recv_num_token.to(device=device, dtype=torch.int64).reshape(-1)[0]
+        invalid_rows = (
+            torch.arange(num_rows, device=device, dtype=torch.int64) >= recv_count
+        ).unsqueeze(-1)
+        recv_x = dispatch_out.masked_fill(invalid_rows, 0)
+        recv_token_indices_global = dispatch_indices.masked_fill(invalid_rows, -1)
+        recv_token_probs = dispatch_weights.masked_fill(invalid_rows, 0.0)
 
         # MORI's dispatch returns the original GLOBAL expert ids in [0, num_experts)
         # for every topk slot of every received token, with no -1 sentinel for
@@ -783,20 +767,28 @@ class MoriDispatch(torch.autograd.Function):
             recv_token_indices_global < local_id_end
         )
         recv_token_indices = (recv_token_indices_global - local_id_start).to(torch.int64)
-        recv_token_indices = torch.where(
-            is_local,
-            recv_token_indices,
-            torch.full_like(recv_token_indices, -1),
-        )
+        # Scalar ``-1`` in torch.where avoids the ``torch.full_like`` allocation.
+        recv_token_indices = torch.where(is_local, recv_token_indices, -1)
 
         # Per-local-expert token counts (matches DeepEP's
-        # num_recv_tokens_per_expert_list contract). Filter -1 sentinels via the
-        # `is_local` mask before bincount so we don't accidentally count global
-        # expert ids that fall in [0, num_local_experts) but belong to other ranks.
-        local_ids_flat = recv_token_indices[is_local]
-        tokens_per_expert = torch.bincount(
-            local_ids_flat, minlength=num_local_experts
-        )[:num_local_experts]
+        # num_recv_tokens_per_expert_list contract). We deliberately avoid both
+        #   (a) boolean-mask indexing (``recv_token_indices[is_local]``) which
+        #       lowers to ``aten::index`` -> ``nonzero`` + gather (host sync +
+        #       sized memcpy), and
+        #   (b) ``torch.bincount`` which on CUDA still calls ``self.max()`` and
+        #       copies that scalar to host to size its output (the
+        #       ``aten::_to_copy`` + ``hipMemcpy`` shown in the trace).
+        # Instead, shift -1 sentinels (non-local rows) into bin 0 and use a
+        # fixed-size ``scatter_add_`` into a ``[num_local_experts + 1]`` buffer
+        # — output shape is known at compile time, fully on-device.
+        shifted_local_ids = (recv_token_indices + 1).reshape(-1)
+        counts = torch.zeros(
+            num_local_experts + 1,
+            dtype=torch.long,
+            device=shifted_local_ids.device,
+        )
+        counts.scatter_add_(0, shifted_local_ids, torch.ones_like(shifted_local_ids))
+        tokens_per_expert = counts[1:]
 
         ctx.group = group
         ctx.num_local_experts = num_local_experts
@@ -807,31 +799,47 @@ class MoriDispatch(torch.autograd.Function):
         # arguments via apply(), so we have to carry them through ctx.
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
+        # Stash the live recv count for backward so we can mask the post-
+        # dispatch padded tail in MoriDispatch.backward without a fresh sync.
+        ctx.recv_num_token = recv_num_token.detach()
         # Save the RECEIVER-side topk probs and the RECEIVER-side global indices
         # (not sender-side `token_indices`) for backward. The dispatch-backward
         # calls `op.combine`, whose IntraNode kernel expects the `indices`
-        # argument to be the receiver-side global indices [total_recv, topk]
-        # (matches MORI's own dispatch_combine_test_utils.py). Passing
-        # sender-side indices [N, topk] makes the kernel only sum one source
-        # PE's contribution rather than all unique destinations, producing
+        # argument to be the receiver-side global indices
+        # [max_num_tokens_per_rank, topk]; unused rows are ``-1`` (matches
+        # MORI's own dispatch_combine_test_utils.py). Passing sender-side
+        # indices [N, topk] makes the kernel only sum one source PE's
+        # contribution rather than all unique destinations, producing
         # `0.5x` instead of `x` for topk=2 routing.
         ctx.save_for_backward(token_indices, recv_token_probs, recv_token_indices_global)
 
         # 5th return is recv_token_indices_global (receiver-side, GLOBAL expert
-        # ids in [0, num_experts) without -1 sentinels). Downstream
+        # ids in [0, num_experts); unused rows are ``-1``). Downstream
         # `_MoriManager.combine` needs this to call `op.combine()` correctly —
         # MORI's combine kernel expects receiver-side indices, not the rebased
         # local `recv_token_indices` we send through the regular pipeline.
+        # 6th return is recv_num_token (1-element count, no grad) so the
+        # token-dispatcher can thread it into MoriCombine for sync-free
+        # backward masking. Detached to keep autograd happy.
         return (
             recv_x,
             recv_token_indices,
             recv_token_probs,
             tokens_per_expert,
             recv_token_indices_global,
+            recv_num_token.detach(),
         )
 
     @staticmethod
-    def backward(ctx, grad_output, grad_indices, grad_probs, grad_tpe, grad_handle):
+    def backward(
+        ctx,
+        grad_output,
+        grad_indices,
+        grad_probs,
+        grad_tpe,
+        grad_handle,
+        grad_recv_num_token,
+    ):
         """Backward pass: combine gradients back using MORI."""
         token_indices, recv_token_probs, recv_token_indices_global = ctx.saved_tensors
         op = get_mori_op(
@@ -843,27 +851,42 @@ class MoriDispatch(torch.autograd.Function):
             data_type=grad_output.dtype,
             fp8_dispatch=ctx.fp8_dispatch,
         )
+        # Sender-side num_tokens — needed to slice op.combine()'s output,
+        # which is shaped to the full [max_num_inp_token_per_rank, hidden_dim]
+        # capacity buffer (see dispatch_combine.py:841-846), back down to the
+        # actual sender row count so the returned grad matches ``x``'s shape
+        # [num_sender_tokens, hidden_dim].
         num_tokens = token_indices.shape[0]
         # MORI's op.combine() expects RECEIVER-side global indices — see
         # the comment in MoriDispatch.forward where we save them and the
         # matching pattern in dispatch_combine_test_utils.py:427 which
         # passes the receiver-side `dispatch_indices` to `op.combine()`.
-        combine_weights = _ensure_combine_weights_non_empty(
-            recv_token_probs.float(), ctx.router_topk, grad_output.device
-        )
+        #
+        # Defensive mask of padded tail rows: upstream chain
+        # (unpermute.backward -> permute.backward -> multihot.backward) *should*
+        # already produce zero grad for rows with empty routing_map, but if any
+        # link in that chain skips initializing padded rows we'd feed NaN/Inf
+        # into op.combine. masked_fill (overwrite, not multiply) is safe even
+        # if the upstream produced NaN — see the matching forward note.
+        num_rows = grad_output.shape[0]
+        recv_count = ctx.recv_num_token.to(device=grad_output.device, dtype=torch.int64).reshape(-1)[0]
+        invalid_rows = (
+            torch.arange(num_rows, device=grad_output.device, dtype=torch.int64) >= recv_count
+        ).unsqueeze(-1)
+        grad_for_combine = grad_output.masked_fill(invalid_rows, 0).contiguous()
         combined_x, _ = _run_mori_op_on_stream(
             lambda: op.combine(
-                grad_output.contiguous(),
-                combine_weights,
+                grad_for_combine,
+                recv_token_probs.float(),
                 recv_token_indices_global.to(torch.int32),
                 call_reset=True,
             ),
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # See MoriCombine.forward: op.combine() returns the full
-        # [max_num_inp_token_per_rank, hidden_dim] buffer; slice to the
-        # sender-side row count so the gradient matches `x`'s shape.
+        # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim]
+        # capacity buffer view; slice back to the sender row count so the
+        # returned grad matches the original ``x`` input shape.
         combined_x = combined_x[:num_tokens]
         return (
             combined_x,
@@ -901,20 +924,33 @@ class MoriCombine(torch.autograd.Function):
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        recv_num_token=None,
     ):
         """Forward pass: combine expert outputs back to original ranks via MORI.
 
         Args:
-            x: Receiver-side hidden states [total_recv, hidden_dim].
-            token_indices: SENDER-side topk indices [num_sender_tokens, topk].
+            x: Receiver-side hidden states ``[max_num_tokens_per_rank, hidden_dim]``.
+                Rows beyond ``recv_num_token[0]`` are padded; they should be 0
+                (deterministically produced by unpermute when their routing
+                map is empty, which is the case for the masked tail).
+            token_indices: SENDER-side topk indices ``[num_sender_tokens, topk]``.
                 Used only to (a) slice op.combine()'s output to sender row
                 count and (b) re-dispatch grads in backward.
             recv_token_indices: RECEIVER-side global topk indices
-                [total_recv, topk]. This is what op.combine() expects (matches
+                ``[max_num_tokens_per_rank, topk]``; unused rows are ``-1``.
+                This is what op.combine() expects (matches
                 dispatch_combine_test_utils.py:427). Passing sender-side
                 indices instead breaks the kernel's per-unique-PE summation
                 and produces `0.5x` for topk=2 routing.
-            token_probs: RECEIVER-side topk probs [total_recv, topk].
+            token_probs: RECEIVER-side topk probs ``[max_num_tokens_per_rank, topk]``;
+                unused rows are 0.
+            recv_num_token: 1-element tensor with the live recv count from
+                the matching MoriDispatch. Required when ``x`` carries the
+                full padded ``[max_num_tokens_per_rank, ...]`` capacity (so
+                backward can mask its grad dispatch output without host
+                sync). Legacy callers that pre-slice their tensors can pass
+                ``None`` and the backward falls back to using the full
+                buffer.
         """
         op = get_mori_op(
             group=group,
@@ -930,13 +966,10 @@ class MoriCombine(torch.autograd.Function):
         # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
         num_tokens = token_indices.shape[0]
 
-        combine_weights = _ensure_combine_weights_non_empty(
-            token_probs.float(), router_topk, x.device
-        )
         combined_x, _ = _run_mori_op_on_stream(
             lambda: op.combine(
                 x.contiguous(),
-                combine_weights,
+                token_probs,
                 recv_token_indices.to(torch.int32),
                 call_reset=True,
             ),
@@ -958,15 +991,11 @@ class MoriCombine(torch.autograd.Function):
         # arguments via apply(), so we have to carry them through ctx.
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
-        # Stash the receiver-side row count for backward. By the time we get
-        # here, x.shape[0] is the same `total_recv` that MoriDispatch.forward
-        # already paid the .item() sync for — it's the row count of `recv_x`
-        # that propagated through unpermute → expert outputs → here. Saving
-        # it on ctx lets backward skip the redundant
-        # `recv_num_token[0].item()` host-sync after the grad dispatch.
-        # Since routing is deterministic given the same indices, this is the
-        # exact total_recv backward's op.dispatch will produce.
-        ctx.total_recv = x.shape[0]
+        # Stash the live recv count tensor (from MoriDispatch.forward) so the
+        # backward can mask the grad-dispatch padded tail without a fresh
+        # host sync. None ⇒ legacy caller that pre-sliced; treat all rows
+        # as valid in backward.
+        ctx.recv_num_token = recv_num_token
         ctx.save_for_backward(token_indices, token_probs)
         return combined_x
 
@@ -993,16 +1022,29 @@ class MoriCombine(torch.autograd.Function):
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # Reuse the total_recv saved in forward instead of calling
-        # `recv_num_token[0].item()` here — that .item() forces a host sync
-        # waiting on the dispatch kernel and was the ~1ms-per-layer cost
-        # diagnosed in the MoRI EP profiling notes.
-        # Return one None per non-tensor input arg (10 inputs after ctx:
-        # x, group, token_indices, recv_token_indices, token_probs,
+        # op.dispatch returns a [max_num_tokens_per_rank, hidden] buffer; rows
+        # beyond ``recv_num_token[0]`` are uninitialized BF16 (often NaN/Inf).
+        # Overwrite them with 0 so they flow into the upstream chain as inert
+        # zero grad — never multiply by a mask (``0 * NaN = NaN``).
+        num_rows = dispatch_out.shape[0]
+        if ctx.recv_num_token is not None:
+            recv_count = ctx.recv_num_token.to(
+                device=dispatch_out.device, dtype=torch.int64
+            ).reshape(-1)[0]
+            invalid_rows = (
+                torch.arange(num_rows, device=dispatch_out.device, dtype=torch.int64)
+                >= recv_count
+            ).unsqueeze(-1)
+            grad_x = dispatch_out.masked_fill(invalid_rows, 0)
+        else:
+            grad_x = dispatch_out
+        # Return one None per non-tensor input arg (11 inputs after ctx:
+        # group, token_indices, recv_token_indices, token_probs,
         # num_local_experts, router_topk, max_num_tokens_per_rank,
-        # fp8_dispatch, async_finish, allocate_on_comm_stream).
+        # fp8_dispatch, async_finish, allocate_on_comm_stream, recv_num_token).
         return (
-            dispatch_out[: ctx.total_recv],
+            grad_x,
+            None,
             None,
             None,
             None,
@@ -1050,7 +1092,8 @@ if HAVE_MORI:
             allocate_on_comm_stream: See `async_finish`.
 
         Returns:
-            Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert, handle)
+            Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert,
+            recv_indices_global, recv_num_token).
         """
         return MoriDispatch.apply(
             x.contiguous(),
@@ -1078,18 +1121,23 @@ if HAVE_MORI:
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        recv_num_token=None,
     ):
         """Perform fused combine using MORI EP backend.
 
         Args:
-            x: Input tensor from expert computation [total_recv, hidden_dim]
+            x: Input tensor from expert computation
+                ``[max_num_tokens_per_rank, hidden_dim]`` — see
+                ``MoriCombine.forward`` docstring.
             group: Process group
-            token_indices: SENDER-side topk indices [num_sender_tokens, topk].
+            token_indices: SENDER-side topk indices ``[num_sender_tokens, topk]``.
                 Used for output slicing and the backward dispatch.
             recv_token_indices: RECEIVER-side global topk indices
-                [total_recv, topk]. This is what MORI's op.combine() expects
-                — see MoriCombine.forward docstring for details.
-            token_probs: RECEIVER-side topk probabilities [total_recv, topk].
+                ``[max_num_tokens_per_rank, topk]``; unused rows are ``-1``.
+                This is what MORI's op.combine() expects — see
+                ``MoriCombine.forward`` docstring for details.
+            token_probs: RECEIVER-side topk probabilities
+                ``[max_num_tokens_per_rank, topk]``; unused rows are 0.
             num_local_experts: Experts per rank
             router_topk: Top-K experts per token
             max_num_tokens_per_rank: Max tokens per rank for buffer sizing
@@ -1099,6 +1147,9 @@ if HAVE_MORI:
                 stream so it can overlap with non-dependent compute on the
                 default stream. Mirrors DeepEP's flag of the same name.
             allocate_on_comm_stream: See `async_finish`.
+            recv_num_token: 1-element tensor with the live recv count from
+                the matching ``mori_dispatch``. Needed for sync-free padded
+                buffers; legacy callers may pass ``None``.
 
         Returns:
             Combined output tensor
@@ -1115,6 +1166,7 @@ if HAVE_MORI:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
+            recv_num_token,
         )
 
 else:
