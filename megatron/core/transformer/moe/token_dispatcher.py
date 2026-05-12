@@ -1388,6 +1388,26 @@ class _MoriManager(_DispatchManager):
         # tail without a host sync. Populated in self.dispatch().
         self._mori_recv_num_token: Optional[torch.Tensor] = None
 
+        # Sync-free ``tokens_per_expert`` cache.
+        #
+        # With fixed-target padding (see :meth:`_pad_routing_map_to_fixed_target`)
+        # the per-expert count is ``max_num_tokens_per_rank`` for every local
+        # expert — known from config alone. Caching it on **CPU** lets the
+        # downstream ``tokens_per_expert.tolist()`` in ``TEGroupedMLP.forward``
+        # (and ``SequentialMLP.forward``) skip the GPU→CPU sync entirely
+        # (``.tolist()`` on a CPU tensor is a pure CPU op).
+        #
+        # The GPU int32 variant is needed only by the
+        # ``NVTE_USE_GROUPED_GEMM_TRITON=1`` Triton GroupedGEMM path; we
+        # lazy-allocate it on first request so non-Triton runs pay nothing.
+        self._tokens_per_expert_cpu: torch.Tensor = torch.full(
+            (self.num_local_experts,),
+            self._compute_fixed_target_per_expert(),
+            dtype=torch.long,
+            device="cpu",
+        )
+        self._tokens_per_expert_gpu_int32: Optional[torch.Tensor] = None
+
         if mori_dispatch is None:
             raise ImportError(
                 "MORI is not installed. Please install MORI package from "
@@ -1486,8 +1506,34 @@ class _MoriManager(_DispatchManager):
     def get_dispatched_metadata(self) -> torch.Tensor:
         return self.dispatched_indices, self.dispatched_probs
 
-    def get_number_of_tokens_per_expert(self) -> torch.Tensor:
-        return self.tokens_per_expert
+    def get_number_of_tokens_per_expert(self):
+        """Return the sync-free ``tokens_per_expert`` for the experts layer.
+
+        Returns a CPU long tensor (always shape ``[num_local_experts]`` and
+        always filled with ``max_num_tokens_per_rank`` thanks to fixed-target
+        padding). When the Triton GroupedGEMM path is requested via
+        ``NVTE_USE_GROUPED_GEMM_TRITON=1``, returns the ``(cpu, gpu_int32)``
+        tuple form expected by :meth:`TEGroupedMLP.forward`, mirroring the
+        all-to-all dispatcher at L749-751.
+
+        Both branches are sync-free:
+          * The CPU tensor is built once in ``__init__`` (compile-time
+            value), so ``tokens_per_expert.tolist()`` in experts.py is a
+            pure CPU op — no GPU→CPU copy.
+          * The GPU int32 tensor (Triton-only) is lazy-allocated once with
+            ``torch.full`` on CUDA, which is an async kernel launch (no
+            host sync).
+        """
+        if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON") == "1":
+            if self._tokens_per_expert_gpu_int32 is None:
+                self._tokens_per_expert_gpu_int32 = torch.full(
+                    (self.num_local_experts,),
+                    self._compute_fixed_target_per_expert(),
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+            return (self._tokens_per_expert_cpu, self._tokens_per_expert_gpu_int32)
+        return self._tokens_per_expert_cpu
 
     def combine(
         self,
@@ -1550,6 +1596,76 @@ class _MoriManager(_DispatchManager):
             tokens_per_expert = target_tokens_per_expert
         return routing_map, tokens_per_expert
 
+    def _compute_fixed_target_per_expert(self) -> int:
+        """Compile-time-known per-expert padded token count.
+
+        We use ``max_num_tokens_per_rank`` (the absolute upper bound on
+        the number of received-token rows that can route to any single
+        expert).
+
+        The ``M`` choice trades up to ``E_local / min(K, E_local)`` ×
+        extra padded rows for guaranteed feasibility — 2× for qwen3 EP=8
+        (E_local=16, K=8), 1× for the standard unit-test configs.
+        """
+        return self.max_num_tokens_per_rank
+
+    def _pad_routing_map_to_fixed_target(
+        self, routing_map: torch.Tensor
+    ) -> Tuple[torch.Tensor, int]:
+        """Pad each expert column to exactly ``target_per_expert`` ones.
+
+        Unlike :meth:`_pad_routing_map` (which rounds to a multiple), this
+        pads to a constant compile-time-known count, so the resulting
+        ``tokens_per_expert.sum()`` is a Python int derivable from config
+        alone. This eliminates the host syncs in
+        :meth:`get_permuted_hidden_states_by_experts`:
+          1. The explicit ``.sum().item()`` (and its cold-rank ``== 0``
+             clamp, which also synchronizes via ``Tensor.__bool__``).
+          2. The implicit ``Tensor.__index__`` inside
+             ``torch.empty((num_out_tokens, h), ...)`` in TE's permute
+             allocator — passing a 0-D CUDA tensor there blocks on the
+             dispatch kernel just like ``.item()`` (verified empirically).
+
+        With ``target_per_expert == max_num_tokens_per_rank`` (see
+        :meth:`_compute_fixed_target_per_expert`), the column always has
+        enough zeros to flip — every column can be padded to ``M`` ones
+        even if the original routing put all ``M`` recv rows into one
+        expert. ``num_to_pad`` is therefore non-negative by construction
+        and the ``clamp(min=0)`` is defensive-only.
+
+        Wasted FLOPs scale as ``E_local / min(K, E_local)`` × the natural
+        topk-routing fan-out (≈2× for qwen3 EP=8). Numerical correctness
+        is preserved because the flipped 1s land at positions where
+        ``dispatched_probs == 0`` (multihot only sets non-zero probs at
+        originally-routed (i, e) pairs); when the experts apply probs to
+        their activation between fc1 and fc2, padded contributions become
+        zero, and the unpermute scatter sums them as zero.
+        """
+        target_per_expert = self._compute_fixed_target_per_expert()
+        total = target_per_expert * self.num_local_experts
+
+        # Transpose to [num_experts, num_tokens] for column-wise ops,
+        # mirroring ``pad_routing_map`` in moe_utils.py. We can't reuse
+        # ``pad_routing_map`` directly because it rounds each column up to
+        # a multiple of ``pad_multiple``, leaving cold columns (count == 0)
+        # at 0 — we need every column padded to exactly
+        # ``target_per_expert``.
+        rm_T = routing_map.transpose(0, 1).contiguous()
+        num_ones = rm_T.sum(dim=1, keepdim=True)
+        num_to_pad = target_per_expert - num_ones
+        is_zero = rm_T == 0
+        zero_ranks = torch.cumsum(is_zero.int(), dim=1)
+        mask_to_flip = (zero_ranks <= num_to_pad) & is_zero
+        rm_T = torch.where(mask_to_flip, torch.ones_like(rm_T), rm_T)
+        padded_routing_map = rm_T.transpose(0, 1).contiguous()
+
+        # No per-call ``tokens_per_expert`` tensor: it's a compile-time
+        # constant ``[target_per_expert] * num_local_experts`` and lives
+        # in ``self._tokens_per_expert_cpu`` (built once in ``__init__``).
+        # Returning ``total`` (Python int) is what the caller needs for
+        # the ``num_out_tokens`` arg to ``permute``.
+        return padded_routing_map, total
+
     def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if is_experimental_enabled() and self.permute_fusion:
             self.dispatched_routing_map, self.dispatched_probs = fused_indices_to_multihot(
@@ -1559,29 +1675,26 @@ class _MoriManager(_DispatchManager):
             self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs
             )
-        if self.config.moe_router_padding_for_fp8:
-            self.dispatched_routing_map, self.tokens_per_expert = self._pad_routing_map(
-                self.dispatched_routing_map, self.tokens_per_expert
-            )
+
+        # MORI EP unconditionally pads ``tokens_per_expert`` to a fixed total
+        # so ``num_out_tokens`` below is a Python int — no
+        # ``.sum().item()``, no ``Tensor.__index__`` sync inside
+        # ``torch.empty(...)`` in TE's permute, and no cold-rank ``== 0``
+        # branch (target_per_expert is always >= 1 by construction).
+        # This subsumes the fp8 alignment padding — the fixed target is
+        # always >= any reasonable fp8 multiple — so the
+        # ``moe_router_padding_for_fp8`` path is skipped here.
+        #
+        # ``self.tokens_per_expert`` is set to the sync-free CPU cache
+        # built in ``__init__`` rather than a per-step GPU tensor — see
+        # :meth:`get_number_of_tokens_per_expert` for the rationale.
+        self.dispatched_routing_map, num_out_tokens = (
+            self._pad_routing_map_to_fixed_target(self.dispatched_routing_map)
+        )
+        self.tokens_per_expert = self._tokens_per_expert_cpu
 
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
-        # Clamp ``num_out_tokens`` to ``>= 1`` so the fused permute kernel
-        # always allocates at least one output row. When this rank receives
-        # no tokens (cold rank in sparse routing), ``tokens_per_expert.sum()``
-        # is 0 — without the clamp the permute output is ``[0, h]`` empty,
-        # which trips TE's ``_moe_unpermute_mask_map.forward`` short-circuit
-        # (returns ``inp`` without setting ``ctx.num_tokens`` etc.). The
-        # downstream backward then takes the main path with the padded
-        # ``[max_num_tokens_to_recv, h]`` grad, hits the unset ctx, and
-        # raises ``AttributeError`` — surfaced in tests as a silent FAILED.
-        # The dummy row is uninitialized (routing_map has no 1s, so the
-        # permute kernel never writes to it) but is never read either —
-        # unpermute's per-row ``n_routed`` is 0 for every row, so the
-        # accumulator stays at 0 regardless of the dummy's content.
-        num_out_tokens = self.tokens_per_expert.sum().item()
-        if num_out_tokens == 0:
-            num_out_tokens = 1
         hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
             hidden_states,
             self.dispatched_routing_map,
