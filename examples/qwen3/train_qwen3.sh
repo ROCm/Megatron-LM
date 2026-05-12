@@ -18,6 +18,7 @@
 #   4B | 8B | 14B      — dense
 #
 # Override any default via environment, e.g. SEQ_LENGTH, EP, TP, LR, TRAIN_ITERS.
+# MoE: MOE_PERMUTE_FUSION=false disables --moe-permute-fusion (fused token permute/unpermute).
 # For 235B proxy runs: export NUM_LAYERS / NUM_EXPERTS (and optionally ROUTER_TOPK <= NUM_EXPERTS) before launch.
 # FP8: PR=fp8 and FP8_RECIPE=delayed|tensorwise|mxfp8|blockwise (mxfp8 sets NVTE_ROCM_ENABLE_MXFP8=1;
 #   mxfp8 MoE adds --moe-router-padding-for-fp8 automatically).
@@ -128,6 +129,7 @@ EVAL_ITERS=${EVAL_ITERS:--1}
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
 MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-false}"
+MOE_PERMUTE_FUSION="${MOE_PERMUTE_FUSION:-true}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 
@@ -405,6 +407,11 @@ fi
 
 # MoE options (Qwen3 MoE; DeepSeek-specific MLA flags are not used)
 if [ "$IS_MOE" -eq 1 ]; then
+    if [ "$MOE_PERMUTE_FUSION" != false ]; then
+        moe_permute_fusion_options=" --moe-permute-fusion"
+    else
+        moe_permute_fusion_options=""
+    fi
     moe_options=" \
         --num-experts ${NUM_EXPERTS} \
         --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
@@ -414,6 +421,7 @@ if [ "$IS_MOE" -eq 1 ]; then
         --moe-router-load-balancing-type aux_loss \
         --expert-model-parallel-size ${EP} \
         --expert-tensor-parallel-size ${ETP} \
+        ${moe_permute_fusion_options} \
     "
     if [ "$USE_GROUPED_GEMM" = true ]; then
         moe_options="${moe_options} --moe-grouped-gemm"
@@ -658,6 +666,8 @@ megatron_options=" \
     --distributed-timeout-minutes 60 \
     --eod-mask-loss \
     --attention-backend fused \
+    --rerun-mode disabled \
+    --no-check-for-nan-in-loss-and-grad	\
     ${qwen_base_options} \
     ${fsdp_option} \
     ${CE_FUSION_ARGS} \
