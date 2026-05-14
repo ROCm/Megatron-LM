@@ -715,7 +715,7 @@ class MLASelfAttention(MultiLatentAttention):
             kv_compressed = scatter_to_sequence_parallel_region(kv_compressed)
         elif (
             not kv_is_tp_sharded
-            get_pg_size(self.tp_group) > 1
+            and get_pg_size(self.tp_group) > 1
             and self.config.sequence_parallel
         ):
             # k_pos_emb: [s, b, qk_pos_emb_head_dim]
