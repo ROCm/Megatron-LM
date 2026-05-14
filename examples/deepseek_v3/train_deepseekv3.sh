@@ -195,7 +195,7 @@ if [ "$PR" = fp8 ]; then
     FP8_RUN_SUFFIX="-fp8recipe-${FP8_RECIPE}"
 fi
 NAME="${RUN_ENV}-mcore-${MODEL_SIZE}-lr-${LR}-bs-${MICRO_BATCH_SIZE}-seqlen-${SEQ_LEN}-pr-${PR}${FP8_RUN_SUFFIX}-tp-${TP}-pp-${PP}-etp-${ETP}-ep-${EP}-ac-${AC}-do-${DO}-sp-${SP}-profile${PROFILE}-sync${PROFILE_SYNC}-${TIMESTAMP}"
-OUTPUT_BASEPATH=output/${EXPERIMENT}-${NAME}
+OUTPUT_BASEPATH=${OUTPUT_BASEPATH:-"output/${EXPERIMENT}-${NAME}"}
 
 TENSORBOARD_DIR="${OUTPUT_BASEPATH}/tensorboard/"
 CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint"
