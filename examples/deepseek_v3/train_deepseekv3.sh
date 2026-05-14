@@ -378,8 +378,8 @@ fi
 
 # MXFP8: pad per-expert token counts for FP8 grouped GEMM (requires FP8 + non-allgather dispatcher).
 if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
-    moe_options="${moe_options} --moe-router-padding-for-fp8"
-    echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
+    moe_options="${moe_options} --moe-router-padding-for-quantization"
+    echo "[INFO] MXFP8 MoE: --moe-router-padding-for-quantization"
 fi
 
 # Fused TopK router + aux (TE >= 2.7); maps to Primus moe_use_fused_router_with_aux_score.

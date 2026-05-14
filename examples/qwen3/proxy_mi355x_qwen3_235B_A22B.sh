@@ -73,3 +73,7 @@ export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusio
 
 # --- distributed optimizer ---
 export DO=true
+
+export PROFILE_START=3
+export PROFILE_END=4
+export PROFILE=true

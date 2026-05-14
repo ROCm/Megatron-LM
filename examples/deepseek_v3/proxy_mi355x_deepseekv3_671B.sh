@@ -57,3 +57,4 @@ export GA_FUSION=true
 
 export PROFILE_START=3
 export PROFILE_END=4
+export PROFILE=true

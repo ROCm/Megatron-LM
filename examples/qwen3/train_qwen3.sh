@@ -21,7 +21,7 @@
 # MoE: MOE_PERMUTE_FUSION=false disables --moe-permute-fusion (fused token permute/unpermute).
 # For 235B proxy runs: export NUM_LAYERS / NUM_EXPERTS (and optionally ROUTER_TOPK <= NUM_EXPERTS) before launch.
 # FP8: PR=fp8 and FP8_RECIPE=delayed|tensorwise|mxfp8|blockwise (mxfp8 sets NVTE_ROCM_ENABLE_MXFP8=1;
-#   mxfp8 MoE adds --moe-router-padding-for-fp8 automatically).
+#   mxfp8 MoE adds --moe-router-padding-for-quantization automatically).
 #################################################################################
 
 set -e
@@ -439,10 +439,10 @@ if [ "$IS_MOE" -eq 1 ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
     fi
 
-    # MXFP8: pad per-expert token counts for MXFP8 grouped GEMM (see --moe-router-padding-for-fp8 in arguments.py).
+    # MXFP8: pad per-expert token counts for MXFP8 grouped GEMM (see --moe-router-padding-for-quantization in arguments.py).
     if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
-        moe_options="${moe_options} --moe-router-padding-for-fp8"
-        echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
+        moe_options="${moe_options} --moe-router-padding-for-quantization"
+        echo "[INFO] MXFP8 MoE: --moe-router-padding-for-quantization"
     fi
 else
     moe_options=""
