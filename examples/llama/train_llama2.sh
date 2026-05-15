@@ -65,7 +65,7 @@ else
 fi
 
 MODEL_SIZE="${MODEL_SIZE:-70}"
-TP="${TP:-8}"
+TP="${TP:-1}"
 PP="${PP:-1}"
 CP="${CP:-1}"
 MBS="${MBS:-1}"
@@ -349,16 +349,11 @@ if [ "$TE_FP8" -eq 1 ]; then
             --attention-softmax-in-fp32 \
         "
     elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
-        if [ "$MEGATRON_FSDP" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
-                --fp8-format=e4m3 \
-            "
-            # TE does not enable mxfp8 by default
-            export NVTE_ROCM_ENABLE_MXFP8=1
-        else 
-            echo "Error: Llama2 supports MXFP8 only for MEGATRON_FSDP."
-            exit
-        fi
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
+            --fp8-format=e4m3 \
+        "
+        # TE does not enable mxfp8 by default
+        export NVTE_ROCM_ENABLE_MXFP8=1
         
     elif [ "$TE_FP8_RECIPE" == "tensorwise" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=tensorwise \
@@ -370,11 +365,15 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-        if [ "$TE_FP8_RECIPE" != "mxfp8" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-        else
-            echo "Error: For Llama2 FP8_PARAM_GATHER and MXFP8 cannot be currently used together."
-            exit
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+
+        # MXFP8 + DDP path: TE does not implement `replace_raw_data` for MXFP8Tensor,
+        # so the default `_ParamAndGradBuffer` storage swap fails. Reusing the grad
+        # buffer for the MXFP8 param all-gather sidesteps that path. The FSDP and
+        # Megatron-FSDP paths handle MXFP8 param all-gather natively in TE and do
+        # not need this workaround.
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ] && [ "$FSDP" -ne 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --reuse-grad-buf-for-mxfp8-param-ag"
         fi
     fi
 
