@@ -12,7 +12,7 @@ export NUM_LAYERS=3
 export MOE_LAYER_FREQ='([0]*1+[1]*2)'
 
 # --- hyperparameters (Primus overrides) ---
-export TRAIN_ITERS=5
+export TRAIN_ITERS=20
 export MICRO_BATCH_SIZE=2
 export GLOBAL_BATCH_SIZE=16
 export SEQ_LENGTH=4096
@@ -55,6 +55,6 @@ export FORCE_BALANCE=true
 export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
 export GA_FUSION=true
 
-export PROFILE_START=3
-export PROFILE_END=4
+export PROFILE_START=12
+export PROFILE_END=13
 export PROFILE=true

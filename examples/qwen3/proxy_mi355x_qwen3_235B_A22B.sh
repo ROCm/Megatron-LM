@@ -22,7 +22,7 @@ export NUM_EXPERTS="${NUM_EXPERTS:-128}"
 export ROUTER_TOPK="${ROUTER_TOPK:-8}"
 
 # --- hyperparameters (Primus overrides) ---
-export TRAIN_ITERS=5
+export TRAIN_ITERS=20
 export MICRO_BATCH_SIZE=2
 export GLOBAL_BATCH_SIZE=16
 export SEQ_LENGTH=4096
@@ -74,6 +74,6 @@ export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusio
 # --- distributed optimizer ---
 export DO=true
 
-export PROFILE_START=3
-export PROFILE_END=4
+export PROFILE_START=12
+export PROFILE_END=13
 export PROFILE=true
