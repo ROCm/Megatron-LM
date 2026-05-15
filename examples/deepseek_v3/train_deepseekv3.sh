@@ -680,34 +680,67 @@ eval ${run_cmd}
 set +x
 
 if [ "$RUN_ENV" = "cluster" ] || ( [ "$RUN_ENV" = "slurm" ] && [ "$SLURM_NODEID" = "$((NNODES - 1))" ] ); then
-echo 'import argparse
+cat <<'PY' > mean_log_value.py
+import argparse
 import numpy as np
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-                        prog="Process Log")
+    parser = argparse.ArgumentParser(prog="Process Log")
     parser.add_argument("filename")
+    parser.add_argument(
+        "--skip-first",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Skip first N iterations (1-based line index in tmp.txt = iteration order).",
+    )
+    parser.add_argument(
+        "--skip-profile-steps",
+        nargs=2,
+        type=int,
+        metavar=("START", "END"),
+        default=None,
+        help="Also skip lines whose 1-based index is in [START, END] (profiler steps).",
+    )
     args = parser.parse_args()
 
     with open(args.filename) as f:
-        lines = f.readlines()
-    lines = lines[1:-1]
-    lines = [float(a) for a in lines]
-    mean = np.mean(np.array(lines))
-    print(mean)' > mean_log_value.py
+        raw = [ln.strip() for ln in f.readlines() if ln.strip()]
 
+    ps = pe = None
+    if args.skip_profile_steps is not None:
+        ps, pe = args.skip_profile_steps
+
+    vals = []
+    for i, ln in enumerate(raw):
+        it = i + 1
+        if args.skip_first > 0 and it <= args.skip_first:
+            continue
+        if ps is not None and ps <= it <= pe:
+            continue
+        vals.append(float(ln))
+
+    if not vals:
+        raise SystemExit("no values to average")
+    print(float(np.mean(np.array(vals))))
+PY
+
+MEAN_EXTRA=(--skip-first 2)
+if [ "$PROFILE" = true ]; then
+    MEAN_EXTRA+=(--skip-profile-steps "$PROFILE_START" "$PROFILE_END")
+fi
 
 echo '============================================================================================================'
 grep -Eo 'throughput per GPU [^|]*' $TRAIN_LOG | sed -E 's/.*throughput per GPU \(TFLOP\/s\/GPU\): ([0-9\.]+).*/\1/' > tmp.txt
-echo "throughput per GPU: $(python mean_log_value.py tmp.txt)" |& tee -a $TRAIN_LOG
-THROUGHPUT=$(python mean_log_value.py tmp.txt)
+echo "throughput per GPU: $(python mean_log_value.py tmp.txt "${MEAN_EXTRA[@]}")" |& tee -a $TRAIN_LOG
+THROUGHPUT=$(python mean_log_value.py tmp.txt "${MEAN_EXTRA[@]}")
 rm tmp.txt
 
 echo '============================================================================================================'
 grep -Eo 'elapsed time per iteration [^|]*' $TRAIN_LOG | sed -E 's/.*elapsed time per iteration \(ms\): ([0-9\.]+).*/\1/' > tmp.txt
-echo "elapsed time per iteration: $(python mean_log_value.py tmp.txt)" |& tee -a $TRAIN_LOG
+echo "elapsed time per iteration: $(python mean_log_value.py tmp.txt "${MEAN_EXTRA[@]}")" |& tee -a $TRAIN_LOG
 
-TIME_PER_ITER=$(python mean_log_value.py tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
+TIME_PER_ITER=$(python mean_log_value.py tmp.txt "${MEAN_EXTRA[@]}" 2>/dev/null | awk '{printf "%.6f", $0}')
 PERFORMANCE=$(awk -v bs="$GLOBAL_BATCH_SIZE" -v sl="$SEQ_LEN" -v tpi="$TIME_PER_ITER" -v ws="$((NNODES * GPUS_PER_NODE))" 'BEGIN {printf "%.6f", bs * sl * 1000/ (tpi * ws)}')
 echo "tokens/GPU/s: $PERFORMANCE" |& tee -a $TRAIN_LOG
 rm tmp.txt
