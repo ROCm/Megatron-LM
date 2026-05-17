@@ -137,7 +137,13 @@ else
     ds_works=24
 fi
 
-if [[ $MODEL_SIZE -eq 8 ]]; then #llama3.1-8B
+if [[ $MODEL_SIZE == "0.3" ]]; then # SmolLM ~300M, fits 16GB VRAM with FP4 (enwik8)
+    HIDDEN_SIZE=1024
+    FFN_HIDDEN_SIZE=4096
+    NUM_LAYERS=16
+    NUM_HEADS=16
+    NUM_KV_HEADS=4
+elif [[ $MODEL_SIZE -eq 8 ]]; then #llama3.1-8B
     HIDDEN_SIZE=4096 # e.g. llama-13b: 5120
     FFN_HIDDEN_SIZE=14336 # e.g. llama-13b: 13824
     NUM_LAYERS=32 # e.g. llama-13b: 40
