@@ -7,17 +7,23 @@
 # set -x
 
 # set envs 
-export GPU_MAX_HW_QUEUES=2
-export TORCH_NCCL_HIGH_PRIORITY=1
-export NCCL_CHECKS_DISABLE=1
-export NCCL_IB_HCA=rdma0,rdma1,rdma2,rdma3,rdma4,rdma5,rdma6,rdma7 
-export NCCL_IB_GID_INDEX=3
-export NCCL_CROSS_NIC=0
-export CUDA_DEVICE_MAX_CONNECTIONS=1
-export NCCL_PROTO=Simple
-export RCCL_MSCCL_ENABLE=0
-export TOKENIZERS_PARALLELISM=false
-export HSA_NO_SCRATCH_RECLAIM=1
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+export TORCH_NCCL_HIGH_PRIORITY=${TORCH_NCCL_HIGH_PRIORITY:-1}
+export NCCL_CHECKS_DISABLE=${NCCL_CHECKS_DISABLE:-1}
+NCCL_IB_HCA_LIST=$(rdma link -j 2>/dev/null | python3 -c "import json, sys
+try:
+    links = json.load(sys.stdin)
+    print(*[links[i][\"ifname\"] for i in range(min(8, len(links)))], sep=',')
+except Exception:
+    pass") || NCCL_IB_HCA_LIST=""
+export NCCL_IB_HCA=${NCCL_IB_HCA:-$NCCL_IB_HCA_LIST}
+export NCCL_IB_GID_INDEX=${NCCL_IB_GID_INDEX:-3}
+export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
+export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1}
+export NCCL_PROTO=${NCCL_PROTO:-Simple}
+export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
+export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
 
 
 # parsing input arguments
