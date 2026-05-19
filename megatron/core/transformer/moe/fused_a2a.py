@@ -537,15 +537,68 @@ except ImportError:
 
 
 _mori_op = None
-
+_mori_shmem_initialized = False
 # Process-wide CUDA stream dedicated to MORI dispatch/combine kernel launches.
 # Mirrors DeepEP's `allocate_on_comm_stream` pattern so that op.dispatch() and
 # op.combine() can run concurrently with non-dependent work on the default
-# (compute) stream when the caller passes async_finish=True. The host wait at
-# `recv_num_token[0].item()` inside `MoriDispatch.forward` still blocks until
-# the dispatch kernel drains, so the practical wall-time win from this alone
-# is limited until that .item() is deferred — see TODO in MoriDispatch.forward.
+# (compute) stream when the caller passes async_finish=True.
 _mori_comm_stream = None
+MORI_EP_PROCESS_GROUP_NAME = "mori_ep"
+
+
+def init_mori_shmem(group: torch.distributed.ProcessGroup):
+    """Initialize MORI shared memory using the given process group.
+
+    Registers ``group`` under :data:`MORI_EP_PROCESS_GROUP_NAME` and runs
+    ``shmem_torch_process_group_init`` once per process (until
+    :func:`finalize_mori_shmem`). MORI consumes the named PG only during
+    bootstrap (to broadcast the shmem UID); after that the registration is
+    unused, so later calls with a rebuilt EP group are no-ops.
+
+    Session teardown via ``torch.distributed.destroy_process_group()`` calls
+    ``_unregister_all_process_groups()`` and clears the registry; no explicit
+    unregister is needed.
+    """
+    global _mori_shmem_initialized
+    if _mori_shmem_initialized:
+        return
+    torch._C._distributed_c10d._register_process_group(MORI_EP_PROCESS_GROUP_NAME, group)
+    mori.shmem.shmem_torch_process_group_init(MORI_EP_PROCESS_GROUP_NAME)
+    _mori_shmem_initialized = True
+
+
+def reset_mori_op():
+    """Clear the cached :class:`~mori.ops.EpDispatchCombineOp`.
+
+    Calls :meth:`~mori.ops.EpDispatchCombineOp.reset` when present, then drops
+    the reference. Use between pytest parametrized cases or when EP layout changes
+    so the next :func:`get_mori_op` builds a fresh op. Does not finalize symmetric
+    memory; call :func:`finalize_mori_shmem` at session teardown.
+
+    Do not call between dispatch and combine in the same forward pass.
+    """
+    global _mori_op
+    if _mori_op is not None:
+        _mori_op.reset()
+    _mori_op = None
+
+
+def finalize_mori_shmem():
+    """Finalize MORI symmetric memory for process/session teardown.
+
+    Inverse of :func:`init_mori_shmem`. Resets the cached op first, then calls
+    ``mori.shmem.shmem_finalize()``. Safe when shmem was never initialized.
+    MORI cannot re-init shmem after finalize.
+
+    Does not unregister :data:`MORI_EP_PROCESS_GROUP_NAME`; pytest session
+    cleanup calls ``torch.distributed.destroy_process_group()``, which invokes
+    ``_unregister_all_process_groups()`` and tears down every named PG.
+    """
+    reset_mori_op()
+    global _mori_shmem_initialized
+    if HAVE_MORI and _mori_shmem_initialized:
+        mori.shmem.shmem_finalize()
+        _mori_shmem_initialized = False
 
 
 def _get_mori_comm_stream():
@@ -633,9 +686,8 @@ def get_mori_op(
     Dispatch and combine in the same forward pass share this instance; do not
     call :func:`reset_mori_op` between dispatch and combine.
 
-    Call :func:`reset_mori_op` when MoE layout or sizing changes (e.g. pytest
-    teardown between parametrized ``(tp_size, ep_size)`` cases) so the next
-    call builds a new op with the right ``num_experts_per_rank`` / buffers.
+    Call :func:`reset_mori_op` between parametrized tests when layout changes.
+    Call :func:`finalize_mori_shmem` once at session teardown.
 
     Args:
         group: Process group for EP communication.
@@ -657,6 +709,8 @@ def get_mori_op(
 
     if _mori_op is not None:
         return _mori_op
+    
+    init_mori_shmem(group)
 
     world_size = group.size()
     rank = torch.distributed.get_rank(group)
@@ -687,19 +741,6 @@ def get_mori_op(
 
     _mori_op = mori.ops.EpDispatchCombineOp(config)
     return _mori_op
-
-
-def reset_mori_op():
-    """Clear the global MORI op so the next :func:`get_mori_op` allocates fresh.
-
-    Calls :meth:`~mori.ops.EpDispatchCombineOp.reset` when present, then drops
-    the reference. Use after tests or when changing EP/TP layout so config
-    (e.g. ``num_experts_per_rank``) cannot mismatch the cached handle.
-    """
-    global _mori_op
-    if _mori_op is not None:
-        _mori_op.reset()
-    _mori_op = None
 
 
 class MoriDispatch(torch.autograd.Function):

@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.distributed
 
+from megatron.core.transformer.moe.fused_a2a import HAVE_MORI, finalize_mori_shmem
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
@@ -19,6 +20,8 @@ def pytest_sessionfinish(session, exitstatus):
 @pytest.fixture(scope="session", autouse=True)
 def cleanup():
     yield
+    if HAVE_MORI:
+        finalize_mori_shmem()
     if torch.distributed.is_initialized():
         print("Waiting for destroy_process_group")
         torch.distributed.barrier()

@@ -65,10 +65,6 @@ class MoEModelTestContainer:
             context_parallel_size=cp_size,
             expert_tensor_parallel_size=moe_tp_size,
         )
-        # MORI shmem bootstrap uses torch.distributed; must run after init_process_group
-        # (see Utils.initialize_model_parallel), including when only MORI tests are selected.
-        if kwargs.get("moe_flex_dispatcher_backend") == "mori":
-            _ensure_mori_shmem()
         _set_random_seed(seed_=123, data_parallel_random_init=data_parallel_random_init)
         local_expert_indices_offset = (
             parallel_state.get_expert_model_parallel_rank() * self.num_local_experts
@@ -432,51 +428,6 @@ def is_mori_available():
 
     return HAVE_MORI
 
-
-def _mori_shmem_bootstrap():
-    """Initialize MORI shmem for the test process group.
-
-    Fallback path used only when the early bootstrap in
-    ``tests/unit_tests/conftest.py:_mori_early_bootstrap_for_pytest`` did not
-    run (e.g. invoking this test module via plain ``pytest`` outside the
-    standard ``torchrun`` harness, with the argv heuristic missing).
-
-    The preferred path is the conftest bootstrap, because by the time pytest
-    has imported this module TransformerEngine has already initialized the
-    HIP runtime — calling ``shmem_torch_process_group_init`` here can trip
-    the ``free(): invalid size`` SIGABRT documented in
-    ``docs/design/mori_ep_integration.md`` §10.
-    """
-    import mori.shmem as mori_shmem
-
-    group = torch.distributed.new_group(
-        list(range(torch.distributed.get_world_size())), backend="gloo"
-    )
-    torch._C._distributed_c10d._register_process_group("mori_test", group)
-    mori_shmem.shmem_torch_process_group_init("mori_test")
-
-
-_mori_shmem_initialized = False
-
-
-def _ensure_mori_shmem():
-    """Idempotent wrapper: initialize MORI shmem at most once per session.
-
-    If the conftest's early bootstrap already ran (signaled by
-    ``MEGATRON_MORI_SHMEM_BOOTSTRAPPED=1``), this is a pure no-op — we just
-    flip the local flag so ``TestMoriNoShmem::test_dispatch_without_shmem_init``
-    correctly self-skips, as it would in any production run.
-    """
-    global _mori_shmem_initialized
-    if _mori_shmem_initialized:
-        return
-    if os.environ.get("MEGATRON_MORI_SHMEM_BOOTSTRAPPED") == "1":
-        _mori_shmem_initialized = True
-        return
-    _mori_shmem_bootstrap()
-    _mori_shmem_initialized = True
-
-
 @pytest.mark.skipif(
     not is_deep_ep_available() and not is_hybrid_ep_available() and not is_mori_available(),
     reason="Deep EP, Hybrid EP, and MORI are not available",
@@ -545,7 +496,7 @@ class TestFlexDispatcher:
             config.ENABLE_EXPERIMENTAL = True
         mori_kwargs = {}
         if moe_flex_dispatcher_backend == "mori":
-            mori_kwargs["moe_mori_max_tokens_per_rank"] = 16
+            mori_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         container = MoEModelTestContainer(
             tp_size=tp_size,
             ep_size=ep_size,
@@ -588,7 +539,7 @@ class TestFlexDispatcher:
             config.ENABLE_EXPERIMENTAL = True
         mori_kwargs = {}
         if moe_flex_dispatcher_backend == "mori":
-            mori_kwargs["moe_mori_max_tokens_per_rank"] = 32 * 8
+            mori_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         container = MoEModelTestContainer(
             tp_size=tp_size,
             ep_size=ep_size,
