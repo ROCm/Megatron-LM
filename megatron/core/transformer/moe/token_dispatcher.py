@@ -1490,11 +1490,28 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
-        # NOTE: pass self._raw_dispatched_probs (receiver-side, [total_recv, topk])
-        # rather than self.token_probs (sender-side, [N, topk]). The IntraNode
-        # combine kernel reads weights indexed by totalRecvTokenNum; passing the
-        # smaller sender buffer caused the GPU page fault triaged in
-        # docs/design/mori_ep_integration.md.
+        # MORI's combine and the matching backward dispatch want DIFFERENT
+        # probs shapes — pass both rather than letting backward silently
+        # reuse the receiver-side view (the source of the 0.5x backward
+        # gradient error on tp=8/ep=1 capacity tests; see the matching
+        # note in fused_a2a.py:MoriCombine.forward and
+        # docs/design/mori_ep_integration.md §12 / §13):
+        #
+        #   * `self._raw_dispatched_probs` — RECEIVER-side [total_recv,
+        #     topk] (padded to [max_num_tokens_per_rank, topk] by §16).
+        #     This is the `weights` arg to `op.combine()` in forward; the
+        #     IntraNode combine kernel reads it indexed by
+        #     totalRecvTokenNum.
+        #   * `self.token_probs` — SENDER-side [N_sender, topk]. This is
+        #     the `weights` arg to `op.dispatch()` in backward. MORI's
+        #     `op.dispatch` reads `weights[srcTokId * topk + lane]` for
+        #     `srcTokId in [0, N_sender)`; the receiver-side buffer above
+        #     would read in-bounds but with wrong values, which corrupts
+        #     the destination rank's receiver-side weights buffer — the
+        #     same buffer that `MoriDispatch.backward`'s saved
+        #     `recv_token_probs` view points at — and produces the
+        #     ~0.5x backward gradient.
+        #
         # Likewise, pass self._raw_dispatched_indices (receiver-side global,
         # [total_recv, topk]) — MORI's op.combine() expects receiver-side
         # global indices (matches dispatch_combine_test_utils.py:427).
@@ -1509,6 +1526,7 @@ class _MoriManager(_DispatchManager):
             self.token_indices,
             self._raw_dispatched_indices,
             self._raw_dispatched_probs,
+            self.token_probs,
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
