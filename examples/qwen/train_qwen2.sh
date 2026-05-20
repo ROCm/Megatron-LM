@@ -163,6 +163,7 @@ GPT_ARGS="
     --no-position-embedding \
     --disable-bias-linear \
     --swiglu \
+    --use-te-activation-func \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
     --hidden-dropout 0.0 \
