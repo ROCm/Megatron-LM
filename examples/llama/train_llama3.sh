@@ -173,6 +173,7 @@ GPT_ARGS="
     --position-embedding-type rope \
     --no-position-embedding \
     --swiglu \
+    --use-te-activation-func \
     --disable-bias-linear \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
