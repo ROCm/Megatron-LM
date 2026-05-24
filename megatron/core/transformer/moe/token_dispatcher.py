@@ -1383,6 +1383,8 @@ class _MoriManager(_DispatchManager):
         # — see the matching note in `dispatch()` for the rationale.
         self._raw_dispatched_probs: Optional[torch.Tensor] = None
         self._raw_dispatched_indices: Optional[torch.Tensor] = None
+        # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
+        self._routing_handle = None
 
         if mori_dispatch is None:
             raise ImportError(
@@ -1425,6 +1427,7 @@ class _MoriManager(_DispatchManager):
             dispatched_probs,
             num_tokens_per_expert,
             dispatched_indices_global,
+            routing_handle,
         ) = mori_dispatch(
             hidden_states,  # [num_tokens, hidden_dim]
             self.token_indices,  # [num_tokens, topk]
@@ -1437,6 +1440,7 @@ class _MoriManager(_DispatchManager):
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
+        self._routing_handle = routing_handle
         self.tokens_per_expert = num_tokens_per_expert
         self.dispatched_indices = dispatched_indices
         self.dispatched_probs = dispatched_probs
@@ -1518,8 +1522,10 @@ class _MoriManager(_DispatchManager):
         # Sender-side self.token_indices is also forwarded so MoriCombine can
         # slice its output to the sender row count and so the backward path
         # can re-dispatch grads using the original sender-side routing.
-        # call_reset=True inside MoriCombine.forward already triggers MORI's
-        # internal reset, so no explicit reset_mori_op() is needed here.
+        assert self._routing_handle is not None, (
+            "Mori combine() called without a matching dispatch(); "
+            "the per-call routing handle from MoriDispatch is missing."
+        )
         hidden_states = mori_combine(
             hidden_states,
             self.group,
@@ -1527,12 +1533,15 @@ class _MoriManager(_DispatchManager):
             self._raw_dispatched_indices,
             self._raw_dispatched_probs,
             self.token_probs,
+            self._routing_handle,
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
+        # Combine Function keeps its own ctx-side ref for backward.
+        self._routing_handle = None
         return hidden_states
 
     def _pad_routing_map(
