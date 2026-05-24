@@ -1547,17 +1547,19 @@ class _MoriManager(_DispatchManager):
     def _pad_routing_map(
         self, routing_map: torch.Tensor, tokens_per_expert: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Pad the routing map to the nearest multiple of the pad_multiple."""
-        pad_multiple = get_fp8_align_size(self.config.fp8_recipe)
+        """
+        Pad the routing map to the nearest multiple of the pad_multiple.
+        """
+        pad_multiple = get_align_size_for_quantization(self.config)
 
         num_input_tokens = routing_map.shape[0]
         target_tokens_per_expert = (
             torch.ceil(tokens_per_expert / pad_multiple) * pad_multiple
         ).long()
 
+        # Check if there are enough tokens to pad
         enough_tokens_to_pad = torch.all(target_tokens_per_expert <= num_input_tokens)
         if not enough_tokens_to_pad:
-            logger = logging.getLogger(__name__)
             logger.warning(
                 "Not enough tokens to pad. The total number of tokens received in this rank "
                 "is smaller than the target number of tokens for each expert. "
@@ -1565,6 +1567,8 @@ class _MoriManager(_DispatchManager):
             )
         else:
             if is_experimental_enabled() and self.permute_fusion:
+                from megatron.core.fusions.fused_pad_routing_map import fused_pad_routing_map
+
                 routing_map = fused_pad_routing_map(routing_map, pad_multiple)
             else:
                 routing_map = pad_routing_map(routing_map, pad_multiple)
@@ -1580,7 +1584,7 @@ class _MoriManager(_DispatchManager):
             self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs
             )
-        if self.config.moe_router_padding_for_fp8:
+        if self.config.moe_router_padding_for_quantization:
             self.dispatched_routing_map, self.tokens_per_expert = self._pad_routing_map(
                 self.dispatched_routing_map, self.tokens_per_expert
             )
