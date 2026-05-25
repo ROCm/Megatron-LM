@@ -291,6 +291,7 @@ MODEL_ARGS=(
     --normalization RMSNorm
     --position-embedding-type rope
     --swiglu
+    --use-te-activation-func
     --untie-embeddings-and-output-weights
     --group-query-attention
     --num-query-groups 8
@@ -314,6 +315,7 @@ MODEL_ARGS=(
     --normalization RMSNorm
     --position-embedding-type rope
     --swiglu
+    --use-te-activation-func
     --untie-embeddings-and-output-weights
     --group-query-attention
     --num-query-groups 8
