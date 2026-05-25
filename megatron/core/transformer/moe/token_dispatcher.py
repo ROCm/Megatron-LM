@@ -1331,7 +1331,7 @@ class _MoriManager(_DispatchManager):
     A manager class to handle fused all-to-all communication processes for MoE models using
     MORI EP backend. See https://github.com/ROCm/mori for more details.
 
-    The workflow mirrors DeepEP exactly:
+    The workflow mirrors DeepEP:
     (1) setup_metadata(): Process routing map and probabilities to prepare dispatch metadata
     (2) dispatch():
         - Use MORI dispatch to perform all-to-all communication
@@ -1376,11 +1376,9 @@ class _MoriManager(_DispatchManager):
 
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
-        self.handle = None
-        # Receiver-side caches populated in dispatch() and consumed by
-        # combine(). MORI's op.combine() needs the receiver-side global
-        # `dispatched_indices_global` and receiver-side `_raw_dispatched_probs`
-        # — see the matching note in `dispatch()` for the rationale.
+        # Full-capacity MORI recv buffers from dispatch(), consumed by combine().
+        # Shape [world_size * max_num_tokens_per_rank, topk]; op.combine() reads
+        # only the first total_recv rows via the routing handle.
         self._raw_dispatched_probs: Optional[torch.Tensor] = None
         self._raw_dispatched_indices: Optional[torch.Tensor] = None
         # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
@@ -1413,13 +1411,10 @@ class _MoriManager(_DispatchManager):
         # MORI EP only supports float32 probs (matches DeepEP path)
         if self.token_probs.dtype != torch.float32:
             if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
-                print("MORI EP only supports float32 probs, please set --moe-router-dtype=fp32")
+                logger.warning(
+                    "MORI EP only supports float32 probs, please set --moe-router-dtype=fp32"
+                )
             self.token_probs = self.token_probs.float()
-
-        # Capture sender-side num_tokens BEFORE dispatch — needed at combine time
-        # to slice op.combine()'s output (which is shaped to the full
-        # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
-        self._sender_num_tokens = hidden_states.shape[0]
 
         (
             hidden_states,
@@ -1427,6 +1422,7 @@ class _MoriManager(_DispatchManager):
             dispatched_probs,
             num_tokens_per_expert,
             dispatched_indices_global,
+            dispatch_weights_global,
             routing_handle,
         ) = mori_dispatch(
             hidden_states,  # [num_tokens, hidden_dim]
@@ -1444,21 +1440,9 @@ class _MoriManager(_DispatchManager):
         self.tokens_per_expert = num_tokens_per_expert
         self.dispatched_indices = dispatched_indices
         self.dispatched_probs = dispatched_probs
-        # Snapshot the receiver-side topk probs BEFORE _indices_to_multihot
-        # overwrites self.dispatched_probs. MORI's op.combine() reads the
-        # `weights` arg as a [total_recv, topk] receiver-side buffer (see
-        # intranode.hpp:281-286 — indexed by totalRecvTokenNum, not by sender
-        # count). Passing self.token_probs (sender-side, [N, topk]) here
-        # caused a ~1.1 MiB OOB read per combine and the Memory access fault
-        # by GPU we observed on the second forward dispatch.
-        self._raw_dispatched_probs = dispatched_probs
-        # Snapshot the receiver-side GLOBAL indices [total_recv, topk]
-        # (no -1 sentinels, GLOBAL expert ids in [0, num_experts)). MORI's
-        # op.combine() expects this format for its `indices` arg — passing
-        # the sender-side `self.token_indices` made the kernel sum only one
-        # source PE per token, producing `0.5x` instead of `x` for topk=2.
-        # This mirrors dispatch_combine_test_utils.py:427 which passes
-        # `dispatch_indices` (receiver-side) to `op.combine()`.
+        # Full MORI recv views for op.combine() — not sender-side token_probs.
+        self._raw_dispatched_probs = dispatch_weights_global
+        # Global expert ids in [0, num_experts); no -1 sentinels.
         self._raw_dispatched_indices = dispatched_indices_global
 
         return hidden_states
@@ -1494,45 +1478,18 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
-        # MORI's combine and the matching backward dispatch want DIFFERENT
-        # probs shapes — pass both rather than letting backward silently
-        # reuse the receiver-side view (the source of the 0.5x backward
-        # gradient error on tp=8/ep=1 capacity tests; see the matching
-        # note in fused_a2a.py:MoriCombine.forward and
-        # docs/design/mori_ep_integration.md §12 / §13):
-        #
-        #   * `self._raw_dispatched_probs` — RECEIVER-side [total_recv,
-        #     topk] (padded to [max_num_tokens_per_rank, topk] by §16).
-        #     This is the `weights` arg to `op.combine()` in forward; the
-        #     IntraNode combine kernel reads it indexed by
-        #     totalRecvTokenNum.
-        #   * `self.token_probs` — SENDER-side [N_sender, topk]. This is
-        #     the `weights` arg to `op.dispatch()` in backward. MORI's
-        #     `op.dispatch` reads `weights[srcTokId * topk + lane]` for
-        #     `srcTokId in [0, N_sender)`; the receiver-side buffer above
-        #     would read in-bounds but with wrong values, which corrupts
-        #     the destination rank's receiver-side weights buffer — the
-        #     same buffer that `MoriDispatch.backward`'s saved
-        #     `recv_token_probs` view points at — and produces the
-        #     ~0.5x backward gradient.
-        #
-        # Likewise, pass self._raw_dispatched_indices (receiver-side global,
-        # [total_recv, topk]) — MORI's op.combine() expects receiver-side
-        # global indices (matches dispatch_combine_test_utils.py:427).
-        # Sender-side self.token_indices is also forwarded so MoriCombine can
-        # slice its output to the sender row count and so the backward path
-        # can re-dispatch grads using the original sender-side routing.
         assert self._routing_handle is not None, (
             "Mori combine() called without a matching dispatch(); "
             "the per-call routing handle from MoriDispatch is missing."
         )
+        # op.combine() uses recv-side _raw_*; backward op.dispatch() uses sender-side token_*.
         hidden_states = mori_combine(
             hidden_states,
             self.group,
             self.token_indices,
             self._raw_dispatched_indices,
-            self._raw_dispatched_probs,
             self.token_probs,
+            self._raw_dispatched_probs,
             self._routing_handle,
             self.num_local_experts,
             self.router_topk,

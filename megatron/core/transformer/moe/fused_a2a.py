@@ -644,33 +644,6 @@ def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool
     return result
 
 
-def _ensure_combine_weights_non_empty(
-    weights: torch.Tensor, router_topk: int, device: torch.device
-) -> torch.Tensor:
-    """Workaround MORI's `weights.size(0) != 0` gate in op.combine().
-
-    MORI's python wrapper sets ``weight_ptr=0`` (→ kernel's
-    ``args.weightsBuf=nullptr``) when the passed weights tensor has
-    ``size(0) == 0``. On ranks that received zero tokens during dispatch
-    (highly imbalanced routing), the receiver-side probs slice is exactly
-    that 0-row tensor — and the resulting null weightsBuf breaks the
-    combine kernel's slot-1 contribution path for those ranks' senders,
-    producing only PE 0's contribution instead of the sum across all
-    unique destinations. Reproduced standalone in
-    ``mori_zero_recv_repro.py``.
-
-    This helper substitutes a 1-row dummy of zeros when the input is
-    empty so ``weight_ptr`` stays non-null. The kernel only reads the
-    first ``totalRecvTokenNum`` rows, so the dummy is never dereferenced
-    on the data path.
-    """
-    if weights.size(0) > 0:
-        return weights
-    return torch.zeros(
-        (1, router_topk), dtype=weights.dtype, device=device
-    )
-
-
 def get_mori_op(
     group: torch.distributed.ProcessGroup,
     hidden_dim: int,
@@ -685,7 +658,6 @@ def get_mori_op(
 
     Dispatch and combine in the same forward pass share this instance; do not
     call :func:`reset_mori_op` between dispatch and combine.
-
     Call :func:`reset_mori_op` between parametrized tests when layout changes.
     Call :func:`finalize_mori_shmem` once at session teardown.
 
@@ -782,9 +754,7 @@ class MoriDispatch(torch.autograd.Function):
         # x -> [num_tokens, hidden_dim]
         # token_probs -> [num_tokens, router_topk]
         # token_indices -> [num_tokens, router_topk]
-        # scales=None: BF16 path uses scale_dim=0, so MORI ignores this arg
-        # (see dispatch_combine.py:477-479). For an FP8 dispatch we'd need a
-        # real [num_tokens, scale_dim] tensor in float8_e4m3fnuz.
+        # scales=None: BF16 path uses scale_dim=0
         # When async_finish=True the launch is moved onto a dedicated comm
         # stream so it can overlap with non-dependent compute. The .item()
         # below still serializes on the host, however.
@@ -793,7 +763,7 @@ class MoriDispatch(torch.autograd.Function):
         (
             dispatch_out,
             dispatch_weights,
-            dispatch_scales,
+            _,
             dispatch_indices,
             recv_num_token,
             routing_handle,
@@ -809,9 +779,7 @@ class MoriDispatch(torch.autograd.Function):
             allocate_on_comm_stream,
         )
 
-        # TODO(mori-overlap): defer this .item() out of the autograd Function
-        # so dispatch can actually overlap with compute. See comment above and
-        # the comm-stream notes in docs/design/mori_ep_integration.md.
+        # TODO look into removing/hiding this .item() call
         total_recv = recv_num_token[0].item()
         recv_x = dispatch_out[:total_recv]
         recv_token_indices_global = dispatch_indices[:total_recv]
@@ -819,13 +787,9 @@ class MoriDispatch(torch.autograd.Function):
 
         # MORI's dispatch returns the original GLOBAL expert ids in [0, num_experts)
         # for every topk slot of every received token, with no -1 sentinel for
-        # non-local slots. Megatron's downstream pipeline (specifically
-        # `_MoriManager._indices_to_multihot`) follows the DeepEP contract, which
+        # non-local slots. Megatron's downstream pipeline follows the DeepEP contract, which
         # expects values in the LOCAL expert space [0, num_local_experts) with
-        # `-1` marking non-local slots. Without the rebase below, the advanced-
-        # indexing assignment in `_indices_to_multihot` writes out of bounds and
-        # triggers `HSA_STATUS_ERROR_EXCEPTION 0x1016` from the underlying
-        # `at::native::index_put_kernel`.
+        # `-1` marking non-local slots.
         my_rank = torch.distributed.get_rank(group)
         local_id_start = my_rank * num_local_experts
         local_id_end = local_id_start + num_local_experts
@@ -853,30 +817,22 @@ class MoriDispatch(torch.autograd.Function):
         ctx.router_topk = router_topk
         ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
         ctx.fp8_dispatch = fp8_dispatch
-        # Stash comm-stream flags for backward — backward can't receive new
-        # arguments via apply(), so we have to carry them through ctx.
+        ctx.local_num_tokens = token_indices.shape[0]
+        # Stash comm-stream flags for backward
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         # Stashed so backward can replay this layer's exact routing layout.
         ctx.routing_handle = routing_handle
-        # Save the RECEIVER-side topk probs and the RECEIVER-side global indices
-        # (not sender-side `token_indices`) for backward. The dispatch-backward
-        # calls `op.combine`, whose IntraNode kernel expects the `indices`
-        # argument to be the receiver-side global indices [total_recv, topk]
-        # (matches MORI's own dispatch_combine_test_utils.py). Passing
-        # sender-side indices [N, topk] makes the kernel only sum one source
-        # PE's contribution rather than all unique destinations, producing
-        # `0.5x` instead of `x` for topk=2 routing.
-        ctx.save_for_backward(token_indices, recv_token_probs, recv_token_indices_global)
+        # Full-capacity MORI recv views for dispatch-backward op.combine().
+        ctx.save_for_backward(dispatch_indices, dispatch_weights)
 
-        # Returns the receiver-side global indices and routing handle for the
-        # downstream `mori_combine` (both required for layer-isolated combine).
         return (
             recv_x,
             recv_token_indices,
             recv_token_probs,
             tokens_per_expert,
-            recv_token_indices_global,
+            dispatch_indices,
+            dispatch_weights,
             routing_handle,
         )
 
@@ -887,11 +843,12 @@ class MoriDispatch(torch.autograd.Function):
         grad_indices,
         grad_probs,
         grad_tpe,
-        grad_recv_idx_global,
+        grad_indices_global,
+        grad_weights_global,
         grad_routing_handle,
     ):
         """Backward pass: combine gradients back using MORI."""
-        token_indices, recv_token_probs, recv_token_indices_global = ctx.saved_tensors
+        dispatch_indices, dispatch_weights = ctx.saved_tensors
         op = get_mori_op(
             group=ctx.group,
             hidden_dim=grad_output.shape[1],
@@ -901,19 +858,12 @@ class MoriDispatch(torch.autograd.Function):
             data_type=grad_output.dtype,
             fp8_dispatch=ctx.fp8_dispatch,
         )
-        num_tokens = token_indices.shape[0]
-        # MORI's op.combine() expects RECEIVER-side global indices — see
-        # the comment in MoriDispatch.forward where we save them and the
-        # matching pattern in dispatch_combine_test_utils.py:427 which
-        # passes the receiver-side `dispatch_indices` to `op.combine()`.
-        combine_weights = _ensure_combine_weights_non_empty(
-            recv_token_probs.float(), ctx.router_topk, grad_output.device
-        )
+        num_tokens = ctx.local_num_tokens
         combined_x, _ = _run_mori_op_on_stream(
             lambda: op.combine(
                 grad_output.contiguous(),
-                combine_weights,
-                recv_token_indices_global.to(torch.int32),
+                dispatch_weights,
+                dispatch_indices,
                 routing=ctx.routing_handle,
             ),
             ctx.async_finish,
@@ -952,8 +902,8 @@ class MoriCombine(torch.autograd.Function):
         group,
         sender_token_indices,
         recv_token_indices,
-        recv_token_probs,
         sender_token_probs,
+        recv_token_probs,
         routing_handle,
         num_local_experts,
         router_topk,
@@ -964,45 +914,13 @@ class MoriCombine(torch.autograd.Function):
     ):
         """Forward pass: combine expert outputs back to original ranks via MORI.
 
-        Naming convention: every routing-metadata arg here carries an
-        explicit `sender_` / `recv_` prefix so the receiver-vs-sender
-        contract is unambiguous at every call site. Mixing them up is the
-        root cause of the `0.5x` bug family documented in
-        docs/design/mori_ep_integration.md §12 / §13 / §16.
+        Sender/recv contract (mixing these up causes wrong combine or ~0.5x
+        backward gradients):
 
-        Args:
-            x: RECEIVER-side hidden states [total_recv, hidden_dim].
-                Input to `op.combine()` in forward; the upstream gradient
-                in backward.
-            sender_token_indices: SENDER-side topk indices
-                [num_sender_tokens, topk]. Used to (a) slice
-                `op.combine()`'s output back to the sender row count and
-                (b) re-dispatch grads in backward via `op.dispatch()`.
-                Carries `-1` sentinels for capacity-dropped slots; MORI's
-                dispatch kernel handles those internally (see §16 in the
-                design doc).
-            recv_token_indices: RECEIVER-side global topk indices
-                [total_recv, topk]. This is what op.combine() expects (matches
-                dispatch_combine_test_utils.py:427). Passing sender-side
-                indices instead breaks the kernel's per-unique-PE summation
-                and produces `0.5x` for topk=2 routing.
-            recv_token_probs: RECEIVER-side topk probs [total_recv, topk].
-                Used as the `weights` arg to MORI's `op.combine()` in
-                forward. Must NOT be reused as the `weights` arg to
-                `op.dispatch()` in backward — see `sender_token_probs`.
-            sender_token_probs: SENDER-side topk probs [num_sender_tokens,
-                topk]. Saved for backward and passed to `op.dispatch()` as
-                the `weights` arg. MORI's `op.dispatch()` expects weights
-                shaped like the input (sender-aligned); passing the
-                receiver-side `recv_token_probs` instead silently corrupts
-                the destination rank's receiver-side weights buffer
-                (which is the same buffer that `MoriDispatch.backward`'s
-                saved `recv_token_probs` view points at) and reproduces
-                the family of `0.5x` backward errors documented in
-                docs/design/mori_ep_integration.md §12 / §13.
-            routing_handle: Per-layer routing handle from the matching
-                `MoriDispatch.forward`. Forwarded as `routing=` to
-                `op.combine()` and saved on `ctx` for backward replay.
+        - ``op.combine()`` (forward): ``recv_token_probs``, ``recv_token_indices``
+          — full-capacity recv views ``[world_size * max_num_tokens_per_rank, topk]``.
+        - ``op.dispatch()`` (backward): ``sender_token_probs``, ``sender_token_indices``
+          — sender-aligned ``[num_sender_tokens, topk]``.
         """
         op = get_mori_op(
             group=group,
@@ -1013,28 +931,20 @@ class MoriCombine(torch.autograd.Function):
             data_type=x.dtype,
             fp8_dispatch=fp8_dispatch,
         )
-        # Sender-side num_tokens — needed both as ctx for backward and to
-        # slice op.combine()'s output (which is shaped to the full
-        # [max_num_inp_token_per_rank, hidden_dim] capacity buffer).
         num_tokens = sender_token_indices.shape[0]
 
-        combine_weights = _ensure_combine_weights_non_empty(
-            recv_token_probs.float(), router_topk, x.device
-        )
         combined_x, _ = _run_mori_op_on_stream(
             lambda: op.combine(
                 x.contiguous(),
-                combine_weights,
-                recv_token_indices.to(torch.int32),
+                recv_token_probs,
+                recv_token_indices,
                 routing=routing_handle,
             ),
             async_finish,
             allocate_on_comm_stream,
         )
         # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim]
-        # buffer view. Slice down to the actual sender-side row count so
-        # combine_postprocess()'s view(self.hidden_shape) is correct whenever
-        # max_num_inp_token_per_rank != num_tokens.
+        # buffer view. Slice down to the actual sender-side row count.
         combined_x = combined_x[:num_tokens]
 
         ctx.group = group
@@ -1048,34 +958,16 @@ class MoriCombine(torch.autograd.Function):
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         # Forwarded so backward's `op.dispatch(routing=...)` replays the same layout.
         ctx.routing_handle = routing_handle
-        # Stash the receiver-side row count for backward. By the time we get
-        # here, x.shape[0] is the same `total_recv` that MoriDispatch.forward
-        # already paid the .item() sync for — it's the row count of `recv_x`
-        # that propagated through unpermute → expert outputs → here. Saving
-        # it on ctx lets backward skip the redundant
-        # `recv_num_token[0].item()` host-sync after the grad dispatch.
-        # Since routing is deterministic given the same indices, this is the
-        # exact total_recv backward's op.dispatch will produce.
+        # Stash the receiver-side row count for backward.
         ctx.total_recv = x.shape[0]
-        # Save the SENDER-side probs and indices (not the receiver-side
-        # views) for backward. `MoriCombine.backward` re-dispatches the
-        # upstream gradient via `op.dispatch`, whose `weights` and
-        # `indices` args must both be aligned with the input rows
-        # (sender-side) — see the docstring above and §12 / §13 in
-        # docs/design/mori_ep_integration.md.
+        # Save the SENDER-side probs and indices for backward.
         ctx.save_for_backward(sender_token_indices, sender_token_probs)
         return combined_x
 
     @staticmethod
     def backward(ctx, grad_output):
         """Backward pass: dispatch gradients using MORI."""
-        # Both args to `op.dispatch()` below MUST be sender-side and
-        # aligned with `grad_output` (which is the upstream grad of
-        # `combined_x` from forward, shape [num_sender_tokens,
-        # hidden_dim]). MORI's dispatch kernel reads
-        # `weights[srcTokId * topk + lane]` and
-        # `indices[srcTokId * topk + lane]` for
-        # `srcTokId in [0, num_sender_tokens)`.
+        # Both args to `op.dispatch()` below MUST be sender-side
         sender_token_indices, sender_token_probs = ctx.saved_tensors
         op = get_mori_op(
             group=ctx.group,
@@ -1098,15 +990,7 @@ class MoriCombine(torch.autograd.Function):
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # Reuse the total_recv saved in forward instead of calling
-        # `recv_num_token[0].item()` here — that .item() forces a host sync
-        # waiting on the dispatch kernel and was the ~1ms-per-layer cost
-        # diagnosed in the MoRI EP profiling notes.
-        # Return one None per non-tensor input arg (12 inputs after ctx:
-        # x, group, sender_token_indices, recv_token_indices,
-        # recv_token_probs, sender_token_probs, routing_handle,
-        # num_local_experts, router_topk, max_num_tokens_per_rank,
-        # fp8_dispatch, async_finish, allocate_on_comm_stream).
+        # Reuse the total_recv saved in forward.
         return (
             dispatch_out[: ctx.total_recv],
             None,
@@ -1159,14 +1043,18 @@ if HAVE_MORI:
 
         Returns:
             Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert,
-            recv_token_indices_global, routing_handle).
+            dispatch_indices, dispatch_weights, routing_handle).
 
-            ``routing_handle`` is the per-call DeepEP-style routing snapshot
+            ``recv_x`` / ``recv_indices`` / ``recv_probs`` are sliced to
+            ``[total_recv, ...]`` for the Megatron permute path.
+            ``dispatch_indices`` and ``dispatch_weights`` are full MORI recv
+            capacity views ``[world_size * max_num_tokens_per_rank, topk]`` for
+            combine and dispatch-backward.
+
+            ``routing_handle`` is the per-call routing snapshot
             (a :class:`mori.ops.dispatch_combine.EpDispatchRoutingHandle`)
-            that the matching :func:`mori_combine` must pass back so combine
-            reads the same layout this dispatch produced. Hold the handle
-            for as long as the combine pairs with this dispatch — the
-            backward path consumes it implicitly via the autograd ctx.
+            that the matching :func:`mori_combine` must pass back so combine/backward dispatch
+            reads the same layout this dispatch produced.
         """
         return MoriDispatch.apply(
             x.contiguous(),
@@ -1187,8 +1075,8 @@ if HAVE_MORI:
         group,
         sender_token_indices,
         recv_token_indices,
-        recv_token_probs,
         sender_token_probs,
+        recv_token_probs,
         routing_handle,
         num_local_experts,
         router_topk,
@@ -1201,9 +1089,7 @@ if HAVE_MORI:
 
         Naming: every routing-metadata arg uses an explicit
         `sender_` / `recv_` prefix so the receiver-vs-sender contract is
-        unambiguous. See `MoriCombine.forward` for the full contract and
-        the failure modes that come from violating it
-        (docs/design/mori_ep_integration.md §12 / §13).
+        unambiguous.
 
         Args:
             x: Input tensor from expert computation [total_recv, hidden_dim]
@@ -1213,22 +1099,20 @@ if HAVE_MORI:
                 forward and as the `indices` arg to `op.dispatch()` in
                 backward.
             recv_token_indices: RECEIVER-side global topk indices
-                [total_recv, topk]. This is what MORI's op.combine() expects
-                — see MoriCombine.forward docstring for details.
-            recv_token_probs: RECEIVER-side topk probabilities
-                [total_recv, topk]. Used as the `weights` arg to
-                `op.combine()` in forward only.
+                ``[world_size * max_num_tokens_per_rank, topk]`` (MORI recv
+                capacity). Passed to ``op.combine()`` in forward.
             sender_token_probs: SENDER-side topk probabilities
-                [num_sender_tokens, topk]. Used as the `weights` arg to
-                `op.dispatch()` in backward. See `MoriCombine.forward`
-                docstring for why this must be sender-aligned.
+                ``[num_sender_tokens, topk]``. Passed to ``op.dispatch()`` in
+                backward; must be sender-aligned, not ``recv_token_probs``.
+            recv_token_probs: RECEIVER-side topk probabilities
+                ``[world_size * max_num_tokens_per_rank, topk]`` (MORI recv
+                capacity). Passed to ``op.combine()`` in forward only.
             routing_handle: The
                 :class:`mori.ops.dispatch_combine.EpDispatchRoutingHandle`
                 returned alongside ``recv_x`` from the matching
                 :func:`mori_dispatch` call. Keeps this layer's combine
                 isolated from any other layer's dispatch on the same
-                MORI op handle (see `MoriCombine.forward` docstring for
-                the cross-layer aliasing failure modes this prevents).
+                MORI op handle.
             num_local_experts: Experts per rank
             router_topk: Top-K experts per token
             max_num_tokens_per_rank: Max tokens per rank for buffer sizing
@@ -1247,8 +1131,8 @@ if HAVE_MORI:
             group,
             sender_token_indices,
             recv_token_indices,
-            recv_token_probs,
             sender_token_probs,
+            recv_token_probs,
             routing_handle,
             num_local_experts,
             router_topk,
