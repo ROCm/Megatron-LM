@@ -1140,14 +1140,9 @@ def validate_args(args, defaults={}):
         args.moe_aux_loss_coeff = args.moe_aux_loss_coeff[0]
 
     # MORI EP: auto-derive max tokens per rank if user didn't pass one. This is
-    # the sender-side row count of the tensor MORI's `op.dispatch` will see —
-    # i.e. `hidden_states.shape[0]` after the `view(-1, hidden)` inside
-    # `MoEFlexTokenDispatcher.dispatch_preprocess`. With sequence parallelism
-    # the sequence dimension is sharded across TP ranks; with context
-    # parallelism it's sharded across CP ranks. Setting this any larger just
-    # over-allocates the symmetric SHMEM heap (linear in this value), so
-    # default to the exact upper bound and let the user override it for
-    # variable-batch scenarios.
+    # the sender-side row count of the tensor MORI's `op.dispatch` will see.
+    # With sequence parallelism the sequence dimension is sharded across TP ranks;
+    # with context parallelism it's sharded across CP ranks.
     if getattr(args, 'moe_flex_dispatcher_backend', None) == 'mori' and args.moe_mori_max_tokens_per_rank is None:
         per_rank_tokens = args.micro_batch_size * args.seq_length
         if args.context_parallel_size > 1:
