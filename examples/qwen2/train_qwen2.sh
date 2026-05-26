@@ -170,6 +170,7 @@ GPT_ARGS="
     --disable-bias-linear \
     --swiglu \
     --use-te-activation-func \
+    --no-bias-swiglu-fusion \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
     --hidden-dropout 0.0 \

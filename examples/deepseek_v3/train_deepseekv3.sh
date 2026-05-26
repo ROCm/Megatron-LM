@@ -619,6 +619,7 @@ megatron_options="  \
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --use-te-activation-func \
+        --no-bias-swiglu-fusion \
         --normalization RMSNorm \
         --norm-epsilon 1e-06 \
         --use-rotary-position-embeddings \
