@@ -1376,11 +1376,9 @@ class _MoriManager(_DispatchManager):
 
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
-        # Full-capacity MORI recv buffers from dispatch(), consumed by combine().
-        # Shape [world_size * max_num_tokens_per_rank, topk]; op.combine() reads
-        # only the first total_recv rows via the routing handle.
+        # Full-capacity MORI dispatch_weights from dispatch(), for op.combine().
+        # Shape [world_size * max_num_tokens_per_rank, topk].
         self._raw_dispatched_probs: Optional[torch.Tensor] = None
-        self._raw_dispatched_indices: Optional[torch.Tensor] = None
         # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
         self._routing_handle = None
 
@@ -1421,7 +1419,6 @@ class _MoriManager(_DispatchManager):
             dispatched_indices,
             dispatched_probs,
             num_tokens_per_expert,
-            dispatched_indices_global,
             dispatch_weights_global,
             routing_handle,
         ) = mori_dispatch(
@@ -1440,10 +1437,8 @@ class _MoriManager(_DispatchManager):
         self.tokens_per_expert = num_tokens_per_expert
         self.dispatched_indices = dispatched_indices
         self.dispatched_probs = dispatched_probs
-        # Full MORI recv views for op.combine() — not sender-side token_probs.
+        # dispatch_weights recv buffer for op.combine(); indices use token_indices.
         self._raw_dispatched_probs = dispatch_weights_global
-        # Global expert ids in [0, num_experts); no -1 sentinels.
-        self._raw_dispatched_indices = dispatched_indices_global
 
         return hidden_states
 
@@ -1482,14 +1477,12 @@ class _MoriManager(_DispatchManager):
             "Mori combine() called without a matching dispatch(); "
             "the per-call routing handle from MoriDispatch is missing."
         )
-        # op.combine() uses recv-side _raw_*; backward op.dispatch() uses sender-side token_*.
         hidden_states = mori_combine(
             hidden_states,
             self.group,
             self.token_indices,
-            self._raw_dispatched_indices,
-            self.token_probs,
             self._raw_dispatched_probs,
+            self.token_probs,
             self._routing_handle,
             self.num_local_experts,
             self.router_topk,
