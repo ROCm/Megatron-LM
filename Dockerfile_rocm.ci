@@ -47,6 +47,7 @@ sentencepiece \
 wrapt \
 zarr \
 wandb \
+tensorboard \
 tensorstore==0.1.45 \
 pytest_mock \
 pybind11 \
@@ -55,7 +56,8 @@ datasets \
 tiktoken \
 pynvml \
 fastapi \
-uvicorn
+uvicorn \
+msgpack
 
 RUN pip install "nltk==3.8.1"
 

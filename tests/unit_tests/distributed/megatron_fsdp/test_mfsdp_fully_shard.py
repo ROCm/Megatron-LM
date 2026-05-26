@@ -62,22 +62,21 @@ def destroy_device_mesh(device_mesh):
     except Exception as e:
         print(f"  [Cleanup] Warning: Could not enumerate process groups: {e}")
     
-    # Teardown device mesh
     del device_mesh
-    
-    try:
-        from torch.distributed.device_mesh import _mesh_resources
 
-        _mesh_resources.child_to_root_mapping.clear()
-        _mesh_resources.root_to_flatten_mapping.clear()
-        _mesh_resources.mesh_stack.clear()
-        _mesh_resources.mesh_dim_group_options.clear()
-        _mesh_resources.flatten_name_to_root_dims.clear()
-    except Exception as e:
-        # Global _MeshEnv is on a convoluted deprecation path.
-        # Attempt to clean the global state, otherwise skip.
-        logger.warning(f"Did not clean the deprecated DeviceMesh global state. Skipping...\n{e}")
-        pass
+    from torch.distributed.device_mesh import _mesh_resources
+
+    # Clear whichever _MeshEnv fields exist; exposed attributes vary by PyTorch version and build.
+    _mesh_resources.mesh_stack.clear()
+    for attr in (
+        "child_to_root_mapping",
+        "root_to_flatten_mapping",
+        "flatten_name_to_root_dims",
+        "mesh_dim_group_options",
+    ):
+        mapping = getattr(_mesh_resources, attr, None)
+        if mapping is not None and hasattr(mapping, "clear"):
+            mapping.clear()
 
     # Now try to destroy the process groups
     # NOTE: This may not work on all PyTorch versions - the groups might be 

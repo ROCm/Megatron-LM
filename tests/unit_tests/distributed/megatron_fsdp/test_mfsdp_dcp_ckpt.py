@@ -47,16 +47,20 @@ SHARED_TMP_DIR = "/tmp/pytest-shared-tmp"
 def destroy_device_mesh(device_mesh):
     from torch.distributed.device_mesh import _mesh_resources
 
-    # Teardown device mesh
     del device_mesh
-    
-    # Clear mesh resources
+
+    # Clear whichever _MeshEnv fields exist; exposed attributes vary by PyTorch version and build.
     _mesh_resources.mesh_stack.clear()
-    _mesh_resources.child_to_root_mapping.clear()
-    _mesh_resources.root_to_flatten_mapping.clear()
-    _mesh_resources.flatten_name_to_root_dims.clear()
-    _mesh_resources.mesh_dim_group_options.clear()
-    
+    for attr in (
+        "child_to_root_mapping",
+        "root_to_flatten_mapping",
+        "flatten_name_to_root_dims",
+        "mesh_dim_group_options",
+    ):
+        mapping = getattr(_mesh_resources, attr, None)
+        if mapping is not None and hasattr(mapping, "clear"):
+            mapping.clear()
+
 
 
 class ToyCNN(torch.nn.Module):
