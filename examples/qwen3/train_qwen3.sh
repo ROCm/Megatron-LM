@@ -595,6 +595,7 @@ qwen_base_options=" \
     --normalization RMSNorm \
     --norm-epsilon 1e-06 \
     --swiglu \
+    --use-te-activation-func \
     --no-masked-softmax-fusion \
     --disable-bias-linear \
     --position-embedding-type rope \
