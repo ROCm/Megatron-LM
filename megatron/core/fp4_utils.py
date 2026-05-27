@@ -42,10 +42,10 @@ else:
     HAVE_TE_FP4_TENSOR_CLASS = False
     FP4_TENSOR_CLASS = None
 
-# Check if Transformer Engine has class for fp4 tensors.
+# MXFP4Tensor is available from Transformer Engine 2.12.0.dev0 onward.
 HAVE_TE_MXFP4_TENSOR_CLASS = False
 if HAVE_TE:
-    if is_te_min_version("2.7.0.dev0"):
+    if is_te_min_version("2.12.0.dev0"):
         try:
             from transformer_engine.pytorch.tensor.mxfp4_tensor import (
                 MXFP4Tensor as MXFP4_TENSOR_CLASS,
@@ -132,13 +132,17 @@ if HAVE_TE:
                         >= 2.7.0.dev0."""
                     )
             elif config.fp4_recipe == Fp4Recipe.mxfp4:
+                if not is_te_min_version("2.12.0.dev0"):
+                    raise ValueError(
+                        "MXFP4BlockScaling requires Transformer Engine >= 2.12.0.dev0."
+                    )
                 try:
                     fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
                 except AttributeError:
                     raise ValueError(
                         """MXFP4BlockScaling recipe is not available in this version of 
                         Transformer Engine. Please make sure you are using TE version 
-                        >= 2.7.0.dev0."""
+                        >= 2.12.0.dev0."""
                     )
             elif config.fp4_recipe == Fp4Recipe.custom:
                 fp4_recipe = _get_custom_recipe(config.fp4_quantizer_factory)

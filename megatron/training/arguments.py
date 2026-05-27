@@ -760,9 +760,12 @@ def validate_args(args, defaults={}):
     if args.fp4_param and not args.fp4:
         raise ValueError("--fp4-param-gather must be used together with --fp4-format.")
 
-    # FP4 requires TE >= 2.7.0.dev0
+    # FP4 requires TE >= 2.7.0.dev0 (NVFP4)
     if args.fp4 and not is_te_min_version("2.7.0.dev0"):
-        raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling and MXFP4BlockScaling support.")
+        raise ValueError( "--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+
+    if args.fp4 and getattr(args, "fp4_recipe", "nvfp4") == "mxfp4" and not is_te_min_version("2.12.0.dev0"):
+        raise ValueError("--fp4-recipe=mxfp4 requires Transformer Engine >= 2.12.0.dev0 for MXFP4BlockScaling support.")
 
     if args.use_megatron_fsdp:
         # NOTE: The flag `use_custom_fsdp` is deprecated and will be removed in future versions.
