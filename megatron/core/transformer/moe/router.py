@@ -626,6 +626,14 @@ class TopKRouter(Router):
                 router_replay=self.router_replay,
             )
 
+        # Zero padding tokens' probs only; do NOT mask `routing_map` (the dropless
+        # argsort permute needs `routing_map.sum() == num_tokens * topk`).
+        # Padding is instead handled in z-loss, aux-loss (`with_padding_mask`), and
+        # `_apply_expert_bias`.
+        if padding_mask is not None:
+            valid_mask = (~padding_mask).unsqueeze(-1)
+            probs = probs * valid_mask
+
         # Apply token dropping to probs and routing_map.
         if self.config.moe_expert_capacity_factor is not None:
             probs, routing_map = apply_router_token_dropping(

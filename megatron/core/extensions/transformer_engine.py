@@ -252,6 +252,8 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
             # Fp4 configured.
             if qrecipe.fp4_quantization_recipe == Fp4Recipe.nvfp4:
                 quant_recipe = te.common.recipe.NVFP4BlockScaling()
+            elif qrecipe.fp4_quantization_recipe == Fp4Recipe.mxfp4:
+                quant_recipe = te.common.recipe.MXFP4BlockScaling()
             else:
                 raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp8_quantization_recipe}")
 
@@ -2991,6 +2993,11 @@ try:
     except ImportError:
         _get_workspace = None
 
+    # Newer TE versions manage the cuBLAS workspace internally and no longer
+    # accept a `workspace` keyword argument to `general_gemm`. Only forward it
+    # when the installed TE actually supports it.
+    _general_gemm_accepts_workspace = "workspace" in inspect.signature(general_gemm).parameters
+
     def te_general_gemm(
         A: torch.Tensor,
         B: torch.Tensor,
@@ -3023,7 +3030,7 @@ try:
             extra_output=None,
             bulk_overlap=False,
         )
-        if _get_workspace is not None:
+        if _general_gemm_accepts_workspace and _get_workspace is not None:
             kwargs["workspace"] = _get_workspace()
         return general_gemm(A, B, **kwargs)
 

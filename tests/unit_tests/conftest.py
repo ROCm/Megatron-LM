@@ -1,4 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Modified for portability across upstream and ROCm CI environments.
 
 import os
 from pathlib import Path
@@ -11,6 +13,7 @@ from megatron.core import config
 from megatron.core.utils import is_te_min_version
 from tests.test_utils.python_scripts.download_unit_tests_dataset import download_and_extract_asset
 from tests.unit_tests.dist_checkpointing import TempNamedDir
+from tests.unit_tests.paths import unit_test_data_dir
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -80,15 +83,14 @@ def tmp_path_dist_ckpt(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_test_data():
-    """Ensure test data is available at /opt/data by downloading if necessary."""
-    data_path = Path("/opt/data")
+    """Ensure unit test assets are available, downloading them if necessary."""
+    data_path = unit_test_data_dir()
 
     # Check if data directory exists and has content
     if not data_path.exists() or not any(data_path.iterdir()):
-        print("Test data not found at /opt/data. Downloading...")
+        print(f"Test data not found at {data_path}. Downloading...")
 
         try:
-            # Download assets to /opt/data
             download_and_extract_asset(assets_dir=data_path)
 
             print("Test data downloaded successfully.")
@@ -100,7 +102,7 @@ def ensure_test_data():
             print(f"Failed to download test data: {e}")
             # Don't fail the tests, just warn
     else:
-        print("Test data already available at /opt/data")
+        print(f"Test data already available at {data_path}")
 
 
 @pytest.fixture(autouse=True)

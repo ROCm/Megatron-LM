@@ -905,11 +905,11 @@ def validate_args(args, defaults={}):
         assert os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') != "1", \
             'FSDP always requires CUDA_DEVICE_MAX_CONNECTIONS value large than one'
 
-        if args.fp8_param_gather and is_te_min_version("2.0.0"):
+        if args.fp8_param_gather and not is_te_min_version("2.12.0.dev0"):
             args.fp8_param_gather = False
             warn_rank_0(
-                'FSDP2 FP8 param gather is not supported yet in TE 2.0, will fallback to bf16'
-                'all_gather instead, turning off fp8_param_gather',
+                'FSDP2 FP8 param gather requires Transformer Engine >= 2.12.0, '
+                'will fallback to bf16 all_gather instead, turning off fp8_param_gather',
                 args.rank,
             )
         if args.fp4_param and not is_te_min_version("2.7.0.dev0"):
@@ -956,9 +956,12 @@ def validate_args(args, defaults={}):
     if args.fp4_param and not args.fp4:
         raise ValueError("--fp4-param-gather must be used together with --fp4-format.")
 
-    # FP4 requires TE >= 2.7.0.dev0
+    # FP4 requires TE >= 2.7.0.dev0 (NVFP4)
     if args.fp4 and not is_te_min_version("2.7.0.dev0"):
-        raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+        raise ValueError( "--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+
+    if args.fp4 and getattr(args, "fp4_recipe", "nvfp4") == "mxfp4" and not is_te_min_version("2.12.0.dev0"):
+        raise ValueError("--fp4-recipe=mxfp4 requires Transformer Engine >= 2.12.0.dev0 for MXFP4BlockScaling support.")
 
     if (
         args.fp8_recipe == 'mxfp8'
@@ -1351,6 +1354,31 @@ def validate_args(args, defaults={}):
         args.moe_router_load_balancing_type = args.moe_router_load_balancing_type[0]
     if isinstance(args.moe_aux_loss_coeff, list) and len(args.moe_aux_loss_coeff) == 1:
         args.moe_aux_loss_coeff = args.moe_aux_loss_coeff[0]
+
+    # MORI EP: auto-derive max tokens per rank if user didn't pass one. This is
+    # the sender-side row count of the tensor MORI's `op.dispatch` will see.
+    # With sequence parallelism the sequence dimension is sharded across TP ranks;
+    # with context parallelism it's sharded across CP ranks.
+    if getattr(args, 'moe_flex_dispatcher_backend', None) == 'mori' and args.moe_mori_max_tokens_per_rank is None:
+        # Use ceiling division: when the token dimension isn't evenly divisible by CP or SP
+        per_rank_tokens = args.micro_batch_size * args.seq_length
+        if args.context_parallel_size > 1:
+            per_rank_tokens = -(-per_rank_tokens // args.context_parallel_size)
+        if (
+            getattr(args, 'sequence_parallel', False)
+            and args.tensor_model_parallel_size > 1
+        ):
+            per_rank_tokens = -(-per_rank_tokens // args.tensor_model_parallel_size)
+        args.moe_mori_max_tokens_per_rank = per_rank_tokens
+        if args.rank == 0:
+            print(
+                f'[MORI EP] Auto-derived --moe-mori-max-tokens-per-rank='
+                f'{per_rank_tokens} from MBS={args.micro_batch_size}, '
+                f'SEQ_LEN={args.seq_length}, TP={args.tensor_model_parallel_size}, '
+                f'CP={args.context_parallel_size}, '
+                f'SP={getattr(args, "sequence_parallel", False)}.',
+                flush=True,
+            )
 
     # Distributed checkpointing checks
     if args.use_dist_ckpt and args.use_legacy_models:
@@ -2025,7 +2053,6 @@ def _add_network_size_args(parser):
         "activation_func_fp8_input_store",
         "test_mode",
         "memory_efficient_layer_norm",
-        "fused_single_qkv_rope",
         "fp8_dot_product_attention",
         "fp8_multi_head_attention",
         "tp_only_amax_red",

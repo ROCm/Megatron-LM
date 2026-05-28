@@ -67,6 +67,10 @@ def should_free_input(name, is_moe, config, num_local_experts):
         config.moe_token_dispatcher_type == "flex"
         and config.moe_flex_dispatcher_backend == "hybridep"
     )
+    enable_mori = (
+        config.moe_token_dispatcher_type == "flex"
+        and config.moe_flex_dispatcher_backend == "mori"
+    )
     # Define which nodes should free input memory
     # Since we split the computing graph into multiple nodes, we can manually control
     # when and how to free the input memory.
@@ -81,18 +85,20 @@ def should_free_input(name, is_moe, config, num_local_experts):
         # operation for `dispatch_postprocess`, hence the mlp inputs will be directly
         # passed to GroupedGemm and should be saved for backward pass.
         free_mlp = num_local_experts > 1 or config.moe_token_dispatcher_type != "alltoall"
-        free_mlp = free_mlp and not enable_hybridep
+        free_mlp = free_mlp and not enable_hybridep and not enable_mori
 
     free_input_nodes = {
         "mlp": free_mlp,
-        "moe_combine": True,
+        # MORI's combine() reads this input via a standalone comm-stream unpermute after
+        # the node returns; freeing it here would race that async read.
+        "moe_combine": not enable_mori,
         # For non-DeepEP and non-HybridEP dispatcher mode, the input is the un-dispatched tokens
         # and probs before dispatch A2A and it's not needed anymore after the forward pass
-        # For DeepEP and HybridEP dispatcher mode, they are both needed in backward pass
+        # For DeepEP, HybridEP and MORI dispatcher mode, they are both needed in backward pass
         # and cannot be freed.
         # If moe_preprocess is in cuda graph scope, tokens and probs are fixed size tensors,
         # so they cannot be freed.
-        "moe_dispatch": not (enable_deepep or enable_hybridep)
+        "moe_dispatch": not (enable_deepep or enable_hybridep or enable_mori)
         and (CudaGraphScope.moe_preprocess not in config.cuda_graph_scope),
     }
 
@@ -441,6 +447,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         layer.config.moe_token_dispatcher_type == "flex"
         and layer.config.moe_flex_dispatcher_backend == "hybridep"
     )
+    enable_mori = (
+        layer.config.moe_token_dispatcher_type == "flex"
+        and layer.config.moe_flex_dispatcher_backend == "mori"
+    )
 
     def submodule_attn_forward(node: ScheduleNode, hidden_states: torch.Tensor):
         """
@@ -495,7 +505,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                         )
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
+                padding_mask = node.chunk_state.padding_mask
+                if padding_mask is not None:
+                    padding_mask = padding_mask.transpose(0, 1).bool()
+                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output, padding_mask)
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
@@ -528,7 +541,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         Dispatches tokens to the experts based on the router output.
         """
         token_dispatcher = layer.mlp.token_dispatcher
-        if enable_deepep or enable_hybridep:
+        if enable_deepep or enable_hybridep or enable_mori:
             # update token_probs to be the detached version, prevents
             # backward graph from connecting to attn submodule
             token_dispatcher._comm_manager.token_probs = probs
@@ -548,7 +561,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         dispatched_probs = node.layer_state.dispatched_probs
         token_dispatcher = layer.mlp.token_dispatcher
-        if enable_deepep or enable_hybridep:
+        if enable_deepep or enable_hybridep or enable_mori:
             # update dispatched_probs to be detached version, prevents
             # backward graph from connecting to dispatch submodule
             token_dispatcher._comm_manager.dispatched_probs = dispatched_probs

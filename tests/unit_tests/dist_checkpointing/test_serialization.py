@@ -937,9 +937,21 @@ class TestNonStrictLoad:
             loaded_state_dict = load_with_flag(StrictHandling.RAISE_UNEXPECTED)
             assert 'TenB' in loaded_state_dict
 
+            # With LOG_UNEXPECTED and no unexpected keys, no unexpected-keys
+            # warning should be logged. Assert on WARNING-level records rather
+            # than `caplog.text == ''`: torch.distributed.checkpoint emits its
+            # own DEBUG telemetry (the `dcp_logger`, which sets its level to
+            # DEBUG and is captured regardless of `at_level`), so the raw buffer
+            # is non-deterministically non-empty.
+            caplog.clear()
             with caplog.at_level(logging.WARNING):
                 loaded_state_dict = load_with_flag(StrictHandling.LOG_UNEXPECTED)
-            assert caplog.text == ''
+            unexpected_warnings = [
+                record
+                for record in caplog.records
+                if record.levelno >= logging.WARNING and 'Unexpected keys' in record.getMessage()
+            ]
+            assert unexpected_warnings == []
             assert 'TenB' in loaded_state_dict
 
             loaded_state_dict, missing_keys, unexpected_keys = load_with_flag(

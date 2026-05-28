@@ -42,11 +42,34 @@ else:
     HAVE_TE_FP4_TENSOR_CLASS = False
     FP4_TENSOR_CLASS = None
 
+# MXFP4Tensor is available from Transformer Engine ROCm 2.12.0.dev0 onward.
+HAVE_TE_MXFP4_TENSOR_CLASS = False
+if HAVE_TE:
+    if is_te_min_version("2.12.0.dev0"):
+        try:
+            from transformer_engine.pytorch.tensor.mxfp4_tensor import (
+                MXFP4Tensor as MXFP4_TENSOR_CLASS,
+            )
+
+            HAVE_TE_MXFP4_TENSOR_CLASS = True
+        except (ImportError, ModuleNotFoundError):
+            HAVE_TE_MXFP4_TENSOR_CLASS = False
+            MXFP4_TENSOR_CLASS = None
+    else:
+        HAVE_TE_MXFP4_TENSOR_CLASS = False
+        MXFP4_TENSOR_CLASS = None
+else:
+    HAVE_TE_MXFP4_TENSOR_CLASS = False
+    MXFP4_TENSOR_CLASS = None
+
 
 def is_nvfp4tensor(tensor: torch.Tensor) -> bool:
     """Check if a tensor is a Transformer Engine NVFP4Tensor."""
     return HAVE_TE_FP4_TENSOR_CLASS and isinstance(tensor, FP4_TENSOR_CLASS)
 
+def is_mxfp4tensor(tensor: torch.Tensor) -> bool:
+    """Check if a tensor is a Transformer Engine MXFP4Tensor."""
+    return HAVE_TE_MXFP4_TENSOR_CLASS and isinstance(tensor, MXFP4_TENSOR_CLASS)
 
 def get_fp4_align_size(fp4_recipe: Fp4Recipe) -> int:
     """
@@ -77,7 +100,12 @@ def get_fp4_align_size(fp4_recipe: Fp4Recipe) -> int:
     TE NVFP4 Grouped Quantization: https://github.com/NVIDIA/TransformerEngine/pull/2411
     """
     # pylint: disable=unused-argument
-    return 128
+    if fp4_recipe == Fp4Recipe.mxfp4:
+        return 256
+    elif fp4_recipe == Fp4Recipe.nvfp4:
+        return 128
+    else:
+        raise ValueError(f"Unsupported FP4 recipe: {fp4_recipe}")
 
 
 def dequantize_fp4_tensor(fp4_tensor: torch.Tensor) -> torch.Tensor:
@@ -105,17 +133,30 @@ if HAVE_TE:
                         Transformer Engine. Please make sure you are using TE version 
                         >= 2.7.0.dev0."""
                     )
+            elif config.fp4_recipe == Fp4Recipe.mxfp4:
+                if not is_te_min_version("2.12.0.dev0"):
+                    raise ValueError(
+                        "MXFP4BlockScaling requires Transformer Engine >= 2.12.0.dev0."
+                    )
+                try:
+                    fp4_recipe = transformer_engine.common.recipe.MXFP4BlockScaling()
+                except AttributeError:
+                    raise ValueError(
+                        """MXFP4BlockScaling recipe is not available in this version of 
+                        Transformer Engine. Please make sure you are using TE version 
+                        >= 2.12.0.dev0."""
+                    )
             elif config.fp4_recipe == Fp4Recipe.custom:
                 fp4_recipe = _get_custom_recipe(config.fp4_quantizer_factory)
             else:
                 raise ValueError(
-                    "NVFP4BlockScaling and custom are the only supported FP4 recipes. "
+                    "NVFP4BlockScaling, MXFP4BlockScaling and custom are the only supported FP4 recipes. "
                     "Please make sure you are using a compatible TE version >= 2.7.0.dev0."
                 )
         else:
             raise ValueError(
                 """FP4 support requires TransformerEngine version >= 2.7.0.dev0 
-                for NVFP4BlockScaling."""
+                for NVFP4BlockScaling and MXFP4BlockScaling."""
             )
         return fp4_recipe
 

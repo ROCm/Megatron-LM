@@ -31,6 +31,8 @@ except ImportError:
 from megatron.core import tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.extensions.transformer_engine import HAVE_TE
+from megatron.core.enums import Fp8Recipe
+from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.models.common.embeddings import (
     RotaryEmbedding,
     YarnRotaryEmbedding,
@@ -416,11 +418,6 @@ class MultiLatentAttention(Attention):
             core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[..., :self.config.v_head_dim]
             core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
 
-        if self.config.fused_padded_mla_attention:
-            # [s, b, n * dim] -> [s, b, n, dim=192] -> [s, b, n, dim=128] -> [s, b, n*dim]
-            core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[..., :self.config.v_head_dim]
-            core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
-
         # We are doing absorption with cache mla latents and decode mode.
         if self.cache_mla_latents and inference_context.is_decode_only():
             # core_attn_out = self.self.up_v_layer(core_attn_out)
@@ -557,10 +554,19 @@ class MLASelfAttention(MultiLatentAttention):
         else:
             raise ValueError(f"Unsupported linear_kv_down_proj: {submodules.linear_kv_down_proj}")
 
+        kv_down_proj_out_size = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+        self.kv_down_proj_mxfp8_padding = 0
+        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.mxfp8:
+            align = get_fp8_align_size(Fp8Recipe.mxfp8)
+            remainder = kv_down_proj_out_size % align
+            if remainder != 0:
+                self.kv_down_proj_mxfp8_padding = align - remainder
+                kv_down_proj_out_size += self.kv_down_proj_mxfp8_padding
+
         self.linear_kv_down_proj = build_module(
             submodules.linear_kv_down_proj,
             self.config.hidden_size,
-            self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
+            kv_down_proj_out_size,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -702,9 +708,19 @@ class MLASelfAttention(MultiLatentAttention):
         # QKV down projection and layernorm
         # =========================================
         q_compressed, kv_combined = self._qkv_down_projection(hidden_states)
-        if kv_combined.size(-1) != self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim:
-            # kv_combined: [s, b, (kv_lora_rank + qk_pos_emb_head_dim)]
+        kv_down_proj_out_size = (
+            self.config.kv_lora_rank
+            + self.config.qk_pos_emb_head_dim
+            + self.kv_down_proj_mxfp8_padding
+        )
+        kv_is_tp_sharded = kv_combined.size(-1) != kv_down_proj_out_size
+        if kv_is_tp_sharded:
+            # kv_combined: [s, b, (kv_down_proj_out_size)]
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
+            if self.kv_down_proj_mxfp8_padding > 0:
+                kv_combined = kv_combined[
+                    ..., : self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+                ]
             # kv_compressed:[s, b, kv_lora_rank], k_pos_emb: [s, b, qk_pos_emb_head_dim]
             kv_compressed, k_pos_emb = torch.split(
                 kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
@@ -713,6 +729,10 @@ class MLASelfAttention(MultiLatentAttention):
                 # kv_compressed:[s / TP, b, kv_lora_rank]
                 kv_compressed = scatter_to_sequence_parallel_region(kv_compressed)
         else:
+            if self.kv_down_proj_mxfp8_padding > 0:
+                kv_combined = kv_combined[
+                    ..., : self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+                ]
             # kv_compressed:[s / TP, b, kv_lora_rank], k_pos_emb: [s / TP, b, qk_pos_emb_head_dim]
             kv_compressed, k_pos_emb = torch.split(
                 kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
@@ -1237,10 +1257,20 @@ class FusedMLASelfAttention(MLASelfAttention):
         else:
             raise ValueError(f"Unsupported linear_qkv_down_proj: {submodules.linear_qkv_down_proj}")
 
+        kv_down_proj_core_size = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+        self.kv_down_proj_mxfp8_padding = 0
+        qkv_down_out = self.config.q_lora_rank + kv_down_proj_core_size
+        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.mxfp8:
+            align = get_fp8_align_size(Fp8Recipe.mxfp8)
+            remainder = kv_down_proj_core_size % align
+            if remainder != 0:
+                self.kv_down_proj_mxfp8_padding = align - remainder
+                qkv_down_out += self.kv_down_proj_mxfp8_padding
+
         self.linear_qkv_down_proj = build_module(
             submodules.linear_qkv_down_proj,
             self.config.hidden_size,
-            self.config.q_lora_rank + self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
+            qkv_down_out,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -1298,9 +1328,14 @@ class FusedMLASelfAttention(MLASelfAttention):
     def _qkv_down_projection(self, hidden_states):
         """Fused q/kv down projection path."""
         qkv, _ = self.linear_qkv_down_proj(hidden_states)
+        kv_dim = (
+            self.config.kv_lora_rank
+            + self.config.qk_pos_emb_head_dim
+            + self.kv_down_proj_mxfp8_padding
+        )
         q_compressed, kv_combined = torch.split(
             qkv,
-            [self.config.q_lora_rank, self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim],
+            [self.config.q_lora_rank, kv_dim],
             dim=-1,
         )
         return q_compressed, kv_combined
@@ -1347,24 +1382,38 @@ class FusedMLASelfAttention(MLASelfAttention):
 
         fused_weight = self.linear_qkv_down_proj.weight
         total_out = (
-            self.config.q_lora_rank + self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+            self.config.q_lora_rank
+            + self.config.kv_lora_rank
+            + self.config.qk_pos_emb_head_dim
+            + self.kv_down_proj_mxfp8_padding
         )
         tp_size = get_pg_size(self.tp_group)
 
         if fused_weight.size(0) == total_out:
             q_split = self.config.q_lora_rank
-            kv_split = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+            kv_split = (
+                self.config.kv_lora_rank
+                + self.config.qk_pos_emb_head_dim
+                + self.kv_down_proj_mxfp8_padding
+            )
         else:
             assert (
                 self.config.q_lora_rank % tp_size == 0
             ), "q_lora_rank must be divisible by tensor-parallel size"
             assert (
-                self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+                self.config.kv_lora_rank
+                + self.config.qk_pos_emb_head_dim
+                + self.kv_down_proj_mxfp8_padding
             ) % tp_size == 0, (
-                "kv_lora_rank + qk_pos_emb_head_dim must be divisible by tensor-parallel size"
+                "kv_lora_rank + qk_pos_emb_head_dim (+ mxfp8 padding) must be divisible by "
+                "tensor-parallel size"
             )
             q_split = self.config.q_lora_rank // tp_size
-            kv_split = (self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim) // tp_size
+            kv_split = (
+                self.config.kv_lora_rank
+                + self.config.qk_pos_emb_head_dim
+                + self.kv_down_proj_mxfp8_padding
+            ) // tp_size
 
         if q_split + kv_split != fused_weight.size(0):
             raise ValueError(

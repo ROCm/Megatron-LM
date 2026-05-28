@@ -1,9 +1,12 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved. Modified for portability.
 
 from dataclasses import dataclass
 from typing import Dict, List, Union
 
 import numpy as np
+
+from megatron.core.tokenizers.chat_template_utils import token_ids_from_chat_template_output
 
 try:
     import transformers
@@ -128,14 +131,15 @@ class SFTTokenizer:
         if not self._prompt_config.has_system_role and conversation[0]["role"] == "system":
             conversation = conversation[1:]
 
-        tokens = self._tokenizer.apply_chat_template(
+        raw = self._tokenizer.apply_chat_template(
             conversation,
             tokenize=True,
             add_generation_prompt=add_generation_prompt,
             return_assistant_token_mask=False,
             return_tensors="np",
             chat_template=self._prompt_config.custom_chat_template,
-        )[0]
+        )
+        tokens = token_ids_from_chat_template_output(raw)
 
         if not return_target:
             return tokens
@@ -156,9 +160,10 @@ class SFTTokenizer:
             if turn["role"].lower() == "assistant":
                 assert conversation[turn_idx - 1]["role"].lower() in ("user", "tool")
 
-            turn_tokens = self._tokenizer.apply_chat_template(
+            turn_raw = self._tokenizer.apply_chat_template(
                 [turn], tokenize=True, chat_template=self._prompt_config.custom_chat_template
             )
+            turn_tokens = token_ids_from_chat_template_output(turn_raw)
 
             # There should be only one BOS at the very beginning.
             # After the first turn, skip BOS token.

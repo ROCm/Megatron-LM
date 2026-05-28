@@ -427,6 +427,16 @@ class TestHybridChunkedPrefillIntermediateState:
             enable_prefix_caching=enable_pc,
         )
 
+    # req1 is chunked (544 effective tokens > max_tokens=400), so its Mamba scan runs as
+    # differently sized segments than the unchunked baseline and round-trips its running
+    # SSM state through the bf16 state buffer at each chunk boundary (the baseline keeps
+    # it in fp32 accumulators). Those bf16 rounding differences flip a near-tie greedy
+    # argmax a few tokens in; it is also nondeterministic run-to-run because hipBLASLt
+    # selects different GEMM algorithms for the irregular chunk shapes. req0/req2 are
+    # unchunked and always match; only the chunked request diverges.
+    @pytest.mark.failing_on_rocm(
+        "Mamba chunked-prefill greedy outputs diverge under ROCm bf16 rounding."
+    )
     @torch.inference_mode()
     def test_hybrid_chunked_prefill_intermediate_state(self):
         """Concurrent Mamba state extraction (mid-chunk) and restoration (prefix-cached).

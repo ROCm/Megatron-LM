@@ -16,6 +16,13 @@ from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from tests.unit_tests.test_utilities import Utils
 
+try:
+    import fla  # noqa: F401
+
+    HAVE_FLA = True
+except ImportError:
+    HAVE_FLA = False
+
 
 @pytest.mark.internal
 class TestMambaBlock:
@@ -91,6 +98,7 @@ class TestMambaBlock:
         with pytest.raises(ValueError):
             block = self.get_mamba_block(layer_pattern)
 
+    @pytest.mark.skipif(not HAVE_FLA, reason="FLA is not installed.")
     def test_gdn_layer_types(self):
         """
         Make sure that G creates a TransformerLayer wrapping GatedDeltaNet,
@@ -105,6 +113,7 @@ class TestMambaBlock:
         assert isinstance(layers[1].self_attention, SelfAttention)
         assert isinstance(layers[2], MambaLayer)
 
+    @pytest.mark.skipif(not HAVE_FLA, reason="FLA is not installed.")
     def test_gdn_gpu_forward(self):
         """Test GPU forward pass with GDN, attention, and Mamba layers."""
         layer_pattern = Symbols.GDN + Symbols.ATTENTION + Symbols.MAMBA

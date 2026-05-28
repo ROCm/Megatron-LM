@@ -95,14 +95,27 @@ def _build_pg_collection(
     )
 
 
-def _destroy_pg_collection(pgc: ProcessGroupCollection):
-    """Destroy all process groups in a ProcessGroupCollection to free NCCL communicator memory."""
-    destroyed = set()
-    for f in fields(pgc):
-        pg = getattr(pgc, f.name, None)
-        if pg is not None and id(pg) not in destroyed:
-            destroyed.add(id(pg))
-            dist.destroy_process_group(pg)
+def _destroy_pg_collections(*collections: ProcessGroupCollection) -> None:
+    """Destroy custom groups that are not tracked by model-parallel state."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    pg_map = dist.distributed_c10d._world.pg_map
+    groups = []
+    seen = set()
+    for collection in collections:
+        for group in vars(collection).values():
+            if not isinstance(group, dist.ProcessGroup) or group in seen:
+                continue
+            seen.add(group)
+            groups.append(group)
+
+    for group in reversed(groups):
+        if group in pg_map:
+            dist.destroy_process_group(group)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _pp_flags(pg_collection) -> Tuple[bool, bool]:
@@ -295,6 +308,7 @@ def _set_pg_collection(module, tp_group, dp_group):
     ],
 )
 def test_swap_gpt_parametrized(
+    request: pytest.FixtureRequest,
     refit_backend: str,
     src_tp: int,
     src_pp: int,
@@ -338,8 +352,12 @@ def test_swap_gpt_parametrized(
     )
 
     # Build PGs and models (always use unified PG builder so we can set EP)
+    custom_pg_collections = []
+    request.addfinalizer(lambda: _destroy_pg_collections(*custom_pg_collections))
     src_pgs = _build_pg_collection(tp_size=src_tp, pp_size=src_pp, ep_size=src_ep)
+    custom_pg_collections.append(src_pgs)
     dst_pgs = _build_pg_collection(tp_size=dst_tp, pp_size=dst_pp, ep_size=dst_ep)
+    custom_pg_collections.append(dst_pgs)
     # Apply PP/EP configuration to TransformerConfigs
     src_cfg = copy.deepcopy(cfg)
     dst_cfg = copy.deepcopy(cfg)
@@ -438,8 +456,7 @@ def test_swap_gpt_parametrized(
     del src_model, dst_model
     # Clear refit caches before destroying model parallel to avoid stale plans
     clear_all_caches()
-    _destroy_pg_collection(src_pgs)
-    _destroy_pg_collection(dst_pgs)
+    _destroy_pg_collections(src_pgs, dst_pgs)
     Utils.destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
@@ -577,8 +594,7 @@ def test_swap_mamba_parametrized(
     # Free GPU memory to prevent OOM across the many parametrized test cases
     del src_model, dst_model
     clear_all_caches()
-    _destroy_pg_collection(src_pgs)
-    _destroy_pg_collection(dst_pgs)
+    _destroy_pg_collections(src_pgs, dst_pgs)
     Utils.destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()

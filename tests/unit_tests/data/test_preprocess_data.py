@@ -1,4 +1,6 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Modified for portability across upstream and ROCm CI environments.
 
 import json
 import os
@@ -12,6 +14,7 @@ import requests
 
 from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.tokenizers.text.libraries.megatron_hf_tokenizer import MEGATRON_CONFIG_MAP
+from tests.unit_tests.paths import repo_root, unit_test_data_path
 from tools.merge_datasets import main as merge_main
 from tools.preprocess_data import Encoder
 from tools.preprocess_data import get_args as build_args
@@ -26,6 +29,8 @@ __LOCAL_BERT_VOCAB = "/home/gitlab-runner/data/bert_data/vocab.txt"
 __LOCAL_GPT2_MERGE = "/home/gitlab-runner/data/gpt3_data/gpt2-merges.txt"
 
 __LOCAL_GPT2_VOCAB = "/home/gitlab-runner/data/gpt3_data/gpt2-vocab.json"
+
+__PREPROCESS_DATA_SCRIPT = repo_root() / "tools" / "preprocess_data.py"
 
 
 def dummy_jsonl(odir):
@@ -189,9 +194,9 @@ def test_preprocess_data_gpt():
             "--tokenizer-type",
             "GPT2BPETokenizer",
             "--vocab-file",
-            "/opt/data/tokenizers/megatron/gpt2-vocab.json",
+            str(unit_test_data_path("tokenizers", "megatron", "gpt2-vocab.json")),
             "--merge-file",
-            "/opt/data/tokenizers/megatron/gpt2-merges.txt",
+            str(unit_test_data_path("tokenizers", "megatron", "gpt2-merges.txt")),
             "--append-eod",
             "--workers",
             "10",
@@ -202,21 +207,22 @@ def test_preprocess_data_gpt():
         do_test_preprocess_data(temp_dir, extra_args=gpt_args)
 
 
+@pytest.mark.usefixtures("ensure_test_data")
 def test_preprocess_data_gpt_optimal_workers():
     with tempfile.TemporaryDirectory() as temp_dir:
 
         # gpt specific args
         gpt_args = [
             "--input",
-            "/opt/data/datasets/dclm/dclm.jsonl",
+            str(unit_test_data_path("datasets", "dclm", "dclm.jsonl")),
             "--output-prefix",
             f"{temp_dir}/optimal_workers",
             "--tokenizer-type",
             "GPT2BPETokenizer",
             "--vocab-file",
-            "/opt/data/tokenizers/megatron/gpt2-vocab.json",
+            str(unit_test_data_path("tokenizers", "megatron", "gpt2-vocab.json")),
             "--merge-file",
-            "/opt/data/tokenizers/megatron/gpt2-merges.txt",
+            str(unit_test_data_path("tokenizers", "megatron", "gpt2-merges.txt")),
             "--append-eod",
             "--workers",
             "2",
@@ -230,8 +236,8 @@ def test_preprocess_data_gpt_optimal_workers():
             "--max-documents",
             "1002",
         ]
-        sys.argv = ["/opt/megatron-lm/tools/preprocess_data.py"] + gpt_args
-        runpy.run_path("/opt/megatron-lm/tools/preprocess_data.py", run_name="__main__")
+        sys.argv = [str(__PREPROCESS_DATA_SCRIPT)] + gpt_args
+        runpy.run_path(str(__PREPROCESS_DATA_SCRIPT), run_name="__main__")
 
 
 def bert_vocab(odir):
@@ -253,7 +259,7 @@ def test_preprocess_data_bert():
             "--tokenizer-type",
             "BertWordPieceLowerCase",
             "--vocab-file",
-            "/opt/data/tokenizers/megatron/gpt2-vocab.json",
+            str(unit_test_data_path("tokenizers", "megatron", "gpt2-vocab.json")),
             "--split-sentences",
             "--workers",
             "10",

@@ -1601,7 +1601,12 @@ class TestFusedMLASelfAttention:
 
     def test_fused_weight_shape(self):
         config = self.transformer_config
-        expected_out = config.q_lora_rank + config.kv_lora_rank + config.qk_pos_emb_head_dim
+        expected_out = (
+            config.q_lora_rank
+            + config.kv_lora_rank
+            + config.qk_pos_emb_head_dim
+            + self.fused_attention.kv_down_proj_mxfp8_padding
+        )
         weight = self.fused_attention.linear_qkv_down_proj.weight
         assert weight.shape[0] == expected_out
         assert weight.shape[1] == config.hidden_size
@@ -1616,12 +1621,13 @@ class TestFusedMLASelfAttention:
         hidden = torch.randn(seq_len, batch, config.hidden_size).cuda()
         q_compressed, kv_combined = self.fused_attention._qkv_down_projection(hidden)
 
-        assert q_compressed.shape == (seq_len, batch, config.q_lora_rank)
-        assert kv_combined.shape == (
-            seq_len,
-            batch,
-            config.kv_lora_rank + config.qk_pos_emb_head_dim,
+        kv_width = (
+            config.kv_lora_rank
+            + config.qk_pos_emb_head_dim
+            + self.fused_attention.kv_down_proj_mxfp8_padding
         )
+        assert q_compressed.shape == (seq_len, batch, config.q_lora_rank)
+        assert kv_combined.shape == (seq_len, batch, kv_width)
 
     def test_gpu_forward(self):
         if not is_te_min_version("1.10.0"):

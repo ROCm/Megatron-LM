@@ -8,6 +8,7 @@ import torch
 import torch.nn.functional as F
 
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core.enums import Fp8Recipe
 from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
@@ -78,11 +79,13 @@ class SharedExpertMLP(MLP):
             # the shared expert linear_fc1 also saves the quantized tensor of this output.
             # Here we set the linear_fc1 to save the original input tensors to avoid the extra
             # memory usage of the quantized tensor.
+            # DelayedScaling is incompatible with save_original_input.
             shared_experts_recompute = (
                 config.recompute_granularity == 'selective'
                 and "shared_experts" in config.recompute_modules
             )
-            if not shared_experts_recompute and HAVE_TE and isinstance(self.linear_fc1, TELinear):
+            is_delayed_scaling = config.fp8_recipe == Fp8Recipe.delayed
+            if not shared_experts_recompute and not is_delayed_scaling and HAVE_TE and isinstance(self.linear_fc1, TELinear):
                 set_save_original_input(self.linear_fc1)
 
         if self.config.moe_shared_expert_overlap:

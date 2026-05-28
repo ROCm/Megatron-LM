@@ -424,6 +424,12 @@ class TestMambaPrefixCachingE2E:
             ), f"req {req_id}: pc=off {off_outputs[req_id]} != pc=on {on_outputs[req_id]}"
         assert off_prefill == 3800 and on_prefill == 2008 and on_prefill < off_prefill
 
+    @pytest.mark.failing_on_rocm(
+        reason="Greedy-decode outputs diverge under ROCm bf16 rounding: the 20-request "
+        "multi-group batch and the 5-request per-group reference reduce GEMMs in a "
+        "different order, flipping an argmax after ~4 generated tokens. This test is "
+        "tuned to NVIDIA's bf16 rounding margin (see MULTI_GROUP_TOKENS_TO_GENERATE)."
+    )
     @pytest.mark.parametrize("num_cuda_graphs", [None, 2])
     @torch.inference_mode()
     def test_mamba_prefix_caching_multi_group_e2e(self, num_cuda_graphs):

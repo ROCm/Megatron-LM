@@ -3077,8 +3077,27 @@ class TestChunkedPrefillCudaGraphs:
 
         return finished, step_count
 
-    @pytest.mark.parametrize("model_provider", ["gpt", "mamba"])
-    @pytest.mark.parametrize("chunked_prefill", [False, True])
+    # On ROCm, chunked prefill splits the Mamba scan into differently sized chunks than
+    # the baseline single-shot prefill, and round-trips the running SSM state through the
+    # bf16 state buffer at each chunk boundary. The resulting bf16 rounding differences
+    # flip a near-tie greedy argmax after ~6 generated tokens. This is a hardware-specific
+    # rounding-margin issue (the GPT path and the non-chunked cases still match), so only
+    # the mamba + chunked_prefill combination is marked failing_on_rocm.
+    @pytest.mark.parametrize(
+        "model_provider,chunked_prefill",
+        [
+            ("gpt", False),
+            ("gpt", True),
+            ("mamba", False),
+            pytest.param(
+                "mamba",
+                True,
+                marks=pytest.mark.failing_on_rocm(
+                    "Mamba chunked-prefill greedy outputs diverge under ROCm bf16 rounding."
+                ),
+            ),
+        ],
+    )
     @pytest.mark.parametrize("num_cuda_graphs", [None, 2])
     @torch.inference_mode()
     def test_chunked_prefill_cuda_graphs(self, model_provider, chunked_prefill, num_cuda_graphs):

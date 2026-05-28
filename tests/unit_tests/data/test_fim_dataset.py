@@ -1,4 +1,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Modified for portability across upstream and ROCm CI environments.
 
 import pytest
 import torch
@@ -7,6 +9,7 @@ from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegat
 from megatron.core.datasets.utils import compile_helpers, get_blend_from_list
 from megatron.core.tokenizers import MegatronTokenizer
 from megatron.training.datasets.fim_dataset import GPTFIMDataset, GPTFIMDatasetConfig
+from tests.unit_tests.paths import unit_test_data_path
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -23,12 +26,12 @@ def test_fim_gpt_dataset(spm_rate, split_sample):
         compile_helpers()
 
     tokenizer = MegatronTokenizer.from_pretrained(
-        tokenizer_path="/opt/data/tokenizers/huggingface",
+        tokenizer_path=str(unit_test_data_path("tokenizers", "huggingface")),
         metadata_path={"library": "huggingface"},
         additional_special_tokens=["<prefix>", "<middle>", "<suffix>", "<pad>", "<eod>"],
         include_special_tokens=True,
     )
-    blend = get_blend_from_list(["/opt/data/datasets/fim/fim_text_document"])
+    blend = get_blend_from_list([str(unit_test_data_path("datasets", "fim", "fim_text_document"))])
     extra_tokens = {
         "prefix": "<prefix>",
         "middle": "<middle>",
