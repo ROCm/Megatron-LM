@@ -522,12 +522,11 @@ class TransformerConfig(ModelParallelConfig):
     fp4: Optional[Literal['e2m1']] = field(
         default=None, metadata={"argparse_meta": {"arg_names": ["--fp4-format"]}}
     )
-    """If set, enables the use of FP4 precision through Transformer Engine. Currently only 
-    supports 'nvfp4' which uses NVFP4BlockScaling recipe (requires TE >= 2.7.0.dev0)."""
+    """If set, enables the use of FP4 precision through Transformer Engine. Supports 'nvfp4' and 'mxfp4' which uses NVFP4BlockScaling and MXFP4BlockScaling recipe (requires TE >= 2.12.0.dev0)."""
 
-    fp4_recipe: Optional[Literal['nvfp4', 'custom']] = "nvfp4"
-    """If set, enables the use of FP4 precision through Transformer Engine. Currently only
-    'nvfp4' is supported which uses NVFP4BlockScaling recipe for Blackwell+ architecture."""
+    fp4_recipe: Optional[Literal['nvfp4', 'mxfp4', 'custom']] = "nvfp4"
+    """If set, enables the use of FP4 precision through Transformer Engine.
+    'nvfp4' and 'mxfp4' are supported which uses NVFP4BlockScaling and MXFP4BlockScaling recipe."""
 
     fp4_param: bool = field(
         default=False, metadata={"argparse_meta": {"arg_names": ["--fp4-param-gather"]}}

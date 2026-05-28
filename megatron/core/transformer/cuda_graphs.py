@@ -817,7 +817,7 @@ class _CudaGraphRunner(torch.nn.Module):
                 if is_te_min_version("2.7.0.dev0"):
                     saved_fp8_tensors = save_fp8_tensors([self.base_module], self.fp4_recipe)
                 else:
-                    raise ValueError("FP4 requires TE >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+                    raise ValueError("FP4 requires TE >= 2.7.0.dev0 for NVFP4BlockScaling and MXFP4BlockScaling support.")
 
         # cache the moe aux loss if needed, which is accumulated inside the forward pass
         from megatron.core.transformer.transformer_layer import MoETransformerLayer
@@ -1217,10 +1217,10 @@ class _CudaGraphRunner(torch.nn.Module):
                 if FP8GlobalStateManager.is_fp8_enabled():
                     # check if the low precision recipe is either fp4 or fp8
                     if is_te_min_version("2.7.0.dev0"):
-                        from transformer_engine.common.recipe import NVFP4BlockScaling
+                        from transformer_engine.common.recipe import NVFP4BlockScaling, MXFP4BlockScaling
 
                         recipe = FP8GlobalStateManager.get_fp8_recipe()
-                        if isinstance(recipe, NVFP4BlockScaling):
+                        if isinstance(recipe, NVFP4BlockScaling) or isinstance(recipe, MXFP4BlockScaling):
                             self.fp4_runtime_enabled = True
                         else:
                             self.fp8_runtime_enabled = True
