@@ -31,4 +31,5 @@ class Fp4Recipe(str, enum.Enum):
     """FP4 recipe names: nvfp4, custom."""
 
     nvfp4 = "nvfp4"
+    mxfp4 = "mxfp4"
     custom = "custom"
