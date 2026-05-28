@@ -42,7 +42,7 @@ else:
     HAVE_TE_FP4_TENSOR_CLASS = False
     FP4_TENSOR_CLASS = None
 
-# MXFP4Tensor is available from Transformer Engine 2.12.0.dev0 onward.
+# MXFP4Tensor is available from Transformer Engine ROCm 2.12.0.dev0 onward.
 HAVE_TE_MXFP4_TENSOR_CLASS = False
 if HAVE_TE:
     if is_te_min_version("2.12.0.dev0"):
