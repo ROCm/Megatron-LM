@@ -1382,6 +1382,20 @@ class _MoriManager(_DispatchManager):
         # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
         self._routing_handle = None
 
+        # Deferred-sync prefetch of per-local-expert counts. mori_dispatch returns
+        # a device tokens_per_expert plus full recv buffers. We async-copy the counts into a pinned CPU buffer right
+        # after dispatch and record an event; the host read (permute's
+        # num_out_tokens and the GroupedGEMM .tolist()) is then deferred until
+        # after the multihot/permute work is enqueued, so it overlaps real GPU
+        # work instead of stalling the host on the dispatch-kernel drain.
+        self._tokens_per_expert_cpu: Optional[torch.Tensor] = None
+        self._tokens_per_expert_event: Optional[torch.cuda.Event] = None
+        if torch.cuda.is_available():
+            self._tokens_per_expert_cpu = torch.empty(
+                self.num_local_experts, dtype=torch.long, device="cpu", pin_memory=True
+            )
+            self._tokens_per_expert_event = torch.cuda.Event()
+
         if mori_dispatch is None:
             raise ImportError(
                 "MORI is not installed. Please install MORI package from "
@@ -1440,7 +1454,40 @@ class _MoriManager(_DispatchManager):
         # dispatch_weights recv buffer for op.combine(); indices use token_indices.
         self._raw_dispatched_probs = dispatch_weights_global
 
+        # Deferred-sync prefetch: async DtoH of the device per-expert counts into
+        # the pinned buffer + event. No host sync here -- the read is deferred to
+        # get_permuted_hidden_states_by_experts / get_number_of_tokens_per_expert.
+        self._prefetch_tokens_per_expert(num_tokens_per_expert)
+
         return hidden_states
+
+    def _prefetch_tokens_per_expert(self, tokens_per_expert: torch.Tensor) -> None:
+        """Async-copy device per-expert counts into the pinned CPU buffer.
+
+        Records an event so a later consumer can synchronize exactly once. No
+        host sync is performed here. A no-op when CUDA is unavailable (the
+        buffer/event are then None and consumers fall back to the device tensor).
+        """
+        if self._tokens_per_expert_event is not None:
+            self._tokens_per_expert_cpu.copy_(tokens_per_expert, non_blocking=True)
+            self._tokens_per_expert_event.record()
+
+    def _synced_tokens_per_expert(self) -> torch.Tensor:
+        """Per-expert counts on CPU, synchronizing the prefetch event once.
+
+        Falls back to the device tensor (which forces a sync on first host use)
+        when the prefetch is unavailable (no CUDA) or stale -- the fp8
+        ``moe_router_padding_for_quantization`` path is the only thing that
+        rewrites ``tokens_per_expert`` after dispatch, so we route around the
+        prefetch in that case.
+        """
+        if (
+            self._tokens_per_expert_event is not None
+            and not self.config.moe_router_padding_for_quantization
+        ):
+            self._tokens_per_expert_event.synchronize()
+            return self._tokens_per_expert_cpu
+        return self.tokens_per_expert
 
     def _indices_to_multihot(self, indices, probs):
         """Converts a tensor of indices to a multihot vector."""
@@ -1465,7 +1512,9 @@ class _MoriManager(_DispatchManager):
         return self.dispatched_indices, self.dispatched_probs
 
     def get_number_of_tokens_per_expert(self) -> torch.Tensor:
-        return self.tokens_per_expert
+        # CPU tensor (from the deferred-sync prefetch) so the downstream
+        # GroupedMLP `.tolist()` is a pure-host op rather than a GPU sync.
+        return self._synced_tokens_per_expert()
 
     def combine(
         self,
@@ -1541,11 +1590,17 @@ class _MoriManager(_DispatchManager):
 
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
+        # Only the fused permute path needs an exact host int for num_out_tokens;
+        # the non-fused masked_select path ignores it, so we pass None there and skip host sync for now.
+        if self.permute_fusion:
+            num_out_tokens = int(self._synced_tokens_per_expert().sum())
+        else:
+            num_out_tokens = None
         hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
             hidden_states,
             self.dispatched_routing_map,
             probs=self.dispatched_probs,
-            num_out_tokens=self.tokens_per_expert.sum().item(),
+            num_out_tokens=num_out_tokens,
             fused=self.permute_fusion,
         )
         if self.router_dtype == "fp64":

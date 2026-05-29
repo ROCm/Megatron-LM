@@ -756,8 +756,7 @@ class MoriDispatch(torch.autograd.Function):
         # token_indices -> [num_tokens, router_topk]
         # scales=None: BF16 path uses scale_dim=0
         # When async_finish=True the launch is moved onto a dedicated comm
-        # stream so it can overlap with non-dependent compute. The .item()
-        # below still serializes on the host, however.
+        # stream so it can overlap with non-dependent compute.
         # `return_routing=True` makes MORI return a per-call routing handle
         # so this layer's combine/backward stay isolated from sibling layers.
         (
@@ -779,38 +778,45 @@ class MoriDispatch(torch.autograd.Function):
             allocate_on_comm_stream,
         )
 
-        # TODO look into removing/hiding this .item() call
-        total_recv = recv_num_token[0].item()
-        recv_x = dispatch_out[:total_recv]
-        recv_token_indices_global = dispatch_indices[:total_recv]
-        recv_token_probs = dispatch_weights[:total_recv]
+        # Deferred-sync path:
+        # dispatch_out      -> [max_recv, hidden_dim]
+        # dispatch_indices  -> [max_recv, router_topk]   (GLOBAL expert ids)
+        # dispatch_weights  -> [max_recv, router_topk]
+        # where max_recv == world_size * max_num_tokens_per_rank. Rows
+        # >= recv_num_token[0] are padding (uninitialized MORI buffer tail).
+        max_recv = dispatch_indices.shape[0]
+        device = dispatch_indices.device
+
+        # On-device validity mask.
+        row_idx = torch.arange(max_recv, device=device).unsqueeze(1)
+        valid_rows = row_idx < recv_num_token.flatten()[0]
 
         # MORI's dispatch returns the original GLOBAL expert ids in [0, num_experts)
         # for every topk slot of every received token, with no -1 sentinel for
-        # non-local slots. Megatron's downstream pipeline follows the DeepEP contract, which
-        # expects values in the LOCAL expert space [0, num_local_experts) with
+        # non-local slots. Megatron's downstream pipeline follows the DeepEP contract,
+        # which expects values in the LOCAL expert space [0, num_local_experts) with
         # `-1` marking non-local slots.
         my_rank = torch.distributed.get_rank(group)
         local_id_start = my_rank * num_local_experts
         local_id_end = local_id_start + num_local_experts
-        is_local = (recv_token_indices_global >= local_id_start) & (
-            recv_token_indices_global < local_id_end
+        is_local = (dispatch_indices >= local_id_start) & (
+            dispatch_indices < local_id_end
         )
-        recv_token_indices = (recv_token_indices_global - local_id_start).to(torch.int64)
+        recv_token_indices = (dispatch_indices - local_id_start).to(torch.int64)
         recv_token_indices = torch.where(
-            is_local,
+            is_local & valid_rows,
             recv_token_indices,
             torch.full_like(recv_token_indices, -1),
         )
 
         # Per-local-expert token counts (matches DeepEP's
-        # num_recv_tokens_per_expert_list contract). Filter -1 sentinels via the
-        # `is_local` mask before bincount so we don't accidentally count global
-        # expert ids that fall in [0, num_local_experts) but belong to other ranks.
-        local_ids_flat = recv_token_indices[is_local]
-        tokens_per_expert = torch.bincount(
-            local_ids_flat, minlength=num_local_experts
-        )[:num_local_experts]
+        # num_recv_tokens_per_expert_list contract). Sync-free: shift the -1
+        # sentinels (non-local + padding rows) into bin 0 and scatter_add into a
+        # fixed-size [num_local_experts + 1] buffer, then drop bin 0.
+        shifted_local_ids = (recv_token_indices + 1).reshape(-1)
+        counts = torch.zeros(num_local_experts + 1, dtype=torch.long, device=device)
+        counts.scatter_add_(0, shifted_local_ids, torch.ones_like(shifted_local_ids))
+        tokens_per_expert = counts[1:]
 
         ctx.group = group
         ctx.num_local_experts = num_local_experts
@@ -827,10 +833,12 @@ class MoriDispatch(torch.autograd.Function):
         # token_indices: sender layout (same as dispatch() input) per MORI API.
         ctx.save_for_backward(token_indices, dispatch_weights)
 
+        # NOTE: recv_x, recv_token_probs and dispatch_weights are the FULL [max_recv, ...] buffers
+        # (no slicing). recv_token_indices carries `-1` in every invalid/padding row
         return (
-            recv_x,
+            dispatch_out,
             recv_token_indices,
-            recv_token_probs,
+            dispatch_weights,
             tokens_per_expert,
             dispatch_weights,
             routing_handle,
@@ -1045,12 +1053,18 @@ if HAVE_MORI:
             Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert,
             dispatch_weights, routing_handle).
 
-            ``recv_x`` / ``recv_indices`` / ``recv_probs`` are sliced to
-            ``[total_recv, ...]`` for the Megatron permute path.
-            ``dispatch_weights`` is the full MORI recv-capacity view
-            ``[world_size * max_num_tokens_per_rank, topk]`` for combine forward
-            and dispatch-backward. Combine ``indices`` come from the dispatch
-            input ``token_indices``, not from ``dispatch_indices``.
+            Deferred-sync layout: ``recv_x`` / ``recv_indices`` / ``recv_probs``
+            are the FULL MORI recv-capacity buffers
+            ``[world_size * max_num_tokens_per_rank, ...]`` -- they are NOT
+            sliced to ``total_recv`` (which would require a host sync). Instead,
+            ``recv_indices`` carries the ``-1`` sentinel in every invalid/padding
+            row (non-local experts and rows beyond the live recv count), so the
+            downstream ``_indices_to_multihot`` + ``permute`` still produce an
+            exact-sized GroupedGEMM input. ``tokens_per_expert`` is a device
+            tensor computed sync-free. ``dispatch_weights`` (5th element) is the
+            same full recv-capacity view, reused for combine forward and
+            dispatch-backward. Combine ``indices`` come from the dispatch input
+            ``token_indices``, not from ``dispatch_indices``.
 
             ``routing_handle`` is the per-call routing snapshot
             (a :class:`mori.ops.dispatch_combine.EpDispatchRoutingHandle`)
@@ -1088,7 +1102,10 @@ if HAVE_MORI:
         """Perform fused combine using MORI EP backend.
 
         Args:
-            x: Input tensor from expert computation [total_recv, hidden_dim]
+            x: Input tensor from expert computation, the full recv-capacity
+                view ``[world_size * max_num_tokens_per_rank, hidden_dim]``
+                (padded tail rows are zero from unpermute; MORI's combine reads
+                only the live ``total_recv`` rows via the routing handle).
             group: Process group
             sender_token_indices: SENDER-side topk indices
                 ``[num_sender_tokens, topk]``. Same tensor as passed to
