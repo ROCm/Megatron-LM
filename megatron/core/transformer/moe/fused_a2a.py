@@ -834,7 +834,14 @@ class MoriDispatch(torch.autograd.Function):
         ctx.save_for_backward(token_indices, dispatch_weights)
 
         # NOTE: recv_x, recv_token_probs and dispatch_weights are the FULL [max_recv, ...] buffers
-        # (no slicing). recv_token_indices carries `-1` in every invalid/padding row
+        # (no slicing). recv_token_indices carries `-1` in every invalid/padding row.
+        #
+        # dispatch_weights is intentionally returned in two slots because the caller
+        # consumes the same tensor two different ways:
+        #   - slot 3 (recv_probs): fed into _indices_to_multihot / fused_indices_to_multihot,
+        #     which transforms it into the routing map + permuted probs (overwritten downstream).
+        #   - slot 5 (dispatch_weights): kept RAW as the recv-layout weights buffer that
+        #     op.combine() needs in combine forward and dispatch-backward.
         return (
             dispatch_out,
             recv_token_indices,
