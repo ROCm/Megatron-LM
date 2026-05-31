@@ -553,11 +553,10 @@ def init_mori_shmem(group: torch.distributed.ProcessGroup):
     ``shmem_torch_process_group_init`` once per process (until
     :func:`finalize_mori_shmem`). MORI consumes the named PG only during
     bootstrap (to broadcast the shmem UID); after that the registration is
-    unused, so later calls with a rebuilt EP group are no-ops.
+    unused, so later calls with a rebuilt EP group are no-ops until finalize.
 
-    Session teardown via ``torch.distributed.destroy_process_group()`` calls
-    ``_unregister_all_process_groups()`` and clears the registry; no explicit
-    unregister is needed.
+    After :func:`finalize_mori_shmem`, the next call re-registers the group and
+    re-initializes shmem (used between pytest parametrized cases).
     """
     global _mori_shmem_initialized
     if _mori_shmem_initialized:
@@ -567,38 +566,64 @@ def init_mori_shmem(group: torch.distributed.ProcessGroup):
     _mori_shmem_initialized = True
 
 
+def _sync_mori_gpu_work():
+    """Drain in-flight MORI kernels before tearing down the cached op handle.
+
+    Parametrized tests and layer boundaries call :func:`reset_mori_op` while
+    ``async_finish=True`` may still have dispatch/combine work queued on the
+    dedicated comm stream. Without an explicit drain, the next test can race
+    with or inherit visibility from the previous case's kernels.
+
+    Note: MORI's ``LaunchReset`` is currently a no-op in C++; this sync only
+    ensures GPU-side completion, not shmem buffer zeroing.
+    """
+    if not torch.cuda.is_available():
+        return
+    comm_stream = _mori_comm_stream
+    if comm_stream is not None:
+        torch.cuda.current_stream().wait_stream(comm_stream)
+        comm_stream.synchronize()
+    torch.cuda.synchronize()
+
+
 def reset_mori_op():
     """Clear the cached :class:`~mori.ops.EpDispatchCombineOp`.
 
-    Calls :meth:`~mori.ops.EpDispatchCombineOp.reset` when present, then drops
-    the reference. Use between pytest parametrized cases or when EP layout changes
-    so the next :func:`get_mori_op` builds a fresh op. Does not finalize symmetric
-    memory; call :func:`finalize_mori_shmem` at session teardown.
+    Drains the comm stream and synchronizes the device, then calls
+    :meth:`~mori.ops.EpDispatchCombineOp.reset` when present and drops the
+    reference and comm stream cache. Use between pytest parametrized cases or
+    when EP layout changes so the next :func:`get_mori_op` builds a fresh op.
+    Does not finalize symmetric memory or clear shmem staging buffers; call
+    :func:`finalize_mori_shmem` at session teardown.
 
     Do not call between dispatch and combine in the same forward pass.
     """
-    global _mori_op
+    global _mori_op, _mori_comm_stream
     if _mori_op is not None:
+        _sync_mori_gpu_work()
         _mori_op.reset()
     _mori_op = None
+    _mori_comm_stream = None
 
 
 def finalize_mori_shmem():
-    """Finalize MORI symmetric memory for process/session teardown.
+    """Finalize MORI symmetric memory so the next test can re-bootstrap cleanly.
 
     Inverse of :func:`init_mori_shmem`. Resets the cached op first, then calls
-    ``mori.shmem.shmem_finalize()``. Safe when shmem was never initialized.
-    MORI cannot re-init shmem after finalize.
-
-    Does not unregister :data:`MORI_EP_PROCESS_GROUP_NAME`; pytest session
-    cleanup calls ``torch.distributed.destroy_process_group()``, which invokes
-    ``_unregister_all_process_groups()`` and tears down every named PG.
+    ``mori.shmem.shmem_finalize()`` and unregisters
+    :data:`MORI_EP_PROCESS_GROUP_NAME` so :func:`init_mori_shmem` can register
+    a fresh EP process group on the next parametrized case. Safe when shmem was
+    never initialized.
     """
     reset_mori_op()
     global _mori_shmem_initialized
     if HAVE_MORI and _mori_shmem_initialized:
         mori.shmem.shmem_finalize()
         _mori_shmem_initialized = False
+    try:
+        torch._C._distributed_c10d._unregister_process_group(MORI_EP_PROCESS_GROUP_NAME)
+    except RuntimeError:
+        pass
 
 
 def _get_mori_comm_stream():

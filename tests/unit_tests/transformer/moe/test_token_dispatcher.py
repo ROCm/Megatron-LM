@@ -10,7 +10,7 @@ import torch
 from megatron.core import config, parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.fused_a2a import reset_mori_op
+from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
 from megatron.core.transformer.moe.moe_utils import get_capacity
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -33,6 +33,25 @@ def token_unpermutation(token_dispatcher, hidden_states):
     hidden_states = token_dispatcher.token_combine(hidden_states)
     hidden_states = token_dispatcher.combine_postprocess(hidden_states)
     return hidden_states, None
+
+
+def dropless_dispatch_unpermute_round(moe_layer, hidden_states, test_dtype):
+    """One dispatch→expert-weight→combine round; should restore input up to ETP scale."""
+    probs, indices = apply_module(moe_layer.router)(hidden_states)
+    probs = torch.ones_like(probs) / moe_layer.router.topk
+
+    permuted_local_hidden_states, tokens_per_expert, permuted_probs = token_permutation(
+        moe_layer.token_dispatcher, hidden_states, probs, indices
+    )
+
+    permuted_local_hidden_states = permuted_local_hidden_states * permuted_probs.unsqueeze(-1)
+    permuted_local_hidden_states = permuted_local_hidden_states.to(dtype=test_dtype)
+
+    restored_hidden_states, _ = token_unpermutation(
+        moe_layer.token_dispatcher, permuted_local_hidden_states
+    )
+    scale = moe_layer.config.expert_tensor_parallel_size
+    return restored_hidden_states / scale
 
 
 class MoEModelTestContainer:
@@ -160,6 +179,40 @@ class MoEModelTestContainer:
         torch.testing.assert_close(
             hidden_states.grad, ans
         ), "Restored hidden states do not match original hidden states"
+
+    @pytest.mark.internal
+    def dispatcher_dropless_multi_layer_multi_iter_test(self, num_layers=3, num_iters=4):
+        """Stress shared MORI EpDispatchCombineOp across layers and training steps.
+
+        Unlike parametrized flex tests, this deliberately does NOT call
+        reset_mori_op() or finalize_mori_shmem() between layers or iterations.
+        """
+        # new_moe_layer() already sets layer_number=0; keep all layers on the
+        # same number so the aux-loss tracker (sized by config.num_layers=1)
+        # doesn't index out of bounds. The identity check overrides router
+        # probs anyway, so aux loss never affects the comparison.
+        moe_layers = [self.new_moe_layer() for _ in range(num_layers)]
+
+        bs = 32
+        seql = 8
+        ans = torch.randn(
+            (bs, seql, self.config.hidden_size), dtype=self.test_dtype, device="cuda"
+        )
+
+        for _ in range(num_iters):
+            hidden_states = ans.clone().requires_grad_(True)
+            output = hidden_states
+            for moe_layer in moe_layers:
+                output = dropless_dispatch_unpermute_round(moe_layer, output, self.test_dtype)
+
+            torch.testing.assert_close(
+                output, ans
+            ), "Multi-layer output does not match input after dispatch/unpermute"
+
+            torch.autograd.backward(output, ans.clone())
+            torch.testing.assert_close(
+                hidden_states.grad, ans
+            ), "Multi-layer input grad does not match input"
 
     @pytest.mark.internal
     def dispatcher_capacity_test(self):
@@ -437,9 +490,11 @@ class TestFlexDispatcher:
         pass
 
     def teardown_method(self, method):
-        # Drop cached MORI EpDispatchCombineOp so the next parametrized case
-        # (different tp/ep → num_local_experts) cannot reuse a stale handle.
+        # Full MORI teardown so the next parametrized case (different tp/ep →
+        # num_local_experts, router_topk) cannot inherit shmem staging or a
+        # stale EpDispatchCombineOp handle from the previous test.
         reset_mori_op()
+        finalize_mori_shmem()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -557,3 +612,40 @@ class TestFlexDispatcher:
         )
         container.dispatcher_router_padding_for_fp8_test()
         config.ENABLE_EXPERIMENTAL = False
+
+
+@pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+class TestMoriSharedOp:
+    """MORI-only tests for process-wide EpDispatchCombineOp reuse."""
+
+    def setup_method(self, method):
+        pass
+
+    def teardown_method(self, method):
+        reset_mori_op()
+        finalize_mori_shmem()
+        Utils.destroy_model_parallel()
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.internal
+    @pytest.mark.parametrize("tp_size,ep_size", [(1, 8), (8, 1), (4, 2)])
+    @pytest.mark.parametrize("num_layers,num_iters", [(3, 4), (2, 8)])
+    def test_multi_layer_multi_iter_forward_backward(
+        self, tp_size, ep_size, num_layers, num_iters
+    ):
+        container = MoEModelTestContainer(
+            tp_size=tp_size,
+            ep_size=ep_size,
+            pp_size=1,
+            num_moe_experts=8,
+            moe_router_topk=2,
+            moe_router_load_balancing_type="aux_loss",
+            moe_token_dispatcher_type="flex",
+            moe_flex_dispatcher_backend="mori",
+            moe_mori_max_tokens_per_rank=4096,
+            hidden_size=1024,
+            test_dtype=torch.bfloat16,
+        )
+        container.dispatcher_dropless_multi_layer_multi_iter_test(
+            num_layers=num_layers, num_iters=num_iters
+        )
