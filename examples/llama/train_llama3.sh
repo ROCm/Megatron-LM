@@ -101,6 +101,7 @@ FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
 ENABLE_HSDP="${ENABLE_HSDP:-0}"
 HSDP_NUM_REPLICAS="${HSDP_NUM_REPLICAS:-2}"
+MORI_SDMA_AG="${MORI_SDMA_AG:-0}" # 1: route Megatron FSDP all-gather through the mori SDMA backend (AMD MI300/ROCm)
 
 if [ "$TE_FP8" -eq 1 ] && [ "$TE_FP4" -eq 1 ]; then
     echo "Error: FP8 and FP4 cannot be used simultaneously. Please choose one."
@@ -126,6 +127,11 @@ if [ "$ENABLE_HSDP" -eq 1 ]; then
         echo "Error: HSDP_NUM_REPLICAS must be >= 2 when ENABLE_HSDP=1."
         exit 1
     fi
+fi
+
+if [ "$MORI_SDMA_AG" -eq 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+    echo "Error: MORI_SDMA_AG=1 requires MEGATRON_FSDP=1 (the mori SDMA all-gather only applies to Megatron FSDP)."
+    exit 1
 fi
 
 EXPERIMENT_DIR="experiment"
@@ -414,6 +420,11 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
     if [ "$ENABLE_HSDP" -eq 1 ]; then
         echo "Megatron HSDP is enabled with $HSDP_NUM_REPLICAS DP outer replicas"
         EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_REPLICAS"
+    fi
+
+    if [ "$MORI_SDMA_AG" -eq 1 ]; then
+        echo "Megatron FSDP mori SDMA all-gather is enabled; falls back to RCCL/NCCL if mori is unavailable"
+        EXTRA_ARGS="$EXTRA_ARGS --enable-mori-sdma-ag"
     fi
 fi
 
