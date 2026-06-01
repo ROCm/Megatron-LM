@@ -92,7 +92,8 @@ class TestFullyShardedDataParallel:
         reason="Device mesh feature requires PyTorch 2.3 or later",
     )
     @pytest.mark.parametrize("dp_size", [2, 8])  # Test with 2 or 8 GPUs
-    def test_fsdp_with_process_groups(self, dp_size):
+    @pytest.mark.parametrize("enable_mori_sdma_ag", [False, True])
+    def test_fsdp_with_process_groups(self, dp_size, enable_mori_sdma_ag):
         """Test that FSDP works correctly with different process group configurations."""
         if not is_torch_min_version("2.4.0"):
             pytest.skip("Megatron FSDP requires torch >= 2.4.0")
@@ -119,13 +120,16 @@ class TestFullyShardedDataParallel:
         input_dim = 13
         output_dim = 17
 
-        # Setup FSDP config - using optim_grads_params for full sharding test
+        # Setup FSDP config - using optim_grads_params for full sharding test.
+        # enable_mori_sdma_ag exercises the mori SDMA all-gather path (with transparent
+        # fallback to RCCL/NCCL when mori is unavailable, e.g. on NVIDIA/CI).
         fsdp_config = DistributedDataParallelConfig(
             data_parallel_sharding_strategy="optim_grads_params",
             overlap_grad_reduce=True,
             overlap_param_gather=True,
             bucket_size=10000,
             use_megatron_fsdp=True,
+            enable_mori_sdma_ag=enable_mori_sdma_ag,
         )
 
         # Create two identical models
@@ -225,18 +229,31 @@ class TestFullyShardedDataParallel:
                 msg=f"Parameters for {name1} don't match",
             )
 
-    # Testing fsdp_double_buffer with and without nccl_ub
+    # Testing fsdp_double_buffer with and without nccl_ub, and the mori SDMA all-gather backend
     @pytest.mark.parametrize(
-        ("dp_size", "nccl_ub", "fsdp_double_buffer", "fsdp_manual_registration"),
-        [(8, False, True, False), (8, True, True, False), (8, True, True, True)],
+        (
+            "dp_size",
+            "nccl_ub",
+            "fsdp_double_buffer",
+            "fsdp_manual_registration",
+            "enable_mori_sdma_ag",
+        ),
+        [
+            (8, False, True, False, False),
+            (8, True, True, False, False),
+            (8, True, True, True, False),
+            (8, False, False, False, True),
+        ],
     )
     def test_fsdp_user_buffer_registration(
-        self, dp_size, nccl_ub, fsdp_double_buffer, fsdp_manual_registration
+        self, dp_size, nccl_ub, fsdp_double_buffer, fsdp_manual_registration, enable_mori_sdma_ag
     ):
         """Test that FSDP works correctly with user buffer registration.
         This test compares the training results of the baseline fsdp with the target fsdp config.
-        Baseline fsdp: nccl_ub=False, fsdp_double_buffer=False, fsdp_manual_registration=False
-        Target fsdp: nccl_ub=[True, False], fsdp_double_buffer=[True, False], fsdp_manual_registration=[True, False]
+        Baseline fsdp: nccl_ub=False, fsdp_double_buffer=False, fsdp_manual_registration=False,
+        enable_mori_sdma_ag=False
+        Target fsdp: nccl_ub=[True, False], fsdp_double_buffer=[True, False],
+        fsdp_manual_registration=[True, False], enable_mori_sdma_ag=[True, False]
         """
         if nccl_ub:
             pytest.skip("User buffers are failing on ROCm")
@@ -277,6 +294,7 @@ class TestFullyShardedDataParallel:
             nccl_ub=False,
             fsdp_double_buffer=False,
             fsdp_manual_registration=False,
+            enable_mori_sdma_ag=False,
         )
 
         # Setup FSDP config - target fsdp config
@@ -289,6 +307,7 @@ class TestFullyShardedDataParallel:
             nccl_ub=nccl_ub,
             fsdp_double_buffer=fsdp_double_buffer,
             fsdp_manual_registration=fsdp_manual_registration,
+            enable_mori_sdma_ag=enable_mori_sdma_ag,
         )
 
         # Create two identical models

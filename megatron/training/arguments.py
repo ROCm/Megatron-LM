@@ -796,6 +796,13 @@ def validate_args(args, defaults={}):
         if args.use_megatron_fsdp:
             args.reuse_grad_buf_for_mxfp8_param_ag = False
 
+    if getattr(args, 'enable_mori_sdma_ag', False):
+        assert args.use_megatron_fsdp, \
+            "--enable-mori-sdma-ag is only supported with Megatron FSDP (--use-megatron-fsdp)"
+        assert args.data_parallel_sharding_strategy == "optim_grads_params", \
+            "--enable-mori-sdma-ag requires parameter sharding " \
+            "(--data-parallel-sharding-strategy optim_grads_params)"
+
     # Parameters dtype.
     args.params_dtype = torch.float
     if args.fp16:
@@ -2469,6 +2476,18 @@ def _add_distributed_args(parser):
                         'and performance requirements.')
     group.add_argument('--keep-fp8-transpose-cache', action='store_true',
                        help='If set, keep the fp8 transpose cache when using Megatron FSDP.')
+    group.add_argument('--enable-mori-sdma-ag', action='store_true', dest='enable_mori_sdma_ag',
+                       default=False,
+                       help='Route the Megatron FSDP parameter all-gather through the mori SDMA '
+                       'backend (intra-node System DMA copy) instead of RCCL/NCCL. '
+                       'Falls back transparently to torch.distributed.all_gather_into_tensor whenever '
+                       'mori is unavailable, the dtype is unsupported, the shard is too large, or the '
+                       'runtime is not ROCm/AMD. Only effective with --use-megatron-fsdp.')
+    group.add_argument('--mori-sdma-ag-max-numel', type=int, default=64 * 1024 * 1024,
+                       dest='mori_sdma_ag_max_numel',
+                       help='Per-rank transit buffer size, in elements, for the mori SDMA all-gather '
+                       'backend. Only effective when --enable-mori-sdma-ag is set. Shards larger than '
+                       'this fall back to RCCL/NCCL.')
     group.add_argument('--enable-full-sharding-in-hsdp', action='store_true',
                        help='If set, enable full sharding in megatron-fsdp Hybrid Sharded Data Parallel (HSDP) mode.')
     group.add_argument('--num-distributed-optimizer-instances', type=int, default=1,

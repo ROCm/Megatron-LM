@@ -139,6 +139,17 @@ class DistributedDataParallelConfig:
       to minimize the registration time.
     """
 
+    enable_mori_sdma_ag: bool = False
+    """If true, route the Megatron FSDP parameter all-gather through the mori SDMA backend
+      (intra-node System DMA copy on AMD MI300/ROCm) instead of RCCL/NCCL. Falls back
+      transparently to torch.distributed.all_gather_into_tensor whenever mori is unavailable,
+      the dtype is unsupported, the shard is too large, or the runtime is not ROCm/AMD."""
+
+    mori_sdma_ag_max_numel: int = 64 * 1024 * 1024
+    """Per-rank transit buffer size, in elements, for the mori SDMA all-gather backend.
+      Only effective when enable_mori_sdma_ag is set. Shards larger than this fall back to
+      RCCL/NCCL. Can be overridden at runtime via MEGATRON_FSDP_SDMA_ALLGATHER_MAX_NUMEL."""
+
     def __post_init__(self):
         import os
 

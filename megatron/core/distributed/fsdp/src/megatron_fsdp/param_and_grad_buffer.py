@@ -32,6 +32,7 @@ import torch
 from torch.distributed import _coalescing_manager
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
+from . import mori_sdma
 from .mixed_precision import (
     fp8_discard_transpose_cache,
     fp8_get_raw_data,
@@ -3368,6 +3369,10 @@ class AllGatherPipeline:
         self.ag_stream = ag_stream
         # Track the status of all-gather operations for each bucket.
         self.param_gather_event_map = {}
+        # Track bucket keys whose all-gather was issued through the mori SDMA backend.
+        # These carry their own stream-event Work and must not be overwritten by the
+        # NCCL/RCCL coalescing event in `all_gather_params`.
+        self._sdma_bucket_keys = set()
         # All buckets are initially deallocated / empty after initialization of ParamAndGradBuffer.
         self.bucket_status = {}
         for i in range(self.buffer.num_buckets):
@@ -3615,6 +3620,12 @@ class AllGatherPipeline:
             # Replace the parameter all-gather event with coalescing event.
             for bucket_id in buckets:
                 bucket_key = self.get_bucket_key(bucket_id, bwd)
+                if bucket_key in self._sdma_bucket_keys:
+                    # SDMA buckets carry their own stream-event Work (not an NCCL/RCCL
+                    # collective), so they are not tracked by the coalescing manager.
+                    # Keep their existing event and clear the marker.
+                    self._sdma_bucket_keys.discard(bucket_key)
+                    continue
                 _, mark_bucket_ready_to_use = self.param_gather_event_map[bucket_key]
                 self.param_gather_event_map[bucket_key] = (
                     coalescing_event,
@@ -3720,6 +3731,9 @@ class AllGatherPipeline:
         """All-gather the bucket and set the items."""
         bucket_key = self.get_bucket_key(bucket_id, bwd)
 
+        # Reset any stale SDMA marker so the set reflects only the current gather.
+        self._sdma_bucket_keys.discard(bucket_key)
+
         self.bucket_can_be_released[bucket_key] = False
         if self.bucket_status[bucket_key] != BucketStatus.EMPTY:
             return
@@ -3734,12 +3748,30 @@ class AllGatherPipeline:
         bucket = wbuf.fetch_bucket(set_param_data=True)
         # All-gather the module weights in each buffer shard into the allocated bucket.
         # Now each rank will have a copy of this FSDP unit module's weights.
-        param_gather_event = torch.distributed.all_gather_into_tensor(
-            output_tensor=bucket.data,
-            input_tensor=wbuf.get_shard_from_local_buffer(),
-            group=wbuf.data_parallel_group,
-            async_op=True,
-        )
+        param_gather_event = None
+        if getattr(self.buffer.ddp_config, "enable_mori_sdma_ag", False):
+            # Try the mori SDMA backend (intra-node System DMA copy).
+            # Returns None whenever SDMA is not applicable (mori unavailable, dtype
+            # unsupported, shard too large, or a group other than the one bound at init),
+            # in which case we transparently fall back to RCCL/NCCL below.
+            param_gather_event = mori_sdma.allgather_into_tensor(
+                input_tensor=wbuf.get_shard_from_local_buffer(),
+                output_tensor=bucket.data,
+                group=wbuf.data_parallel_group,
+                max_numel=getattr(
+                    self.buffer.ddp_config, "mori_sdma_ag_max_numel", 64 * 1024 * 1024
+                ),
+            )
+            if param_gather_event is not None:
+                # SDMA work carries its own stream-event; exclude it from coalescing.
+                self._sdma_bucket_keys.add(bucket_key)
+        if param_gather_event is None:
+            param_gather_event = torch.distributed.all_gather_into_tensor(
+                output_tensor=bucket.data,
+                input_tensor=wbuf.get_shard_from_local_buffer(),
+                group=wbuf.data_parallel_group,
+                async_op=True,
+            )
 
         def get_closure(bucket_id, bwd):
             @torch.no_grad()
