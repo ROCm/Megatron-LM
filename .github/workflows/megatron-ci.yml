@@ -77,17 +77,6 @@ jobs:
           echo "Using TransformerEngine commit: $SHA"
           echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Determine whether to push image
-        id: push-image
-        run: |
-          # PR and workflow_dispatch jobs build locally only. Push (and cache export)
-          # runs on trusted branch pushes so registry tags stay branch-controlled.
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/rocm_dev" ]; then
-            echo "should_push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_push=false" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
@@ -97,13 +86,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Build Docker image with registry cache
+      - name: Build and push Docker image with registry cache
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile_rocm.ci
-          push: ${{ steps.push-image.outputs.should_push == 'true' }}
-          # Write image to disk so `docker run` does not need registry pull (works for PR builds).
+          push: true
+          # Also write image to disk so `docker run` does not need `docker pull`.
+          # On some runners dockerd cannot reach auth.docker.io (timeout); BuildKit push may still work.
           outputs: type=docker,dest=${{ runner.temp }}/megatron-ci-image.tar
           tags: |
             rocm/megatron-lm-private:${{ github.sha }}
@@ -112,7 +102,8 @@ jobs:
             TE_COMMIT=${{ steps.te-ref.outputs.sha }}
           cache-from: |
             type=registry,ref=rocm/megatron-lm-private:cache
-          cache-to: ${{ steps.push-image.outputs.should_push == 'true' && 'type=registry,ref=rocm/megatron-lm-private:cache,mode=max' || '' }}
+          cache-to: |
+            type=registry,ref=rocm/megatron-lm-private:cache,mode=max
 
       - name: Load image for docker run
         run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
