@@ -1,4 +1,4 @@
-ARG BASE_DOCKER=rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+ARG BASE_DOCKER=rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.9.1
 FROM $BASE_DOCKER
 
 ARG PYTORCH_ROCM_ARCH_OVERRIDE="gfx942"
@@ -110,16 +110,9 @@ RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
 # MORI EP (MoE dispatch/combine) for --moe-flex-dispatcher-backend mori
 ARG MORI_BRANCH=sudhu/mori_training
 ARG MORI_REPO=https://github.com/ROCm/mori.git
-# libpci-dev / libibverbs-dev are stock Ubuntu packages. The base image bakes in
-# an AMD-internal ROCm apt source that occasionally serves 404s, which would
-# fail this whole step. Scope this update to the Ubuntu archive only.
-RUN apt-get update \
-        -o Dir::Etc::sourceparts=/dev/null \
-        -o Dir::Etc::sourcelist=/etc/apt/sources.list && \
-    apt-get install -y --no-install-recommends \
+RUN apt-get install -y --no-install-recommends \
         libpci-dev \
-        libibverbs-dev && \
-    rm -rf /var/lib/apt/lists/*
+        libibverbs-dev
 WORKDIR ${STAGE_DIR}
 RUN pip install cmake ninja &&\
     git clone ${MORI_REPO} mori &&\
