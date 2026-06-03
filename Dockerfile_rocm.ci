@@ -1,4 +1,4 @@
-ARG BASE_DOCKER=rocm/pytorch:rocm7.2.4_ubuntu22.04_py3.10_pytorch_release_2.9.1
+ARG BASE_DOCKER=rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.9.1
 FROM $BASE_DOCKER
 
 ARG PYTORCH_ROCM_ARCH_OVERRIDE="gfx942"
@@ -79,6 +79,9 @@ git clone ${FA_REPO} \
 && MAX_JOBS=128 GPU_ARCHS=${PYTORCH_ROCM_ARCH_OVERRIDE} python3 setup.py install; \
 fi
 
+# CMake/ninja required by TransformerEngine, grouped_gemm, MORI, etc.
+RUN pip install cmake ninja
+
 # Clone TE repo and submodules
 WORKDIR ${STAGE_DIR}
 
@@ -114,8 +117,7 @@ RUN apt-get install -y --no-install-recommends \
         libpci-dev \
         libibverbs-dev
 WORKDIR ${STAGE_DIR}
-RUN pip install cmake ninja &&\
-    git clone ${MORI_REPO} mori &&\
+RUN git clone ${MORI_REPO} mori &&\
     cd mori &&\
     git checkout ${MORI_BRANCH} &&\
     echo "MORI at commit:" $(git rev-parse HEAD) &&\
