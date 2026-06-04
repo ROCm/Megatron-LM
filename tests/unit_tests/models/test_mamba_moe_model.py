@@ -164,6 +164,8 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "moe_hybridep_num_sms": 16,
     "moe_input_jitter_eps": None,
     "moe_latent_size": None,
+    "moe_mori_kernel_type": None,
+    "moe_mori_max_tokens_per_rank": None,
     "moe_layer_freq": 1,
     "moe_layer_recompute": False,
     "moe_pad_expert_input_to_capacity": False,
