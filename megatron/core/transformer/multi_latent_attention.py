@@ -29,6 +29,8 @@ except ImportError:
 
 
 from megatron.core import tensor_parallel
+from megatron.core.enums import Fp8Recipe
+from megatron.core.fp8_utils import get_fp8_align_size
 from megatron.core.models.common.embeddings import (
     RotaryEmbedding,
     YarnRotaryEmbedding,
@@ -542,10 +544,19 @@ class MLASelfAttention(MultiLatentAttention):
         else:
             raise ValueError(f"Unsupported linear_kv_down_proj: {submodules.linear_kv_down_proj}")
 
+        kv_down_proj_out_size = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+        self.kv_down_proj_mxfp8_padding = 0
+        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.mxfp8:
+            align = get_fp8_align_size(Fp8Recipe.mxfp8)
+            remainder = kv_down_proj_out_size % align
+            if remainder != 0:
+                self.kv_down_proj_mxfp8_padding = align - remainder
+                kv_down_proj_out_size += self.kv_down_proj_mxfp8_padding
+
         self.linear_kv_down_proj = build_module(
             submodules.linear_kv_down_proj,
             self.config.hidden_size,
-            self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
+            kv_down_proj_out_size,
             config=self.config,
             init_method=self.config.init_method,
             bias=False,
@@ -680,28 +691,35 @@ class MLASelfAttention(MultiLatentAttention):
             q_compressed = hidden_states
 
         # if linear_kv_down_proj is ColumnParallelLinear:
-        #     kv_combined: [s, b, (kv_lora_rank + qk_pos_emb_head_dim) / TP]
+        #     kv_combined: [s, b, (kv_down_proj_out_size) / TP]
         # elif linear_kv_down_proj is Linear:
-        #     kv_combined: [s / TP, b, (kv_lora_rank + qk_pos_emb_head_dim)]
+        #     kv_combined: [s / TP, b, kv_down_proj_out_size]
         kv_combined, _ = self.linear_kv_down_proj(hidden_states)
-        if kv_combined.size(-1) != self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim:
-            # kv_combined: [s, b, (kv_lora_rank + qk_pos_emb_head_dim)]
+        kv_down_proj_out_size = (
+            self.config.kv_lora_rank
+            + self.config.qk_pos_emb_head_dim
+            + self.kv_down_proj_mxfp8_padding
+        )
+        kv_is_tp_sharded = kv_combined.size(-1) != kv_down_proj_out_size
+        if kv_is_tp_sharded:
             kv_combined = gather_from_tensor_model_parallel_region(kv_combined)
-            # kv_compressed:[s, b, kv_lora_rank], k_pos_emb: [s, b, qk_pos_emb_head_dim]
-            kv_compressed, k_pos_emb = torch.split(
-                kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
-            )
-            if self.config.sequence_parallel:
-                # kv_compressed:[s / TP, b, kv_lora_rank]
-                kv_compressed = scatter_to_sequence_parallel_region(kv_compressed)
-        else:
-            # kv_compressed:[s / TP, b, kv_lora_rank], k_pos_emb: [s / TP, b, qk_pos_emb_head_dim]
-            kv_compressed, k_pos_emb = torch.split(
-                kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
-            )
-            if get_pg_size(self.tp_group) > 1 and self.config.sequence_parallel:
-                # k_pos_emb: [s, b, qk_pos_emb_head_dim]
-                k_pos_emb = gather_from_sequence_parallel_region(k_pos_emb, group=self.tp_group)
+        if self.kv_down_proj_mxfp8_padding > 0:
+            kv_combined = kv_combined[
+                ..., : self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
+            ]
+        # kv_compressed: [..., kv_lora_rank], k_pos_emb: [..., qk_pos_emb_head_dim]
+        kv_compressed, k_pos_emb = torch.split(
+            kv_combined, [self.config.kv_lora_rank, self.config.qk_pos_emb_head_dim], dim=-1
+        )
+        if kv_is_tp_sharded and self.config.sequence_parallel:
+            kv_compressed = scatter_to_sequence_parallel_region(kv_compressed)
+        elif (
+            not kv_is_tp_sharded
+            and get_pg_size(self.tp_group) > 1
+            and self.config.sequence_parallel
+        ):
+            # k_pos_emb: [s, b, qk_pos_emb_head_dim]
+            k_pos_emb = gather_from_sequence_parallel_region(k_pos_emb, group=self.tp_group)
 
         if packed_seq_params is not None:
             # If sequence packing, TE expect [t, h, d] shaped qkv input.
