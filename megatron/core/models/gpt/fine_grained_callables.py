@@ -475,7 +475,10 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                         pre_mlp_layernorm_output = layer.pre_mlp_layernorm(hidden_states)
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
+                padding_mask = node.chunk_state.padding_mask
+                if padding_mask is not None:
+                    padding_mask = padding_mask.transpose(0, 1).bool()
+                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output, padding_mask)
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
