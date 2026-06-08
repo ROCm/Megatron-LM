@@ -364,11 +364,15 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-        if [ "$TE_FP8_RECIPE" == "mxfp8" ]  && [ "$FSDP" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-        else
-            echo "Error: For Llama3 FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1"
-            exit
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+
+        # MXFP8 + DDP path: TE does not implement `replace_raw_data` for MXFP8Tensor,
+        # so the default `_ParamAndGradBuffer` storage swap fails. Reusing the grad
+        # buffer for the MXFP8 param all-gather sidesteps that path. The FSDP and
+        # Megatron-FSDP paths handle MXFP8 param all-gather natively in TE and do
+        # not need this workaround.
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ] && [ "$FSDP" -ne 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --reuse-grad-buf-for-mxfp8-param-ag"
         fi
     fi
 
