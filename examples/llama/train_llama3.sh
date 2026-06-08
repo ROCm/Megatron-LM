@@ -71,7 +71,7 @@ MBS="${MBS:-1}"
 BS="${BS:-8}"
 SEQ_LENGTH="${SEQ_LENGTH:-2048}"
 MAX_POSITION_EMBEDDINGS=131072
-TOTAL_ITERS="${TOTAL_ITERS:-12}"
+TOTAL_ITERS="${TOTAL_ITERS:-5}"
 SEQ_PARALLEL="${SEQ_PARALLEL:-1}" 
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
@@ -314,7 +314,7 @@ else
 fi
 
 if [ "$ENABLE_PROFILING" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --profile --use-pytorch-profiler --tensorboard-dir $LOG_DIR"
+    EXTRA_ARGS="$EXTRA_ARGS --profile --use-pytorch-profiler --profile-step-start 3 --profile-step-end 4 --tensorboard-dir $LOG_DIR"
 fi
 
 if [ "$USE_FLASH_ATTN" -eq 1 ]; then
@@ -429,7 +429,7 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
 fi
 
 run_cmd="
-    torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
+    ${ROCPROF_PREFIX:-} torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
         $GPT_ARGS \
         $DATA_ARGS \
         $OUTPUT_ARGS \
