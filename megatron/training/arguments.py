@@ -718,11 +718,11 @@ def validate_args(args, defaults={}):
         assert os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') != "1", \
             'FSDP always requires CUDA_DEVICE_MAX_CONNECTIONS value large than one'
 
-        if args.fp8_param_gather and is_te_min_version("2.0.0"):
+        if args.fp8_param_gather and not is_te_min_version("2.12.0.dev0"):
             args.fp8_param_gather = False
             warn_rank_0(
-                'FSDP2 FP8 param gather is not supported yet in TE 2.0, will fallback to bf16'
-                'all_gather instead, turning off fp8_param_gather',
+                'FSDP2 FP8 param gather requires Transformer Engine >= 2.12.0, '
+                'will fallback to bf16 all_gather instead, turning off fp8_param_gather',
                 args.rank,
             )
         if args.fp4_param and not is_te_min_version("2.7.0.dev0"):
@@ -760,9 +760,12 @@ def validate_args(args, defaults={}):
     if args.fp4_param and not args.fp4:
         raise ValueError("--fp4-param-gather must be used together with --fp4-format.")
 
-    # FP4 requires TE >= 2.7.0.dev0
+    # FP4 requires TE >= 2.7.0.dev0 (NVFP4)
     if args.fp4 and not is_te_min_version("2.7.0.dev0"):
-        raise ValueError("--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+        raise ValueError( "--fp4-format requires Transformer Engine >= 2.7.0.dev0 for NVFP4BlockScaling support.")
+
+    if args.fp4 and getattr(args, "fp4_recipe", "nvfp4") == "mxfp4" and not is_te_min_version("2.12.0.dev0"):
+        raise ValueError("--fp4-recipe=mxfp4 requires Transformer Engine >= 2.12.0.dev0 for MXFP4BlockScaling support.")
 
     if args.use_megatron_fsdp:
         # NOTE: The flag `use_custom_fsdp` is deprecated and will be removed in future versions.
