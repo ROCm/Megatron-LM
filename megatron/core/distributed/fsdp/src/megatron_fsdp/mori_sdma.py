@@ -16,8 +16,9 @@
 
 When the user opts in (via ``--enable-mori-sdma-ag`` /
 ``DistributedDataParallelConfig.enable_mori_sdma_ag``), the Megatron FSDP
-all-gather pipeline routes ``all_gather_into_tensor`` through
-``mori.ccl.AllGatherIntoTensor`` (intra-node SDMA copy on ROCm).
+all-gather pipeline routes ``all_gather_into_tensor`` through mori SDMA
+(``mori.ccl.AllgatherSdma`` on current mori main, or the legacy
+``mori.ccl.AllGatherIntoTensor`` C++ dispatcher on older branches).
 Any failure (mori missing, non-AMD/ROCm runtime, shmem init error, oversized
 call, unsupported dtype, or a group other than the one bound at init time)
 yields ``None`` and the caller falls back to the underlying RCCL/NCCL
@@ -60,6 +61,7 @@ except ImportError:
 
 # Module-level lazy state. Populated by ``init`` on the first all-gather call.
 _handle = None
+_backend = None  # "allgather_sdma" or "allgather_into_tensor"
 _dtype_map = None
 _max_numel = 0
 _bound_group = None
@@ -116,8 +118,9 @@ def _register_group(group) -> None:
 
 def _build_dtype_map():
     """torch.dtype -> mori.ccl.DataType (NCCL-style enum)."""
-    from mori.ccl import DataType
+    from mori import cpp as mori_cpp
 
+    DataType = mori_cpp.DataType
     return {
         torch.uint8: DataType.Uint8,
         torch.int8: DataType.Int8,
@@ -131,16 +134,54 @@ def _build_dtype_map():
     }
 
 
+def _create_sdma_handle(my_pe: int, npes: int, input_bytes: int):
+    """Construct the mori all-gather handle, preferring the current Python API."""
+    output_bytes = input_bytes * npes
+    try:
+        from mori.ccl import AllgatherSdma
+
+        return AllgatherSdma(
+            my_pe=my_pe,
+            npes=npes,
+            input_buffer_size=input_bytes,
+            output_buffer_size=output_bytes,
+            copy_output_to_user=True,
+        ), "allgather_sdma", None
+    except Exception:
+        pass
+
+    try:
+        from mori import cpp as mori_cpp
+
+        AllGatherIntoTensor = mori_cpp.AllGatherIntoTensor
+    except (ImportError, AttributeError):
+        raise ImportError(
+            "Neither mori.ccl.AllgatherSdma nor mori.cpp.AllGatherIntoTensor is available"
+        )
+
+    return (
+        AllGatherIntoTensor(
+            my_pe=my_pe,
+            npes=npes,
+            input_buffer_size=input_bytes,
+            output_buffer_size=output_bytes,
+            copy_output_to_user=True,
+        ),
+        "allgather_into_tensor",
+        _build_dtype_map(),
+    )
+
+
 def init(group, max_numel: int = _DEFAULT_MAX_NUMEL) -> None:
     """Best-effort, idempotent SDMA handle construction.
 
-    Builds one ``mori.ccl.AllGatherIntoTensor`` (NCCL/RCCL-style C++
-    dispatcher) sized for the largest expected per-rank shard, bound to
-    ``group``. All subsequent allgather calls on ``group`` reuse this handle.
-    Safe to call unconditionally: any failure leaves ``_handle`` unset and logs
-    a single rank-0 info line, so callers transparently fall back to RCCL/NCCL.
+    Builds one mori SDMA all-gather handle sized for the largest expected
+    per-rank shard, bound to ``group``. All subsequent allgather calls on
+    ``group`` reuse this handle. Safe to call unconditionally: any failure
+    leaves ``_handle`` unset and logs a single rank-0 info line, so callers
+    transparently fall back to RCCL/NCCL.
     """
-    global _handle, _dtype_map, _max_numel, _bound_group, _init_attempted
+    global _handle, _backend, _dtype_map, _max_numel, _bound_group, _init_attempted
     if _init_attempted:
         return
     _init_attempted = True
@@ -154,7 +195,6 @@ def init(group, max_numel: int = _DEFAULT_MAX_NUMEL) -> None:
     try:
         _register_group(group)
         import mori.shmem as shmem
-        from mori.ccl import AllGatherIntoTensor
 
         shmem.shmem_torch_process_group_init(_PG_NAME)
         my_pe = shmem.shmem_mype()
@@ -163,24 +203,23 @@ def init(group, max_numel: int = _DEFAULT_MAX_NUMEL) -> None:
         # see; output buffer = npes * input. 4 B/element is the SDMA kernel's
         # uint32 lane width.
         input_bytes = max_numel * 4
-        _handle = AllGatherIntoTensor(
-            my_pe=my_pe,
-            npes=npes,
-            input_buffer_size=input_bytes,
-            output_buffer_size=input_bytes * npes,
-            copy_output_to_user=True,
-        )
-        _dtype_map = _build_dtype_map()
+        _handle, _backend, _dtype_map = _create_sdma_handle(my_pe, npes, input_bytes)
         _max_numel = max_numel
         _bound_group = group if group is not None else torch.distributed.group.WORLD
+        backend_name = (
+            "mori.ccl.AllgatherSdma"
+            if _backend == "allgather_sdma"
+            else "mori.cpp.AllGatherIntoTensor"
+        )
         log_single_rank(
             logger,
             logging.INFO,
-            f"Megatron FSDP SDMA allgather enabled via mori.ccl.AllGatherIntoTensor "
+            f"Megatron FSDP SDMA allgather enabled via {backend_name} "
             f"(max_numel={max_numel})",
         )
     except Exception as e:  # noqa: BLE001 - best-effort, always fall back to RCCL
         _handle = None
+        _backend = None
         _dtype_map = None
         _max_numel = 0
         _bound_group = None
@@ -214,8 +253,9 @@ def supports(input_tensor: torch.Tensor, group=None) -> bool:
         return False
     if input_tensor.numel() > _max_numel:
         return False
-    if _dtype_map is None or input_tensor.dtype not in _dtype_map:
-        return False
+    if _backend == "allgather_into_tensor":
+        if _dtype_map is None or input_tensor.dtype not in _dtype_map:
+            return False
     return True
 
 
@@ -241,14 +281,22 @@ def allgather_into_tensor(
         return None
     try:
         stream = torch.cuda.current_stream()
-        dtype = _dtype_map[input_tensor.dtype]
-        ok = _handle(
-            input_tensor.data_ptr(),
-            output_tensor.data_ptr(),
-            input_tensor.numel(),
-            dtype,
-            stream.cuda_stream,
-        )
+        if _backend == "allgather_sdma":
+            ok = _handle(
+                input_tensor,
+                output_tensor,
+                input_tensor.numel(),
+                stream,
+            )
+        else:
+            dtype = _dtype_map[input_tensor.dtype]
+            ok = _handle(
+                input_tensor.data_ptr(),
+                output_tensor.data_ptr(),
+                input_tensor.numel(),
+                dtype,
+                stream.cuda_stream,
+            )
         if not ok:
             return None
         event = torch.cuda.Event()
