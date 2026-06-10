@@ -124,7 +124,7 @@ RUN git clone ${MORI_REPO} mori &&\
     cd mori &&\
     git checkout ${MORI_BRANCH} &&\
     echo "MORI at commit:" $(git rev-parse HEAD) &&\
-    pip install .
+    BUILD_UMBP=OFF pip install .
 
 WORKDIR $WORKSPACE_DIR
 COPY . Megatron-LM
