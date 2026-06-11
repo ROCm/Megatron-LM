@@ -61,8 +61,18 @@ class Utils:
             store = PrefixStore("default_pg", store)
             Utils.store = store
 
+            # Bind the PG to this rank's device. Without an explicit device_id the
+            # process group never gets a definitive device, so object collectives
+            # (e.g. all_gather_object) pick a device ambiguously, which RCCL/NCCL
+            # warns "can potentially cause a hang". This is the source of the
+            # intermittent deadlock seen only under longer/heavier test suites.
+            device_id = torch.device('cuda', Utils.rank % torch.cuda.device_count())
             torch.distributed.init_process_group(
-                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
+                backend='nccl',
+                world_size=Utils.world_size,
+                rank=Utils.rank,
+                store=store,
+                device_id=device_id,
             )
 
             torch.distributed.barrier()
