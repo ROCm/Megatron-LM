@@ -2,6 +2,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Modified for portability across upstream and ROCm CI environments.
 
+import logging
 import os
 from pathlib import Path
 
@@ -33,8 +34,8 @@ def _destroy_tracked_process_groups():
             continue
         try:
             torch.distributed.destroy_process_group(group)
-        except Exception:
-            pass
+        except Exception as e:
+            logging.getLogger(__name__).debug("Failed to destroy %s: %s", group, e)
 
     parallel_state._global_process_group_list = None
 
@@ -57,12 +58,18 @@ def _destroy_model_parallel_with_subgroups():
 
 
 @pytest.fixture(autouse=True)
-def moe_model_parallel_teardown():
+def moe_model_parallel_teardown(monkeypatch):
     """Ensure MoE unit tests destroy tracked subgroups between topology changes."""
-    original_destroy = Utils.destroy_model_parallel
-    Utils.destroy_model_parallel = staticmethod(_destroy_model_parallel_with_subgroups)
+    monkeypatch.setattr(
+        Utils,
+        "destroy_model_parallel",
+        staticmethod(_destroy_model_parallel_with_subgroups),
+    )
     yield
-    Utils.destroy_model_parallel = original_destroy
+    # Safety net: a test that errors before its own teardown would otherwise
+    # leak NCCL/RCCL subgroups into the next test.
+    if Utils.inited:
+        _destroy_model_parallel_with_subgroups()
 
 
 def pytest_sessionfinish(session, exitstatus):
