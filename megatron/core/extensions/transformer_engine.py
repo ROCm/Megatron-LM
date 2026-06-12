@@ -249,6 +249,8 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
             # Fp4 configured.
             if qrecipe.fp4_quantization_recipe == Fp4Recipe.nvfp4:
                 quant_recipe = te.common.recipe.NVFP4BlockScaling()
+            elif qrecipe.fp4_quantization_recipe == Fp4Recipe.mxfp4:
+                quant_recipe = te.common.recipe.MXFP4BlockScaling()
             else:
                 raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp8_quantization_recipe}")
 

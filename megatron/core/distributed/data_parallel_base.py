@@ -1,6 +1,7 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 from contextlib import contextmanager
+from typing import Optional
 
 import torch
 
@@ -46,7 +47,7 @@ class _BaseDataParallel(MegatronModule):
         """Scale all gradients inside the buffers by `scaling_factor`."""
         pass
 
-    def finish_grad_sync(self):
+    def finish_grad_sync(self, force_all_reduce: Optional[bool] = False):
         """
         Finishes grad sync (all-reduce or reduce-scatter) communication operations
         for all model gradients.
@@ -54,6 +55,12 @@ class _BaseDataParallel(MegatronModule):
         When overlap_grad_reduce is set to True, waits for asynchronous communication
         calls to complete. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
+
+        NOTE: ``force_all_reduce`` is included in the signature to maintain API
+        compatibility with subclasses (e.g. ``DistributedDataParallel`` and
+        ``MegatronFSDP``) so that callers in ``finalize_model_grads`` can pass
+        the kwarg uniformly to any data-parallel wrapper, including ones that
+        don't override this method (e.g. ``TorchFullyShardedDataParallel``).
         """
         pass
 

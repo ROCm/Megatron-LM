@@ -76,6 +76,12 @@ SEQ_PARALLEL="${SEQ_PARALLEL:-1}"
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
 TE_FP8_RECIPE="${TE_FP8_RECIPE:-delayed}" # Options: delayed, tensorwise, mxfp8
+TE_FP4="${TE_FP4:-0}"  # 0: disable FP4, 1: enable FP4
+TE_FP4_RECIPE="${TE_FP4_RECIPE:-nvfp4}" # Options: nvfp4, mxfp4
+FP4_PARAM_GATHER="${FP4_PARAM_GATHER:-0}"
+FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-1}"  # 1: keep first/last layers in BF16 (NVFP4 paper recipe)
+FP4_BF16_START="${FP4_BF16_START:-2}"    # Number of layers at start in BF16 (paper: 2)
+FP4_BF16_END="${FP4_BF16_END:-8}"        # Number of layers at end in BF16 (paper: 8)
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
@@ -95,6 +101,11 @@ FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
 ENABLE_HSDP="${ENABLE_HSDP:-0}"
 HSDP_NUM_REPLICAS="${HSDP_NUM_REPLICAS:-2}"
+
+if [ "$TE_FP8" -eq 1 ] && [ "$TE_FP4" -eq 1 ]; then
+    echo "Error: FP8 and FP4 cannot be used simultaneously. Please choose one."
+    exit 1
+fi
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
@@ -347,11 +358,15 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-        if [ "$TE_FP8_RECIPE" == "mxfp8" ]  && [ "$FSDP" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-        else
-            echo "Error: For Llama3 FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1"
-            exit
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+
+        # MXFP8 + DDP path: TE does not implement `replace_raw_data` for MXFP8Tensor,
+        # so the default `_ParamAndGradBuffer` storage swap fails. Reusing the grad
+        # buffer for the MXFP8 param all-gather sidesteps that path. The FSDP and
+        # Megatron-FSDP paths handle MXFP8 param all-gather natively in TE and do
+        # not need this workaround.
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ] && [ "$FSDP" -ne 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --reuse-grad-buf-for-mxfp8-param-ag"
         fi
     fi
 
@@ -359,6 +374,32 @@ if [ "$TE_FP8" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep-fp8-weight-transpose-cache-te \
             --keep-fp8-transpose-cache \
         " 
+    fi
+fi
+
+if [ "$TE_FP4" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
+        --fp4-format=e2m1 \
+    "
+
+    if [ "$TE_FP4_RECIPE" == "nvfp4" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp4-recipe=nvfp4"
+    elif [ "$TE_FP4_RECIPE" == "mxfp4" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp4-recipe=mxfp4"
+    else
+        echo "$TE_FP4_RECIPE is not supported"
+        exit 1
+    fi
+
+    if [ "$FP4_SELECTIVE_BF16" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --first-last-layers-bf16 \
+            --num-layers-at-start-in-bf16 $FP4_BF16_START \
+            --num-layers-at-end-in-bf16 $FP4_BF16_END \
+        "
+        echo "FP4 ($TE_FP4_RECIPE): Keeping first $FP4_BF16_START and last $FP4_BF16_END layers in BF16"
+    fi
+    if [ "$FP4_PARAM_GATHER" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp4-param-gather"
     fi
 fi
 
