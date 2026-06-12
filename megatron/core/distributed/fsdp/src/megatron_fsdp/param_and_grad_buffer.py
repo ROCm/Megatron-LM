@@ -3364,9 +3364,15 @@ class AllGatherPipeline:
         self,
         param_and_grad_buffer: ParamAndGradBuffer,
         ag_stream: Optional[torch.cuda.Stream] = None,
+        rs_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         self.buffer = param_and_grad_buffer
         self.ag_stream = ag_stream
+        # Reduce-scatter stream, used only to serialize the mori SDMA all-gather behind
+        # the in-flight reduce-scatter so the two collectives don't contend for HBM
+        # bandwidth (NCCL serializes its collectives on one communicator). None when
+        # the SDMA backend isn't used.
+        self.rs_stream = rs_stream
         # Track the status of all-gather operations for each bucket.
         self.param_gather_event_map = {}
         # Track bucket keys whose all-gather was issued through the mori SDMA backend.
@@ -3748,27 +3754,34 @@ class AllGatherPipeline:
         bucket = wbuf.fetch_bucket(set_param_data=True)
         # All-gather the module weights in each buffer shard into the allocated bucket.
         # Now each rank will have a copy of this FSDP unit module's weights.
+        input_shard = wbuf.get_shard_from_local_buffer()
         param_gather_event = None
         if getattr(self.buffer.ddp_config, "enable_mori_sdma_ag", False):
             # Try the mori SDMA backend (intra-node System DMA copy).
             # Returns None whenever SDMA is not applicable (mori unavailable, dtype
             # unsupported, shard too large, or a group other than the one bound at init),
             # in which case we transparently fall back to RCCL/NCCL below.
-            param_gather_event = mori_sdma.allgather_into_tensor(
-                input_tensor=wbuf.get_shard_from_local_buffer(),
-                output_tensor=bucket.data,
-                group=wbuf.data_parallel_group,
-                max_numel=getattr(
-                    self.buffer.ddp_config, "mori_sdma_ag_max_numel", 64 * 1024 * 1024
-                ),
+            max_numel = getattr(
+                self.buffer.ddp_config, "mori_sdma_ag_max_numel", 64 * 1024 * 1024
             )
+            if input_shard.numel() <= max_numel:
+                param_gather_event = mori_sdma.allgather_into_tensor(
+                    input_tensor=input_shard,
+                    output_tensor=bucket.data,
+                    group=wbuf.data_parallel_group,
+                    max_numel=max_numel,
+                    # In backward, keep the SDMA gather from co-running with the NCCL
+                    # reduce-scatter (HBM-bandwidth contention slows RS onto the
+                    # critical path). No-op in forward (no RS in flight).
+                    serialize_after_stream=(self.rs_stream if bwd else None),
+                )
             if param_gather_event is not None:
                 # SDMA work carries its own stream-event; exclude it from coalescing.
                 self._sdma_bucket_keys.add(bucket_key)
         if param_gather_event is None:
             param_gather_event = torch.distributed.all_gather_into_tensor(
                 output_tensor=bucket.data,
-                input_tensor=wbuf.get_shard_from_local_buffer(),
+                input_tensor=input_shard,
                 group=wbuf.data_parallel_group,
                 async_op=True,
             )

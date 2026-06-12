@@ -368,7 +368,11 @@ class MegatronFSDP(torch.nn.Module):
 
         # Initialize the all-gather pipeline.
         self.all_gather_pipeline = AllGatherPipeline(
-            self.param_and_grad_buffer, ag_stream=self.side_stream_for_param_gather
+            self.param_and_grad_buffer,
+            ag_stream=self.side_stream_for_param_gather,
+            # Lets the mori SDMA backend serialize its backward all-gather behind the
+            # reduce-scatter to avoid HBM-bandwidth contention.
+            rs_stream=self.side_stream_for_buffer_copy_and_grad_accum,
         )
 
         # Set the suggested communication unit size for reduce-scatter and all-gather pipelines.
@@ -1320,6 +1324,13 @@ class MegatronFSDP(torch.nn.Module):
         """
         Wrapped forward pass of the model managed by FSDP.
         """
+        # Mark the start of an iteration's gathers so the mori SDMA backend (if used)
+        # re-syncs its dedicated stream with compute once, observing any weight update
+        # from the preceding optimizer step before gathers run free and overlap compute.
+        if getattr(self.ddp_config, "enable_mori_sdma_ag", False):
+            from . import mori_sdma
+
+            mori_sdma.notify_weights_updated()
         self._replace_param_with_raw_if_needed()
         with torch.autograd.profiler.record_function("CustomFSDP.forward"):
             # Call the forward pass of the wrapped module.
