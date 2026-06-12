@@ -166,7 +166,9 @@ def test_gpt_fine_grained_activation_offloading_correctness_and_memory(
     os.environ.pop("NVTE_FLASH_ATTN", None)
     os.environ.pop("NVTE_UNFUSED_ATTN", None)
     # os.environ["NVTE_FLASH_ATTN"] = "1"
-    Utils.initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
+    Utils.initialize_model_parallel(
+        tensor_model_parallel_size=1, pipeline_model_parallel_size=1, bind_pg_device=True
+    )
 
     seed = 123
     # Choose shapes large enough to make memory deltas stable but still fast.
