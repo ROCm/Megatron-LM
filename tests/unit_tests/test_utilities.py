@@ -34,7 +34,7 @@ class Utils:
     store = None
 
     @staticmethod
-    def initialize_distributed(bind_pg_device=False):
+    def initialize_distributed():
 
         os.environ.pop('NVTE_FLASH_ATTN', None)
         os.environ.pop('NVTE_FUSED_ATTN', None)
@@ -61,24 +61,8 @@ class Utils:
             store = PrefixStore("default_pg", store)
             Utils.store = store
 
-            # Optionally bind the PG to this rank's device. Without an explicit
-            # device_id the process group never gets a definitive device, so object
-            # collectives pick a device ambiguously, which
-            # RCCL/NCCL warns "can potentially cause a hang". This is the source of
-            # the intermittent deadlock seen only under longer/heavier test suites.
-            # Off by default so behavior is unchanged for the whole suite; tests
-            # that need it pass bind_pg_device=True.
-            init_pg_kwargs = {}
-            if bind_pg_device:
-                init_pg_kwargs['device_id'] = torch.device(
-                    'cuda', Utils.rank % torch.cuda.device_count()
-                )
             torch.distributed.init_process_group(
-                backend='nccl',
-                world_size=Utils.world_size,
-                rank=Utils.rank,
-                store=store,
-                **init_pg_kwargs,
+                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
             torch.distributed.barrier()
@@ -116,7 +100,6 @@ class Utils:
         tensor_model_parallel_size=1,
         pipeline_model_parallel_size=1,
         virtual_pipeline_model_parallel_size=None,
-        bind_pg_device=False,
         **kwargs,
     ):
         # Need to unset these variables to make sure previous
@@ -126,7 +109,7 @@ class Utils:
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
 
         ps.destroy_model_parallel()
-        Utils.initialize_distributed(bind_pg_device=bind_pg_device)
+        Utils.initialize_distributed()
         ps.initialize_model_parallel(
             tensor_model_parallel_size,
             pipeline_model_parallel_size,
