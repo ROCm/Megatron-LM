@@ -21,7 +21,7 @@
 # MoE: MOE_PERMUTE_FUSION=false disables --moe-permute-fusion (fused token permute/unpermute).
 # For 235B proxy runs: export NUM_LAYERS / NUM_EXPERTS (and optionally ROUTER_TOPK <= NUM_EXPERTS) before launch.
 # FP8: PR=fp8 and FP8_RECIPE=delayed|tensorwise|mxfp8|blockwise (mxfp8 sets NVTE_ROCM_ENABLE_MXFP8=1;
-#   mxfp8 MoE adds --moe-router-padding-for-fp8 automatically).
+#   mxfp8 MoE adds --moe-router-padding-for-quantization automatically).
 #################################################################################
 
 set -e
@@ -128,7 +128,7 @@ EVAL_ITERS=${EVAL_ITERS:--1}
 
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-false}"
+MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
 MOE_PERMUTE_FUSION="${MOE_PERMUTE_FUSION:-true}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
@@ -449,10 +449,10 @@ if [ "$IS_MOE" -eq 1 ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
     fi
 
-    # MXFP8: pad per-expert token counts for MXFP8 grouped GEMM (see --moe-router-padding-for-fp8 in arguments.py).
+    # MXFP8: pad per-expert token counts for MXFP8 grouped GEMM (see --moe-router-padding-for-quantization in arguments.py).
     if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
-        moe_options="${moe_options} --moe-router-padding-for-fp8"
-        echo "[INFO] MXFP8 MoE: --moe-router-padding-for-fp8"
+        moe_options="${moe_options} --moe-router-padding-for-quantization"
+        echo "[INFO] MXFP8 MoE: --moe-router-padding-for-quantization"
     fi
 else
     moe_options=""
@@ -605,6 +605,7 @@ qwen_base_options=" \
     --normalization RMSNorm \
     --norm-epsilon 1e-06 \
     --swiglu \
+    --use-te-activation-func \
     --no-masked-softmax-fusion \
     --disable-bias-linear \
     --position-embedding-type rope \
@@ -666,8 +667,6 @@ megatron_options=" \
     --distributed-timeout-minutes 60 \
     --eod-mask-loss \
     --attention-backend fused \
-    --rerun-mode disabled \
-    --no-check-for-nan-in-loss-and-grad	\
     ${qwen_base_options} \
     ${fsdp_option} \
     ${CE_FUSION_ARGS} \
@@ -721,26 +720,59 @@ import numpy as np
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(prog="Process Log")
     parser.add_argument("filename")
+    parser.add_argument(
+        "--skip-first",
+        type=int,
+        default=0,
+        metavar="N",
+        help="Skip first N iterations (1-based line index in tmp.txt = iteration order).",
+    )
+    parser.add_argument(
+        "--skip-profile-steps",
+        nargs=2,
+        type=int,
+        metavar=("START", "END"),
+        default=None,
+        help="Also skip lines whose 1-based index is in [START, END] (profiler steps).",
+    )
     args = parser.parse_args()
 
     with open(args.filename) as f:
-        lines = f.readlines()
-    lines = lines[1:-1]
-    lines = [float(a) for a in lines]
-    mean = np.mean(np.array(lines))
-    print(mean)
+        raw = [ln.strip() for ln in f.readlines() if ln.strip()]
+
+    ps = pe = None
+    if args.skip_profile_steps is not None:
+        ps, pe = args.skip_profile_steps
+
+    vals = []
+    for i, ln in enumerate(raw):
+        it = i + 1
+        if args.skip_first > 0 and it <= args.skip_first:
+            continue
+        if ps is not None and ps <= it <= pe:
+            continue
+        vals.append(float(ln))
+
+    if not vals:
+        raise SystemExit("no values to average")
+    print(float(np.mean(np.array(vals))))
 PY
+
+    MEAN_EXTRA=(--skip-first 2)
+    if [ "$PROFILE" = true ]; then
+        MEAN_EXTRA+=(--skip-profile-steps "$PROFILE_START" "$PROFILE_END")
+    fi
 
     echo '============================================================================================================'
     grep -Eo 'throughput per GPU [^|]*' "$TRAIN_LOG" | sed -E 's/.*throughput per GPU \(TFLOP\/s\/GPU\): ([0-9\.]+).*/\1/' >tmp.txt || true
-    echo "throughput per GPU: $(python3 "${MEGATRON_PATH}/mean_log_value.py" tmp.txt 2>/dev/null || echo n/a)" | tee -a "$TRAIN_LOG"
+    echo "throughput per GPU: $(python3 "${MEGATRON_PATH}/mean_log_value.py" tmp.txt "${MEAN_EXTRA[@]}" 2>/dev/null || echo n/a)" | tee -a "$TRAIN_LOG"
     rm -f tmp.txt
 
     echo '============================================================================================================'
     grep -Eo 'elapsed time per iteration [^|]*' "$TRAIN_LOG" | sed -E 's/.*elapsed time per iteration \(ms\): ([0-9\.]+).*/\1/' >tmp.txt || true
-    echo "elapsed time per iteration: $(python3 "${MEGATRON_PATH}/mean_log_value.py" tmp.txt 2>/dev/null || echo n/a)" | tee -a "$TRAIN_LOG"
+    echo "elapsed time per iteration: $(python3 "${MEGATRON_PATH}/mean_log_value.py" tmp.txt "${MEAN_EXTRA[@]}" 2>/dev/null || echo n/a)" | tee -a "$TRAIN_LOG"
 
-    TIME_PER_ITER=$(python3 "${MEGATRON_PATH}/mean_log_value.py" tmp.txt 2>/dev/null | awk '{printf "%.6f", $0}')
+    TIME_PER_ITER=$(python3 "${MEGATRON_PATH}/mean_log_value.py" tmp.txt "${MEAN_EXTRA[@]}" 2>/dev/null | awk '{printf "%.6f", $0}')
     rm -f tmp.txt
     PERFORMANCE=$(awk -v bs="$GLOBAL_BATCH_SIZE" -v sl="$SEQ_LEN" -v tpi="$TIME_PER_ITER" -v ws="$((NNODES * GPUS_PER_NODE))" 'BEGIN { if (tpi+0 > 0 && ws+0 > 0) printf "%.6f", bs * sl * 1000/ (tpi * ws); else print "n/a" }')
     echo "tokens/GPU/s: $PERFORMANCE" | tee -a "$TRAIN_LOG"
