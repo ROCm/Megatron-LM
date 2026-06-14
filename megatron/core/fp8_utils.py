@@ -684,8 +684,8 @@ if HAVE_TE:
         """
         if module in _fp8_inference_wrapped_modules:
             return
-        _pad_func = Fp8Padding(1)
-        _unpad_func = Fp8Unpadding(1)
+        _pad_func = Fp8Padding(1, 128)
+        _unpad_func = Fp8Unpadding(1, 128)
 
         original_forward = module.forward
 
