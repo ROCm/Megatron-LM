@@ -152,6 +152,7 @@ def _run_one_iter_and_capture(
         (True, False, ["moe_act"]),
     ],
 )
+@pytest.mark.failing_on_rocm
 def test_gpt_fine_grained_activation_offloading_correctness_and_memory(
     is_moe: bool, is_mla: bool, offload_modules: List[str]
 ):

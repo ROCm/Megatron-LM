@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from megatron.core.utils import is_torch_min_version
+from tests.unit_tests.test_utilities import Utils
 
 
 class UnsafeClass:
@@ -20,14 +21,19 @@ class UnsafeClass:
 
 
 class TestSafeGlobals:
+    def setup_method(self, method):
+        Utils.initialize_model_parallel(1, 1)
+
+    def teardown_method(self, method):
+        Utils.destroy_model_parallel()
+
     def test_safe_globals(self, tmp_path_dist_ckpt):
         # create dummy checkpoint
         ckpt_path = tmp_path_dist_ckpt / "test_safe_globals.pt"
         dummy_obj = Namespace(dummy_value=0)
-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        if Utils.rank == 0:
             torch.save(dummy_obj, ckpt_path)
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        torch.distributed.barrier()
 
         torch.load(ckpt_path)
 
@@ -36,10 +42,9 @@ class TestSafeGlobals:
         # create dummy checkpoint
         ckpt_path = tmp_path_dist_ckpt / "test_unsafe_globals.pt"
         dummy_obj = UnsafeClass(123)
-        if not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0:
+        if Utils.rank == 0:
             torch.save(dummy_obj, ckpt_path)
-        if torch.distributed.is_initialized():
-            torch.distributed.barrier()
+        torch.distributed.barrier()
 
         # expected error
         with pytest.raises(UnpicklingError):
