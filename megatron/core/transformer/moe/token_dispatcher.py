@@ -1373,6 +1373,7 @@ class _MoriManager(_DispatchManager):
         self.capacity_factor = config.moe_expert_capacity_factor
         self.permute_fusion = config.moe_permute_fusion
         self.max_num_tokens_per_rank = config.moe_mori_max_tokens_per_rank
+        self.kernel_type = config.moe_mori_kernel_type
 
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
@@ -1409,10 +1410,9 @@ class _MoriManager(_DispatchManager):
         probs = probs.reshape(num_tokens, self.num_experts)
         # Convert the format of routing map from multihot to indices.
         self.token_probs, self.token_indices = torch.topk(probs, self.router_topk, dim=-1)
-        # Mask the indices of dropped tokens with -1
-        if self.capacity_factor is not None:
-            mask = self.token_probs == 0
-            self.token_indices = self.token_indices.masked_fill(mask, -1)
+        # Mask any zero-weight slot with -1 so MORI skips it during dispatch.
+        mask = self.token_probs == 0
+        self.token_indices = self.token_indices.masked_fill(mask, -1)
 
     def dispatch(
         self,
@@ -1446,6 +1446,7 @@ class _MoriManager(_DispatchManager):
             self.max_num_tokens_per_rank,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            kernel_type=self.kernel_type,
         )
         self._routing_handle = routing_handle
         self.tokens_per_expert = num_tokens_per_expert

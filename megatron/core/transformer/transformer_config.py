@@ -1109,6 +1109,15 @@ class TransformerConfig(ModelParallelConfig):
                     "moe_enable_deepep is deprecated. Cannot enable both DeepEP and MORI EP simultaneously. "
                     "Please choose one backend."
                 )
+            if self.moe_mori_max_tokens_per_rank is None:
+                raise ValueError(
+                    "moe_mori_max_tokens_per_rank must be set when using the MORI EP backend; "
+                    "it is required to allocate the MORI symmetric memory buffers. The training "
+                    "entry point auto-derives this in arguments.validate_args, but other "
+                    "entry points (unit tests, inference, libraries constructing "
+                    "TransformerConfig directly) must set it explicitly, e.g. to "
+                    "micro_batch_size * seq_length adjusted for sequence/context parallelism."
+                )
 
         if self.moe_token_dispatcher_type == "flex":
             if self.moe_pad_expert_input_to_capacity and (

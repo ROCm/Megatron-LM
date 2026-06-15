@@ -629,7 +629,7 @@ class TopKRouter(Router):
         if padding_mask is not None:
             valid_mask = (~padding_mask).unsqueeze(-1)
             probs = probs * valid_mask
-            routing_map = routing_map * valid_mask
+            routing_map = routing_map & valid_mask
 
         # Apply token dropping to probs and routing_map.
         if self.config.moe_expert_capacity_factor is not None:

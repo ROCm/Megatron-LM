@@ -561,7 +561,7 @@ def init_mori_shmem(group: torch.distributed.ProcessGroup):
     global _mori_shmem_initialized
     if _mori_shmem_initialized:
         return
-    torch._C._distributed_c10d._register_process_group(MORI_EP_PROCESS_GROUP_NAME, group)
+    torch.distributed.distributed_c10d._register_process_group(MORI_EP_PROCESS_GROUP_NAME, group)
     mori.shmem.shmem_torch_process_group_init(MORI_EP_PROCESS_GROUP_NAME)
     _mori_shmem_initialized = True
 
@@ -621,7 +621,7 @@ def finalize_mori_shmem():
         mori.shmem.shmem_finalize()
         _mori_shmem_initialized = False
     try:
-        torch._C._distributed_c10d._unregister_process_group(MORI_EP_PROCESS_GROUP_NAME)
+        torch.distributed.distributed_c10d._unregister_process_group(MORI_EP_PROCESS_GROUP_NAME)
     except RuntimeError:
         pass
 
@@ -669,6 +669,33 @@ def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool
     return result
 
 
+def _resolve_mori_kernel_type(kernel_type, world_size: int):
+    """Resolve a MORI kernel type into an ``EpDispatchCombineKernelType`` enum.
+
+    ``kernel_type`` may be:
+      - ``None``: auto-select based on ``world_size`` (IntraNode for a single
+        node of <= 8 ranks, InterNodeV1 otherwise);
+      - a ``str`` naming one of the ``mori.ops.EpDispatchCombineKernelType``
+        members (e.g. from ``--moe-mori-kernel-type``).
+    """
+    if kernel_type is None:
+        if world_size <= 8:
+            return mori.ops.EpDispatchCombineKernelType.IntraNode
+        return mori.ops.EpDispatchCombineKernelType.InterNodeV1
+    try:
+        return getattr(mori.ops.EpDispatchCombineKernelType, kernel_type)
+    except AttributeError as exc:
+        valid = [
+            name
+            for name in dir(mori.ops.EpDispatchCombineKernelType)
+            if not name.startswith("_")
+        ]
+        raise ValueError(
+            f"Invalid moe_mori_kernel_type '{kernel_type}'. "
+            f"Valid options are: {valid}."
+        ) from exc
+
+
 def get_mori_op(
     group: torch.distributed.ProcessGroup,
     hidden_dim: int,
@@ -693,8 +720,14 @@ def get_mori_op(
         router_topk: Number of experts selected per token.
         max_num_tokens_per_rank: Maximum input tokens per rank.
         data_type: Token data type.
-        kernel_type: MORI kernel type. Auto-selected if None.
+        kernel_type: MORI kernel type as a string (e.g. 'IntraNode',
+            'InterNodeV1'), or None to auto-select based on world size.
         fp8_dispatch: Whether dispatch uses FP8.
+
+    Note:
+        The op is cached process-wide and built on the first call, so
+        ``kernel_type`` only takes effect when the op is (re)created. Call
+        :func:`reset_mori_op` first to rebuild with a different kernel type.
     """
     global _mori_op
 
@@ -712,12 +745,7 @@ def get_mori_op(
     world_size = group.size()
     rank = torch.distributed.get_rank(group)
 
-    resolved_kernel_type = kernel_type
-    if resolved_kernel_type is None:
-        if world_size <= 8:
-            resolved_kernel_type = mori.ops.EpDispatchCombineKernelType.IntraNode
-        else:
-            resolved_kernel_type = mori.ops.EpDispatchCombineKernelType.InterNodeV1
+    resolved_kernel_type = _resolve_mori_kernel_type(kernel_type, world_size)
 
     dispatch_dtype = torch.float8_e4m3fnuz if fp8_dispatch else data_type
     scale_dim = hidden_dim // 128 if fp8_dispatch else 0
@@ -763,6 +791,7 @@ class MoriDispatch(torch.autograd.Function):
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        kernel_type=None,
     ):
         """Forward pass: dispatch tokens to correct ranks via MORI."""
         hidden_dim = x.shape[1]
@@ -773,6 +802,7 @@ class MoriDispatch(torch.autograd.Function):
             router_topk=router_topk,
             max_num_tokens_per_rank=max_num_tokens_per_rank,
             data_type=x.dtype,
+            kernel_type=kernel_type,
             fp8_dispatch=fp8_dispatch,
         )
 
@@ -924,6 +954,7 @@ class MoriDispatch(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1061,6 +1092,7 @@ if HAVE_MORI:
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        kernel_type=None,
     ):
         """Perform fused dispatch using MORI EP backend.
 
@@ -1079,6 +1111,10 @@ if HAVE_MORI:
                 stream so it can overlap with non-dependent compute on the
                 default stream. Mirrors DeepEP's flag of the same name.
             allocate_on_comm_stream: See `async_finish`.
+            kernel_type: MORI kernel type as a string (e.g. 'IntraNode',
+                'InterNodeV1'), or None to auto-select based on world size.
+                Only takes effect when the process-wide op is first created
+                (see :func:`get_mori_op`).
 
         Returns:
             Tuple of (recv_x, recv_indices, recv_probs, tokens_per_expert,
@@ -1114,6 +1150,7 @@ if HAVE_MORI:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
+            kernel_type,
         )
 
     def mori_combine(
