@@ -335,7 +335,7 @@ moe_options=" \
     --moe-router-dtype fp32 \
     --multi-latent-attention \
     --qk-layernorm \
-    --rerun-mode disabled \
+    --rerun-mode ${RERUN_MODE:-disabled} \
     --attention-sink-k ${ATTENTION_SINK_K} \
     --moe-ffn-hidden-size ${MOE_INTERMEDIATE_SIZE} \
     --enable-shared-expert \
@@ -473,7 +473,7 @@ elif [ $PR = fp8 ]; then
         pr_options=" \
         --bf16 \
         --fp8-recipe delayed \
-        --fp8-format hybrid \
+        --fp8-format ${FP8_FORMAT:-hybrid} \
         --fp8-margin 0 \
         --fp8-amax-compute-algo max \
         --fp8-amax-history-len 1024 \

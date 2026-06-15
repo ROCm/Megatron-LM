@@ -54,7 +54,7 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
-export NVTE_FLASH_ATTN=0
+export NVTE_FLASH_ATTN=${NVTE_FLASH_ATTN:-0}
 
 GPUS_PER_NODE=$(python3 -c "import torch; print(torch.cuda.device_count())")
 RUN_ENV="${RUN_ENV:-cluster}"
@@ -153,7 +153,7 @@ EMBED_OPT=""
 DO=true
 USE_FSDP2=false
 CKPT_FORMAT=${CKPT_FORMAT:-torch}
-GA_FUSION=true
+GA_FUSION=${GA_FUSION:-true}
 CE_FUSION_ARGS=""
 AC=${AC:-none}
 export RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-block}
@@ -188,20 +188,20 @@ case $MODEL_SIZE in
     PP=${PP:-1}
     USE_FSDP2=false
     CKPT_FORMAT=${CKPT_FORMAT:-torch}
-    GA_FUSION=true
+    GA_FUSION=${GA_FUSION:-true}
     PAD_LEN=$SEQ_LEN
     ;;
 30B_A3B | 30B)
     IS_MOE=1
     TOKENIZER_MODEL="${HF_MODEL_CKPT:-Qwen/Qwen3-30B-A3B}"
-    NUM_LAYERS=48
+    NUM_LAYERS=${NUM_LAYERS:-48}
     HIDDEN_SIZE=2048
     INTERMEDIATE_SIZE=6144
     NUM_ATTN_HEADS=32
     NUM_QUERY_GROUPS=4
-    NUM_EXPERTS=128
+    NUM_EXPERTS=${NUM_EXPERTS:-128}
     MOE_INTERMEDIATE_SIZE=768
-    ROUTER_TOPK=8
+    ROUTER_TOPK=${ROUTER_TOPK:-8}
     MOE_AUX_LOSS=1e-3
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
@@ -219,7 +219,7 @@ case $MODEL_SIZE in
     DO=true
     USE_FSDP2=false
     CKPT_FORMAT=${CKPT_FORMAT:-torch}
-    GA_FUSION=true
+    GA_FUSION=${GA_FUSION:-true}
     EVAL_ITERS=${EVAL_ITERS:-0}
     PAD_LEN=$SEQ_LEN
     ;;
@@ -492,7 +492,7 @@ elif [ "$PR" = fp8 ]; then
         pr_options=" \
         --bf16 \
         --fp8-recipe delayed \
-        --fp8-format hybrid \
+        --fp8-format ${FP8_FORMAT:-hybrid} \
         --fp8-margin 0 \
         --fp8-interval 1 \
         --fp8-amax-compute-algo max \
@@ -656,7 +656,8 @@ megatron_options=" \
     --transformer-impl ${TRANSFORMER_IMPL} \
     --distributed-timeout-minutes 60 \
     --eod-mask-loss \
-    --attention-backend fused \
+    --attention-backend ${ATTENTION_BACKEND:-fused} \
+    --rerun-mode ${RERUN_MODE:-validate_results} \
     ${qwen_base_options} \
     ${fsdp_option} \
     ${CE_FUSION_ARGS} \
