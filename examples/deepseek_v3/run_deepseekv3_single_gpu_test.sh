@@ -34,7 +34,6 @@ export EP=1
 export ETP=1
 export CP=1
 export AC=none
-export GEMM_TUNING=0
 export USE_GROUPED_GEMM=false
 export GA_FUSION=false
 export PROFILE=true
