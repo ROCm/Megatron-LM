@@ -132,11 +132,6 @@ class MoEModelTestContainer:
         moe_layer.set_layer_number(0)
         return moe_layer
 
-    def __del__(self):
-        torch.distributed.barrier()
-        torch.cuda.synchronize()
-        Utils.destroy_model_parallel()
-
     @pytest.mark.internal
     def dispatcher_dropless_test(self):
         moe_layer = self.moe_layer
