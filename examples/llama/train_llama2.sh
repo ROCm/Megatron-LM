@@ -77,6 +77,18 @@ SEQ_PARALLEL="${SEQ_PARALLEL:-1}"
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
 TE_FP8_RECIPE="${TE_FP8_RECIPE:-delayed}" # Options: delayed, tensorwise, mxfp8
+
+# --- Fusion / data-parallel-comm perf toggles (ON by default; ~+3.5-7% across bf16/fp8). Set 0 to disable. ---
+GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-1}"  # fuse wgrad accumulation into the GEMM
+DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradient averaging into the DP collective
+CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
+CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
+FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
+# NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP reduce
+# bandwidth at the cost of some gradient-comm precision. Validated to converge (MLPerf LLaMA3 reached
+# eval_loss 3.3); set to 0 if your run is precision/convergence-sensitive.
+GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
+
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
@@ -130,7 +142,18 @@ fi
 
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
-DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/TE_FP8_${TE_FP8}/${TIME_STAMP}"
+# Precision tag for the log directory: bf16 | fp8 | fp8_tensorwise | mxfp8
+if [ "$TE_FP8" -eq 1 ]; then
+    case "$TE_FP8_RECIPE" in
+        delayed)    PREC_TAG="fp8" ;;
+        tensorwise) PREC_TAG="fp8_tensorwise" ;;
+        mxfp8)      PREC_TAG="mxfp8" ;;
+        *)          PREC_TAG="fp8_${TE_FP8_RECIPE}" ;;
+    esac
+else
+    PREC_TAG="bf16"
+fi
+DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/${PREC_TAG}/${TIME_STAMP}"
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
 TRAIN_LOG="${LOG_DIR}/output_${EXP_NAME}.log"
 mkdir -p $LOG_DIR
@@ -216,6 +239,21 @@ if [ "$ROPE_FUSION" -eq 0 ]; then
     GPT_ARGS="$GPT_ARGS --no-rope-fusion"
 fi
 
+# Fusion / mixed-precision toggles -> GPT_ARGS, matching their arguments.py groups (transformer
+# config, training, mixed precision) — same buckets as --no-bias-swiglu-fusion, --train-iters, --bf16.
+if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 0 ]; then
+    GPT_ARGS="$GPT_ARGS --no-gradient-accumulation-fusion"
+fi
+if [ "$CROSS_ENTROPY_LOSS_FUSION" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --cross-entropy-loss-fusion --cross-entropy-fusion-impl $CROSS_ENTROPY_FUSION_IMPL"
+fi
+if [ "$FUSED_SINGLE_QKV_ROPE" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --fused-single-qkv-rope"
+fi
+if [ "$GRAD_REDUCE_IN_BF16" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --grad-reduce-in-bf16"
+fi
+
 TRAIN_ARGS="--lr 1e-4 \
         --min-lr 1e-5 \
         --lr-decay-iters 320000 \
@@ -296,7 +334,6 @@ DISTRIBUTED_ARGS="
 EXTRA_ARGS="
     --group-query-attention \
     --num-query-groups $NUM_GROUPS \
-    --no-gradient-accumulation-fusion \
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
     --overlap-grad-reduce \
@@ -403,6 +440,11 @@ if [ -n "${WANDB_API_KEY}" ]; then
     "
 else
    LOGGING_ARGS=""
+fi
+
+# DP-comm toggle -> EXTRA_ARGS ('distributed' arg group in arguments.py, alongside --overlap-grad-reduce)
+if [ "$DDP_AVERAGE_IN_COLLECTIVE" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --ddp-average-in-collective"
 fi
 
 run_cmd="
