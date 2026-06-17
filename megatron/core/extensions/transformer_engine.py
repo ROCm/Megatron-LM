@@ -1743,7 +1743,8 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 self.te_quant_params, self.training, is_context_quantized
             )
 
-        def forward(self, x, m_splits, m_splits_gpu=None):
+        def forward(self, x, m_splits, m_splits_gpu=None, actual_m_splits=None,
+                    unpad_output=False):
             """Forward."""
             _is_first_microbatch = (
                 None if self.disable_parameter_transpose_cache else self.is_first_microbatch
@@ -1754,8 +1755,15 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             # Added in TE commit: https://github.com/ROCm/TransformerEngine/commit/2776c33
             if is_te_min_version("2.7.0", check_equality=False):
                 if class_has_method_param(te.pytorch.GroupedLinear, "forward", "m_splits_tensor"):
+                    fused_padding_kwargs = {}
+                    if class_has_method_param(
+                        te.pytorch.GroupedLinear, "forward", "actual_m_splits"
+                    ):
+                        fused_padding_kwargs["actual_m_splits"] = actual_m_splits
+                        fused_padding_kwargs["unpad_output"] = unpad_output
                     with quant_context:
-                        out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, m_splits_tensor=m_splits_gpu)
+                        out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch,
+                                              m_splits_tensor=m_splits_gpu, **fused_padding_kwargs)
                 else:
                     warnings.warn(
                         "Transformer Engine is missing `m_splits_tensor` parameter in GroupedLinear.forward; "

@@ -59,6 +59,16 @@ except ImportError:
 
     HAVE_TE = False
 
+is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
+HAVE_FUSED_PADDING_MCT = False
+if HAVE_TE and is_rocm:
+    HAVE_FUSED_PADDING_MCT = hasattr(Fp8Padding, 'compute_padded_splits')
+    if not HAVE_FUSED_PADDING_MCT:
+        logging.getLogger(__name__).info(
+            "Fp8Padding.compute_padded_splits not found; "
+            "using unfused BF16 padding path for MoE."
+        )
+
 logger = logging.getLogger(__name__)
 
 
@@ -643,14 +653,20 @@ class TEGroupedMLP(MegatronModule):
             output (torch.Tensor): The output of the local experts.
         """
         tokens_per_expert_gpu = None
+        actual_tokens_per_expert = None
         if isinstance(tokens_per_expert, tuple):
             tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
         tokens_per_expert = tokens_per_expert.tolist()
         if self.config.fp8 or self.config.fp4:
             actual_tokens_per_expert = tokens_per_expert
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
-                permuted_local_hidden_states, tokens_per_expert
-            )
+            if HAVE_FUSED_PADDING_MCT:
+                # ROCm: fuse padding into cast_transpose — compute padded
+                # splits without allocating a BF16 intermediate.
+                tokens_per_expert = self.quantization_padding.compute_padded_splits(tokens_per_expert)
+            else:
+                permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
             permuted_probs, _ = self.quantization_padding(
                 permuted_probs.unsqueeze(-1), actual_tokens_per_expert
             )
@@ -667,11 +683,12 @@ class TEGroupedMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
+        _fused_kwargs = {"actual_m_splits": actual_tokens_per_expert} if HAVE_FUSED_PADDING_MCT else {}
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
             fc1_output, bias_parallel = self.linear_fc1(
-                permuted_local_hidden_states, tokens_per_expert, tokens_per_expert_gpu
+                permuted_local_hidden_states, tokens_per_expert, tokens_per_expert_gpu, **_fused_kwargs,
             )
         if self.offload_expert_fc1:
             fc1_output = off_interface.group_commit(
@@ -748,7 +765,18 @@ class TEGroupedMLP(MegatronModule):
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
 
-        output, output_bias = self.linear_fc2(bias_act_output, tokens_per_expert, tokens_per_expert_gpu)
+        _can_unpad_fc2 = HAVE_FUSED_PADDING_MCT and not self.config.add_bias_linear
+        if _can_unpad_fc2:
+            _fc2_fused_kwargs = {
+                "actual_m_splits": actual_tokens_per_expert,
+                "unpad_output": True,
+            }
+        else:
+            _fc2_fused_kwargs = {}
+        output, output_bias = self.linear_fc2(
+            bias_act_output, tokens_per_expert, tokens_per_expert_gpu,
+            **_fc2_fused_kwargs,
+        )
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 
@@ -761,7 +789,7 @@ class TEGroupedMLP(MegatronModule):
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if self.config.fp8 or self.config.fp4:
+        if (self.config.fp8 or self.config.fp4) and not _can_unpad_fc2:
             output = self.quantization_unpadding(output, actual_tokens_per_expert)
 
         output_bias = None
