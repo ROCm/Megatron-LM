@@ -95,9 +95,12 @@ CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross
 CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
 FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
 # NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP reduce
-# bandwidth at the cost of some gradient-comm precision. Validated to converge for LLaMA3 (MLPerf eval_loss
-# reached 3.3); set to 0 if your run is precision/convergence-sensitive.
-GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
+# bandwidth at the cost of gradient-comm precision. DEFAULT OFF: it is convergence-unsafe in combination with
+# the fusion toggles above. Bisection on C4 (LLaMA3-8B, BS=32, lr 8e-4 = MLPerf RCP setting) showed the full
+# toggle set plateaus (val ~5.6, grad norm climbing to ~8), and removing ONLY this toggle restores convergence
+# (val 3.86 @ 1536 iters, grad norm 0.32), matching the all-off baseline. The other four toggles are
+# convergence-neutral and stay ON. Enable (=1) only at lower LR or if you have verified convergence.
+GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-0}"
 
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
