@@ -101,6 +101,15 @@ FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+Ro
 # (val 3.86 @ 1536 iters, grad norm 0.32), matching the all-off baseline. The other four toggles are
 # convergence-neutral and stay ON. Enable (=1) only at lower LR or if you have verified convergence.
 GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-0}"
+# mxfp4 needs a BF16 gradient buffer: the aiter a4w4 asm wgrad GEMM only emits BF16 output, so when wgrad is
+# fused into the grad buffer (gradient_accumulation_fusion=1) that buffer must be BF16. With the FP32 default
+# above the run crashes ("gemm_a4w4_asm only support BFloat16 output now!"). Force it on for mxfp4 — validated
+# to converge (LLaMA3-8B C4, BS=32, lr 8e-4: val 3.3 reached, grad norm bounded). Set gradient_accumulation_
+# fusion=0 instead if you must keep the FP32 grad buffer.
+if [ "$TE_FP4" -eq 1 ] && [ "$TE_FP4_RECIPE" == "mxfp4" ] && [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ] && [ "$GRAD_REDUCE_IN_BF16" -ne 1 ]; then
+    echo "mxfp4 + gradient_accumulation_fusion requires GRAD_REDUCE_IN_BF16=1 (a4w4 asm wgrad emits BF16 only); forcing it on."
+    GRAD_REDUCE_IN_BF16=1
+fi
 
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
