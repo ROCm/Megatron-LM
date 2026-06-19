@@ -94,18 +94,16 @@ DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradie
 CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
 CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
 FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
-# NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP reduce
-# bandwidth at the cost of gradient-comm precision. DEFAULT OFF: it is convergence-unsafe in combination with
-# the fusion toggles above. Bisection on C4 (LLaMA3-8B, BS=32, lr 8e-4 = MLPerf RCP setting) showed the full
-# toggle set plateaus (val ~5.6, grad norm climbing to ~8), and removing ONLY this toggle restores convergence
-# (val 3.86 @ 1536 iters, grad norm 0.32), matching the all-off baseline. The other four toggles are
-# convergence-neutral and stay ON. Enable (=1) only at lower LR or if you have verified convergence.
-GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-0}"
+# NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP-reduce
+# bandwidth at the cost of some gradient-comm precision. Convergence-neutral: a controlled 2x2 on C4
+# (LLaMA3-8B, BS=32, lr 8e-4) showed bf16 converges with this ON or OFF — convergence was gated by adam-eps
+# (1e-8 plateaus at this LR/warmup, 1e-5 converges), NOT by this toggle. Kept ON as a perf win. mxfp4 REQUIRES
+# it ON (a4w4 asm wgrad emits BF16 only) — auto-forced by the guard below.
+GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
 # mxfp4 needs a BF16 gradient buffer: the aiter a4w4 asm wgrad GEMM only emits BF16 output, so when wgrad is
-# fused into the grad buffer (gradient_accumulation_fusion=1) that buffer must be BF16. With the FP32 default
-# above the run crashes ("gemm_a4w4_asm only support BFloat16 output now!"). Force it on for mxfp4 — validated
-# to converge (LLaMA3-8B C4, BS=32, lr 8e-4: val 3.3 reached, grad norm bounded). Set gradient_accumulation_
-# fusion=0 instead if you must keep the FP32 grad buffer.
+# fused into the grad buffer (gradient_accumulation_fusion=1) that buffer must be BF16. If you set
+# GRAD_REDUCE_IN_BF16=0 (FP32 buffer) the run crashes ("gemm_a4w4_asm only support BFloat16 output now!").
+# Re-force it on for mxfp4; set gradient_accumulation_fusion=0 instead if you must keep an FP32 grad buffer.
 if [ "$TE_FP4" -eq 1 ] && [ "$TE_FP4_RECIPE" == "mxfp4" ] && [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ] && [ "$GRAD_REDUCE_IN_BF16" -ne 1 ]; then
     echo "mxfp4 + gradient_accumulation_fusion requires GRAD_REDUCE_IN_BF16=1 (a4w4 asm wgrad emits BF16 only); forcing it on."
     GRAD_REDUCE_IN_BF16=1
