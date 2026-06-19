@@ -96,9 +96,10 @@ CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te
 FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
 # NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP-reduce
 # bandwidth at the cost of some gradient-comm precision. Convergence-neutral: a controlled 2x2 on C4
-# (LLaMA3-8B, BS=32, lr 8e-4) showed bf16 converges with this ON or OFF — convergence was gated by adam-eps
-# (1e-8 plateaus at this LR/warmup, 1e-5 converges), NOT by this toggle. Kept ON as a perf win. mxfp4 REQUIRES
-# it ON (a4w4 asm wgrad emits BF16 only) — auto-forced by the guard below.
+# (LLaMA3-8B, BS=32, lr 8e-4) showed bf16 converges with this ON or OFF — convergence was gated by adam-eps,
+# NOT this toggle. The Megatron default adam-eps=1e-8 plateaus at lr 8e-4; use 1e-5 (the MLPerf llama3.1-8B
+# config primus/.../MI355X/llama3.1_8B-pretrain-FP8.yaml sets adam_eps: 1.0e-5). Kept ON as a perf win.
+# mxfp4 REQUIRES it ON (a4w4 asm wgrad emits BF16 only) — auto-forced by the guard below.
 GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
 # mxfp4 needs a BF16 gradient buffer: the aiter a4w4 asm wgrad GEMM only emits BF16 output, so when wgrad is
 # fused into the grad buffer (gradient_accumulation_fusion=1) that buffer must be BF16. If you set
