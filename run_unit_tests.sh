@@ -37,11 +37,10 @@ classify_outcome() {
     fi
 }
 
-# Hard per-file wall-clock cap. A single RCCL/NCCL collective deadlock can hang
-# torchrun forever, so this is the backstop that guarantees forward progress.
-PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-1200}   # 20 minutes
-# Graceful in-pytest timeout (fires first, gives a traceback before the hard kill).
-PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-900}        # 15 minutes
+# Per-test-case timeout (pytest-timeout). Applies to each individual test, not the
+# whole file, so a file with many tests is never killed just for its total runtime.
+# A single hung test (e.g. RCCL/NCCL deadlock) is stopped after this many seconds.
+PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-3600}       # 1 hour per test
 
 PYTEST_MARKERS="(not flaky and not flaky_in_dev and not internal and not failing_on_rocm and not failing_on_upstream or test_on_rocm) and not experimental"
 
@@ -57,10 +56,11 @@ write_crash_xml() {
     local name="$2"
     local rc="$3"
     local log="$4"
+    local reason="${5:-}"
     local crash_xml="$OUT_DIR/junit_report_${name}_crash.xml"
 
     SRC_FILE="$src_file" CRASH_NAME="$name" CRASH_RC="$rc" \
-    CRASH_LOG="$log" CRASH_XML="$crash_xml" python - <<'EOF'
+    CRASH_LOG="$log" CRASH_XML="$crash_xml" CRASH_REASON="$reason" python - <<'EOF'
 import os
 from xml.sax.saxutils import escape, quoteattr
 
@@ -69,8 +69,9 @@ name = os.environ["CRASH_NAME"]
 rc = int(os.environ["CRASH_RC"])
 log = os.environ["CRASH_LOG"]
 crash_xml = os.environ["CRASH_XML"]
+reason = os.environ.get("CRASH_REASON", "").strip()
 
-# Human-readable label for the exit code.
+# Human-readable label for the exit code (an explicit reason takes precedence).
 labels = {
     124: "TIMEOUT (SIGTERM after wall-clock cap)",
     137: "TIMEOUT/KILLED (SIGKILL, code 137)",
@@ -80,7 +81,9 @@ labels = {
     2: "INTERRUPTED (pytest exit 2)",
     3: "INTERNAL ERROR (pytest exit 3)",
 }
-if rc > 128:
+if reason:
+    label = reason
+elif rc > 128:
     label = labels.get(rc, f"KILLED by signal {rc - 128} (code {rc})")
 else:
     label = labels.get(rc, f"hard exit (code {rc})")
@@ -129,11 +132,12 @@ for file in $TEST_FILES; do
 
     echo "Running test file: $file"
 
-    # Full verbose output goes to the per-file log (uploaded as an artifact);
-    # the console only gets the concise status line below.
-    timeout --signal=SIGTERM --kill-after=60 "$PER_FILE_TIMEOUT" \
-        torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
-        --tb=short --capture=fd \
+    # Full verbose output (per-test names + uncaptured stdout) goes to the per-file
+    # log (uploaded as an artifact); the console only gets the concise status line.
+    # The timeout is enforced PER TEST CASE via pytest-timeout, not per file, so a
+    # large file with many tests is not killed just for having a lot of cases.
+    torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
+        -v -s --tb=long --showlocals \
         --timeout="$PYTEST_TIMEOUT" --timeout-method=thread \
         --reruns 2 --reruns-delay 5 \
         -m "$PYTEST_MARKERS" \
@@ -144,10 +148,18 @@ for file in $TEST_FILES; do
 
     summary=$(grep -E "==.*(passed|failed|error|skipped).*==" "$log_file" | tail -1)
 
+    # pytest-timeout prints a "+ Timeout +" banner (and, for the signal method,
+    # a "from pytest-timeout" message) when a single test exceeds --timeout. The
+    # thread method then os._exit(1)s, so detect it from the log rather than rc.
+    timeout_reason=""
+    if grep -qE '\+ Timeout \+|from pytest-timeout' "$log_file"; then
+        timeout_reason="TIMEOUT (per-test ${PYTEST_TIMEOUT}s cap exceeded)"
+    fi
+
     # Capture hard crashes the JUnit XML missed (signals/timeout, or missing/empty XML).
     # Must run while $log_file is still at its original path so the tail can be embedded.
     if [[ ( $rc -ne 0 && $rc -ne 1 ) || ! -s "$xml_file" ]]; then
-        write_crash_xml "$file" "$test_name" "$rc" "$log_file"
+        write_crash_xml "$file" "$test_name" "$rc" "$log_file" "$timeout_reason"
     fi
 
     # Sort this file's log into output/logs/<outcome>/ by its overall result.
@@ -155,11 +167,11 @@ for file in $TEST_FILES; do
     mv "$log_file" "$LOG_DIR/$outcome/" 2>/dev/null || true
     final_log="$LOG_DIR/$outcome/$(basename "$log_file")"
 
-    if [[ $rc -eq 0 ]]; then
-        echo "[PASS] $file -- ${summary:-no summary} -- $final_log"
-    elif [[ $rc -eq 124 || $rc -eq 137 ]]; then
-        echo "[TIMEOUT] $file (killed after ${PER_FILE_TIMEOUT}s) -- $final_log"
+    if [[ -n "$timeout_reason" ]]; then
+        echo "[TIMEOUT] $file -- a test exceeded the ${PYTEST_TIMEOUT}s per-test cap -- $final_log"
         ANY_FAIL=1
+    elif [[ $rc -eq 0 ]]; then
+        echo "[PASS] $file -- ${summary:-no summary} -- $final_log"
     else
         echo "[FAIL] ($rc) $file -- ${summary:-no summary} -- $final_log"
         ANY_FAIL=1
