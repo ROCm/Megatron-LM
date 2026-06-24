@@ -12,6 +12,31 @@ export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
 OUT_DIR=output
 mkdir -p "$OUT_DIR"
 
+# Per-file logs are sorted into these subfolders by the file's overall outcome:
+#   failed  -> any errors or failures (or a hard crash / unparseable result)
+#   passed  -> only passed and/or skipped tests
+LOG_DIR="$OUT_DIR/logs"
+mkdir -p "$LOG_DIR/passed" "$LOG_DIR/failed"
+
+# Classify a run using the pytest summary line and the process exit code.
+classify_outcome() {
+    local rc="$1"
+    local summary="$2"
+    local n_failed n_error n_passed n_skipped
+    n_failed=$(echo "$summary" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | head -1)
+    n_error=$(echo "$summary" | grep -oE '[0-9]+ error' | grep -oE '[0-9]+' | head -1)
+    n_passed=$(echo "$summary" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1)
+    n_skipped=$(echo "$summary" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -1)
+
+    if [[ ( "$rc" -ne 0 && "$rc" -ne 1 ) || ${n_error:-0} -gt 0 || ${n_failed:-0} -gt 0 ]]; then
+        echo "failed"
+    elif [[ ${n_passed:-0} -gt 0 || ${n_skipped:-0} -gt 0 ]]; then
+        echo "passed"
+    else
+        echo "failed"
+    fi
+}
+
 # Hard per-file wall-clock cap. A single RCCL/NCCL collective deadlock can hang
 # torchrun forever, so this is the backstop that guarantees forward progress.
 PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-1200}   # 20 minutes
@@ -119,19 +144,25 @@ for file in $TEST_FILES; do
 
     summary=$(grep -E "==.*(passed|failed|error|skipped).*==" "$log_file" | tail -1)
 
-    if [[ $rc -eq 0 ]]; then
-        echo "[PASS] $file -- ${summary:-no summary}"
-    elif [[ $rc -eq 124 || $rc -eq 137 ]]; then
-        echo "[TIMEOUT] $file (killed after ${PER_FILE_TIMEOUT}s) -- see $log_file"
-        ANY_FAIL=1
-    else
-        echo "[FAIL] ($rc) $file -- ${summary:-no summary} -- see $log_file"
-        ANY_FAIL=1
-    fi
-
     # Capture hard crashes the JUnit XML missed (signals/timeout, or missing/empty XML).
+    # Must run while $log_file is still at its original path so the tail can be embedded.
     if [[ ( $rc -ne 0 && $rc -ne 1 ) || ! -s "$xml_file" ]]; then
         write_crash_xml "$file" "$test_name" "$rc" "$log_file"
+    fi
+
+    # Sort this file's log into output/logs/<outcome>/ by its overall result.
+    outcome=$(classify_outcome "$rc" "$summary")
+    mv "$log_file" "$LOG_DIR/$outcome/" 2>/dev/null || true
+    final_log="$LOG_DIR/$outcome/$(basename "$log_file")"
+
+    if [[ $rc -eq 0 ]]; then
+        echo "[PASS] $file -- ${summary:-no summary} -- $final_log"
+    elif [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "[TIMEOUT] $file (killed after ${PER_FILE_TIMEOUT}s) -- $final_log"
+        ANY_FAIL=1
+    else
+        echo "[FAIL] ($rc) $file -- ${summary:-no summary} -- $final_log"
+        ANY_FAIL=1
     fi
 
     # Reap any stragglers so a killed run doesn't leak GPU memory into the next file.

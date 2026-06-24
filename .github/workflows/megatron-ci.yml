@@ -169,8 +169,7 @@ jobs:
           name: megatron-lm-test-reports
           path: |
             output/unified_test_report.csv
-            output/junit_report_*.xml
-            output/pytest_*.log
+            output/logs/**/*.log
           if-no-files-found: ignore
           retention-days: 7
 
