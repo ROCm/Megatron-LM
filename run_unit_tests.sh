@@ -1,23 +1,92 @@
 #!/bin/bash
 
 set -u -o pipefail
-set -x
-
-# Install mock for unit tests
-pip install mock
 
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
 export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS-1)))
 echo "Number of GPUs: $NUM_GPUS"
 
+# Keep RCCL/NCCL chatter out of the logs; only warnings and errors.
+export NCCL_DEBUG=${NCCL_DEBUG:-WARN}
+
 OUT_DIR=output
 mkdir -p "$OUT_DIR"
+
+# Hard per-file wall-clock cap. A single RCCL/NCCL collective deadlock can hang
+# torchrun forever, so this is the backstop that guarantees forward progress.
+PER_FILE_TIMEOUT=${PER_FILE_TIMEOUT:-1200}   # 20 minutes
+# Graceful in-pytest timeout (fires first, gives a traceback before the hard kill).
+PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-900}        # 15 minutes
 
 PYTEST_MARKERS="(not flaky and not flaky_in_dev and not internal and not failing_on_rocm and not failing_on_upstream or test_on_rocm) and not experimental"
 
 if [[ "$HIP_ARCHITECTURES" == "gfx90a" ]]; then
     PYTEST_MARKERS="$PYTEST_MARKERS and not failing_on_rocm_mi250"
 fi
+
+# Synthesize a JUnit report for a file whose run died hard (signal/timeout) or
+# whose XML is missing/incomplete, so the test reporter shows it as a failure
+# instead of silently dropping it (which makes a crashed run look all-green).
+write_crash_xml() {
+    local src_file="$1"
+    local name="$2"
+    local rc="$3"
+    local log="$4"
+    local crash_xml="$OUT_DIR/junit_report_${name}_crash.xml"
+
+    SRC_FILE="$src_file" CRASH_NAME="$name" CRASH_RC="$rc" \
+    CRASH_LOG="$log" CRASH_XML="$crash_xml" python - <<'EOF'
+import os
+from xml.sax.saxutils import escape, quoteattr
+
+src_file = os.environ["SRC_FILE"]
+name = os.environ["CRASH_NAME"]
+rc = int(os.environ["CRASH_RC"])
+log = os.environ["CRASH_LOG"]
+crash_xml = os.environ["CRASH_XML"]
+
+# Human-readable label for the exit code.
+labels = {
+    124: "TIMEOUT (SIGTERM after wall-clock cap)",
+    137: "TIMEOUT/KILLED (SIGKILL, code 137)",
+    134: "ABORTED (SIGABRT, code 134)",
+    139: "SEGFAULT (SIGSEGV, code 139)",
+    143: "TERMINATED (SIGTERM, code 143)",
+    2: "INTERRUPTED (pytest exit 2)",
+    3: "INTERNAL ERROR (pytest exit 3)",
+}
+if rc > 128:
+    label = labels.get(rc, f"KILLED by signal {rc - 128} (code {rc})")
+else:
+    label = labels.get(rc, f"hard exit (code {rc})")
+
+tail = ""
+try:
+    with open(log, "r", errors="replace") as f:
+        tail = "".join(f.readlines()[-50:])
+except OSError:
+    tail = "(log file unavailable)"
+
+message = f"{src_file} did not finish cleanly: {label}"
+body = f"Exit code: {rc}\nLabel: {label}\nFile: {src_file}\n\n--- last 50 log lines ---\n{tail}"
+
+xml = (
+    '<?xml version="1.0" encoding="utf-8"?>\n'
+    '<testsuites>\n'
+    f'  <testsuite name="crash::{escape(name)}" tests="1" failures="0" errors="1" skipped="0">\n'
+    f'    <testcase classname={quoteattr("crash." + name)} name={quoteattr(os.path.basename(src_file) + "::process")}>\n'
+    f'      <error message={quoteattr(message)} type="ProcessCrash">{escape(body)}</error>\n'
+    '    </testcase>\n'
+    '  </testsuite>\n'
+    '</testsuites>\n'
+)
+
+with open(crash_xml, "w") as f:
+    f.write(xml)
+
+print(f"Wrote synthetic crash report: {crash_xml}")
+EOF
+}
 
 # Find all test files recursively
 TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
@@ -28,22 +97,46 @@ for file in $TEST_FILES; do
     # Create unique filename by replacing slashes with underscores and removing tests/unit_tests/ prefix
     # E.g., tests/unit_tests/dist_checkpointing/test_optimizer.py -> dist_checkpointing_test_optimizer
     test_name=$(echo "$file" | sed 's|tests/unit_tests/||' | sed 's|/|_|g' | sed 's|\.py$||')
-    
+
     csv_file="$OUT_DIR/test_report_${test_name}.csv"
     xml_file="$OUT_DIR/junit_report_${test_name}.xml"
+    log_file="$OUT_DIR/pytest_${test_name}.log"
 
     echo "Running test file: $file"
-    torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
-        --showlocals --tb=long -v -s -m "$PYTEST_MARKERS" \
+
+    # Full verbose output goes to the per-file log (uploaded as an artifact);
+    # the console only gets the concise status line below.
+    timeout --signal=SIGTERM --kill-after=60 "$PER_FILE_TIMEOUT" \
+        torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
+        --tb=short --capture=fd \
+        --timeout="$PYTEST_TIMEOUT" --timeout-method=thread \
+        --reruns 2 --reruns-delay 5 \
+        -m "$PYTEST_MARKERS" \
         --csv "$csv_file" \
         --junitxml "$xml_file" \
-        $file
+        "$file" > "$log_file" 2>&1
     rc=$?
 
-    if [[ $rc -ne 0 ]]; then
-        echo "Test failed in $file."
+    summary=$(grep -E "==.*(passed|failed|error|skipped).*==" "$log_file" | tail -1)
+
+    if [[ $rc -eq 0 ]]; then
+        echo "[PASS] $file -- ${summary:-no summary}"
+    elif [[ $rc -eq 124 || $rc -eq 137 ]]; then
+        echo "[TIMEOUT] $file (killed after ${PER_FILE_TIMEOUT}s) -- see $log_file"
+        ANY_FAIL=1
+    else
+        echo "[FAIL] ($rc) $file -- ${summary:-no summary} -- see $log_file"
         ANY_FAIL=1
     fi
+
+    # Capture hard crashes the JUnit XML missed (signals/timeout, or missing/empty XML).
+    if [[ ( $rc -ne 0 && $rc -ne 1 ) || ! -s "$xml_file" ]]; then
+        write_crash_xml "$file" "$test_name" "$rc" "$log_file"
+    fi
+
+    # Reap any stragglers so a killed run doesn't leak GPU memory into the next file.
+    pkill -9 -f "pytest" || true
+    pkill -9 -f "torchrun" || true
 done
 
 if [[ $ANY_FAIL -ne 0 ]]; then

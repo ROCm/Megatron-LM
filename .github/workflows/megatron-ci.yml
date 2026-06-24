@@ -18,10 +18,16 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Required so dorny/test-reporter can publish its check run with results.
+permissions:
+  contents: read
+  checks: write
+  pull-requests: write
+
 jobs:
   build_and_test:
     name: Build and Test on GPU
-    timeout-minutes: 720
+    timeout-minutes: 300
     runs-on: linux-megatron-mi325-8
 
     steps:
@@ -129,21 +135,22 @@ jobs:
 
       - name: Publish test report
         if: always()
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         with:
           name: Megatron-LM unit tests report
           path: output/junit_report_*.xml
           reporter: java-junit
           fail-on-error: false
+          collapsed: auto
 
       - name: List test reports
         if: always()
         run: |
-          echo "Workspace contents:"
-          ls -R
           if [ -d output ]; then
             echo "Contents of output/:"
             ls -R output || true
+          else
+            echo "No output/ directory found."
           fi
 
       - name: Upload test artifacts
@@ -154,6 +161,7 @@ jobs:
           path: |
             output/unified_test_report.csv
             output/junit_report_*.xml
+            output/pytest_*.log
           if-no-files-found: ignore
           retention-days: 7
 

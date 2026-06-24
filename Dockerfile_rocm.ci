@@ -37,6 +37,8 @@ pytest_mock \
 pytest-csv \
 pytest-asyncio \
 pytest-random-order \
+pytest-timeout \
+pytest-rerunfailures \
 sentencepiece \
 wrapt \
 zarr \
