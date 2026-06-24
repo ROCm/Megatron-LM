@@ -43,6 +43,7 @@ TEE_OUTPUT="${TEE_OUTPUT:-1}"
 USE_FLASH_ATTN="${USE_FLASH_ATTN:-0}"
 NO_TRAINING="${NO_TRAINING:-0}" # NO_TRAINING=1: for computing metrics only
 ENABLE_PROFILING="${ENABLE_PROFILING:-0}" #enable pytorch profiling
+PROFILE_MODE="${PROFILE_MODE:-}" # Options: "" (none), "roofline" (rocprof + analysis)
 echo "NO_TRAINING=$NO_TRAINING"
 
 CWD=`pwd`
@@ -159,6 +160,40 @@ NUM_GROUPS=$(( ${NUM_HEADS} / ${GROUP_SIZE} ))
 
 PROFILING_DIR="${LOG_DIR}/trace_${EXP_NAME}"
 
+# ---------------------------------------------------------------------------
+# Roofline profiling setup (PROFILE_MODE=roofline)
+# ---------------------------------------------------------------------------
+TORCHRUN_EXTRA_FLAGS=""
+PRETRAIN_CMD="pretrain_gpt.py"
+
+if [[ "$PROFILE_MODE" == "roofline" ]]; then
+    echo "=== ROOFLINE PROFILING MODE ==="
+    mkdir -p $PROFILING_DIR
+
+    # Wrapper script: only profile rank 0 to avoid multi-process overhead
+    # Uses kernel-trace + stats (timing only — no PMC counters to avoid
+    # "Request exceeds capabilities" errors on some hardware).
+    cat > $PROFILING_DIR/rocprof_wrapper.sh << WRAPPER_EOF
+#!/bin/bash
+if [[ "\${LOCAL_RANK:-0}" == "0" ]]; then
+    echo "[rocprofv3] Profiling rank 0 — output: ${PROFILING_DIR}/"
+    exec rocprofv3 --kernel-trace --stats \\
+        -d ${PROFILING_DIR} \\
+        -o rocprof_output \\
+        -- python "\$@"
+else
+    exec python "\$@"
+fi
+WRAPPER_EOF
+    chmod +x $PROFILING_DIR/rocprof_wrapper.sh
+
+    TORCHRUN_EXTRA_FLAGS="--no-python"
+    PRETRAIN_CMD="$PROFILING_DIR/rocprof_wrapper.sh pretrain_gpt.py"
+
+    echo "Wrapper : $PROFILING_DIR/rocprof_wrapper.sh"
+    echo "Output  : $PROFILING_DIR/"
+fi
+
 GPT_ARGS="
     --tensor-model-parallel-size ${TP} \
     --pipeline-model-parallel-size ${PP} \
@@ -173,8 +208,6 @@ GPT_ARGS="
     --position-embedding-type rope \
     --no-position-embedding \
     --swiglu \
-    --use-te-activation-func \
-    --no-bias-swiglu-fusion \
     --disable-bias-linear \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
@@ -381,7 +414,7 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
 fi
 
 run_cmd="
-    torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
+    torchrun $TORCHRUN_EXTRA_FLAGS $DISTRIBUTED_ARGS $PRETRAIN_CMD \
         $GPT_ARGS \
         $DATA_ARGS \
         $OUTPUT_ARGS \
@@ -401,6 +434,17 @@ if [ "$NO_TRAINING" -eq 0 ]; then
     eval $run_cmd
 fi
 
+# ---------------------------------------------------------------------------
+# Roofline post-run analysis
+# ---------------------------------------------------------------------------
+if [[ "$PROFILE_MODE" == "roofline" ]]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    echo ""
+    echo "=== Running roofline analysis ==="
+    python3 ${SCRIPT_DIR}/profiling/analyze_roofline.py \
+        --profiling-dir $PROFILING_DIR \
+        --output $PROFILING_DIR/roofline_report.txt
+fi
 
 echo 'import argparse
 import numpy as np
