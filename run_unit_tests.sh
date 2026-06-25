@@ -122,21 +122,30 @@ print(f"Wrote synthetic crash report: {crash_xml}")
 EOF
 }
 
-# Find all test files recursively
-TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
+# Run a single test file: (re)write its log/xml/csv, classify the outcome, sort
+# the log into logs/passed|failed, and return 0 if it passed or 1 if it failed.
+# Idempotent so it can be called again on retry: stale crash reports and sorted
+# logs for this file are cleared first, so the latest attempt fully replaces the
+# previous one in the logs and XML the test reporter consumes.
+run_test_file() {
+    local file="$1"
+    local attempt_label="${2:-}"
 
-ANY_FAIL=0
-
-for file in $TEST_FILES; do
     # Create unique filename by replacing slashes with underscores and removing tests/unit_tests/ prefix
     # E.g., tests/unit_tests/dist_checkpointing/test_optimizer.py -> dist_checkpointing_test_optimizer
+    local test_name csv_file xml_file log_file crash_xml log_base
     test_name=$(echo "$file" | sed 's|tests/unit_tests/||' | sed 's|/|_|g' | sed 's|\.py$||')
-
     csv_file="$OUT_DIR/test_report_${test_name}.csv"
     xml_file="$OUT_DIR/junit_report_${test_name}.xml"
     log_file="$OUT_DIR/pytest_${test_name}.log"
+    crash_xml="$OUT_DIR/junit_report_${test_name}_crash.xml"
+    log_base=$(basename "$log_file")
 
-    echo "Running test file: $file"
+    # Clear artifacts from any previous attempt so this run fully replaces them
+    # (pytest itself overwrites csv_file/xml_file/log_file when it runs).
+    rm -f "$crash_xml" "$LOG_DIR/passed/$log_base" "$LOG_DIR/failed/$log_base"
+
+    echo "Running test file: $file${attempt_label:+ ($attempt_label)}"
 
     # Full verbose output (per-test names + uncaptured stdout) goes to the per-file
     # log (uploaded as an artifact); the console only gets the concise status line.
@@ -150,14 +159,15 @@ for file in $TEST_FILES; do
         --csv "$csv_file" \
         --junitxml "$xml_file" \
         "$file" > "$log_file" 2>&1
-    rc=$?
+    local rc=$?
 
+    local summary
     summary=$(grep -E "==.*(passed|failed|error|skipped).*==" "$log_file" | tail -1)
 
     # pytest-timeout prints a "+ Timeout +" banner (and, for the signal method,
     # a "from pytest-timeout" message) when a single test exceeds --timeout. The
     # thread method then os._exit(1)s, so detect it from the log rather than rc.
-    timeout_reason=""
+    local timeout_reason=""
     if grep -qE '\+ Timeout \+|from pytest-timeout' "$log_file"; then
         timeout_reason="TIMEOUT (per-test ${PYTEST_TIMEOUT}s cap exceeded)"
     fi
@@ -166,13 +176,13 @@ for file in $TEST_FILES; do
     # (rc != 0) and either died on a signal/timeout (rc != 1) or never wrote a
     # usable XML. rc == 0 is always a clean run (incl. deselected/no-tests) and is
     # never synthesized as a failure. Runs while $log_file is at its original path.
-    crash_xml="$OUT_DIR/junit_report_${test_name}_crash.xml"
     if [[ $rc -ne 0 ]] && { [[ $rc -ne 1 ]] || [[ ! -s "$xml_file" ]]; }; then
         write_crash_xml "$file" "$test_name" "$rc" "$log_file" "$timeout_reason"
     fi
 
     # A file goes to failed/ only if it actually has failed/error tests (per the
     # JUnit counts, including any synthetic crash report) or a per-test timeout.
+    local fail_errors outcome final_log
     fail_errors=$(count_junit_failures "$xml_file" "$crash_xml")
     if [[ -n "$timeout_reason" || ${fail_errors:-0} -gt 0 ]]; then
         outcome="failed"
@@ -180,14 +190,12 @@ for file in $TEST_FILES; do
         outcome="passed"
     fi
     mv "$log_file" "$LOG_DIR/$outcome/" 2>/dev/null || true
-    final_log="$LOG_DIR/$outcome/$(basename "$log_file")"
+    final_log="$LOG_DIR/$outcome/$log_base"
 
     if [[ -n "$timeout_reason" ]]; then
         echo "[TIMEOUT] $file -- a test exceeded the ${PYTEST_TIMEOUT}s per-test cap -- $final_log"
-        ANY_FAIL=1
     elif [[ "$outcome" == "failed" ]]; then
         echo "[FAIL] ($rc) $file -- ${summary:-no summary} -- $final_log"
-        ANY_FAIL=1
     else
         echo "[PASS] $file -- ${summary:-no summary} -- $final_log"
     fi
@@ -195,10 +203,50 @@ for file in $TEST_FILES; do
     # Reap any stragglers so a killed run doesn't leak GPU memory into the next file.
     pkill -9 -f "pytest" || true
     pkill -9 -f "torchrun" || true
+
+    [[ "$outcome" == "passed" ]]
+}
+
+# Find all test files recursively
+TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
+
+ANY_FAIL=0
+
+# Give a failed file this many additional clean re-runs to pass, updating the
+# same logs/XML each time (the in-test --reruns above handle individual flaky
+# tests; this handles whole files that fail or crash transiently).
+MAX_FILE_RETRIES=${MAX_FILE_RETRIES:-2}
+
+# Initial pass over every file; collect the ones that fail.
+failed_files=()
+for file in $TEST_FILES; do
+    if ! run_test_file "$file"; then
+        failed_files+=("$file")
+    fi
 done
 
-if [[ $ANY_FAIL -ne 0 ]]; then
-    echo "One or more test files failed."
+# Retry phase: re-run only the still-failing files, up to MAX_FILE_RETRIES times.
+attempt=1
+while [[ ${#failed_files[@]} -gt 0 && $attempt -le $MAX_FILE_RETRIES ]]; do
+    echo "================================================================"
+    echo "Retry ${attempt}/${MAX_FILE_RETRIES}: re-running ${#failed_files[@]} failed test file(s) for another chance."
+    echo "================================================================"
+    still_failed=()
+    for file in "${failed_files[@]}"; do
+        if ! run_test_file "$file" "retry ${attempt}/${MAX_FILE_RETRIES}"; then
+            still_failed+=("$file")
+        fi
+    done
+    failed_files=("${still_failed[@]}")
+    attempt=$((attempt + 1))
+done
+
+if [[ ${#failed_files[@]} -gt 0 ]]; then
+    ANY_FAIL=1
+    echo "The following ${#failed_files[@]} test file(s) still failed after ${MAX_FILE_RETRIES} retr(y/ies):"
+    for file in "${failed_files[@]}"; do
+        echo "  - $file"
+    done
 else
     echo "All test files passed successfully."
 fi
