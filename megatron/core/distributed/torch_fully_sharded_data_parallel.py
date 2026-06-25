@@ -91,11 +91,20 @@ class TorchFullyShardedDataParallel(_BaseDataParallel):
             for name, param in module.named_parameters():
                 attrs = vars(param)
                 if is_float8tensor(param):
-                    # disable fp8 transpose cache and perform transposing fp8 weights
+                    # Disable fp8 transpose cache and perform transposing fp8 weights
                     # at each micro-batch because torch-FSDP doesn't recognize the
-                    # micro-batch id, thus removing unnecessary memory stores
-                    attrs['_fp8_attrs']['transpose_invalid'] = False
-                    del attrs['_fp8_attrs']['transpose']
+                    # micro-batch id, thus removing unnecessary memory stores.
+                    #
+                    # In TE 1.x the transpose-cache state lives in a nested dict
+                    # `param._fp8_attrs`; in TE 2.x it was promoted to flat
+                    # attributes (`_transpose` / `_transpose_invalid`) on
+                    # Float8TensorStorage. Handle both layouts.
+                    if '_fp8_attrs' in attrs:
+                        attrs['_fp8_attrs']['transpose_invalid'] = False
+                        attrs['_fp8_attrs'].pop('transpose', None)
+                    else:
+                        attrs['_transpose_invalid'] = False
+                        # `_transpose` itself is dropped via `_SKIP_KEYS` below.
                 custom_attrs[name] = {k: v for k, v in attrs.items()}
                 for k in _SKIP_KEYS:
                     custom_attrs[name].pop(k, None)

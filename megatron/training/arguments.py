@@ -718,11 +718,11 @@ def validate_args(args, defaults={}):
         assert os.environ.get('CUDA_DEVICE_MAX_CONNECTIONS') != "1", \
             'FSDP always requires CUDA_DEVICE_MAX_CONNECTIONS value large than one'
 
-        if args.fp8_param_gather and is_te_min_version("2.0.0"):
+        if args.fp8_param_gather and not is_te_min_version("2.12.0.dev0"):
             args.fp8_param_gather = False
             warn_rank_0(
-                'FSDP2 FP8 param gather is not supported yet in TE 2.0, will fallback to bf16'
-                'all_gather instead, turning off fp8_param_gather',
+                'FSDP2 FP8 param gather requires Transformer Engine >= 2.12.0, '
+                'will fallback to bf16 all_gather instead, turning off fp8_param_gather',
                 args.rank,
             )
         if args.fp4_param and not is_te_min_version("2.7.0.dev0"):
