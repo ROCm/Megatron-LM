@@ -18,23 +18,29 @@ mkdir -p "$OUT_DIR"
 LOG_DIR="$OUT_DIR/logs"
 mkdir -p "$LOG_DIR/passed" "$LOG_DIR/failed"
 
-# Classify a run using the pytest summary line and the process exit code.
-classify_outcome() {
-    local rc="$1"
-    local summary="$2"
-    local n_failed n_error n_passed n_skipped
-    n_failed=$(echo "$summary" | grep -oE '[0-9]+ failed' | grep -oE '[0-9]+' | head -1)
-    n_error=$(echo "$summary" | grep -oE '[0-9]+ error' | grep -oE '[0-9]+' | head -1)
-    n_passed=$(echo "$summary" | grep -oE '[0-9]+ passed' | grep -oE '[0-9]+' | head -1)
-    n_skipped=$(echo "$summary" | grep -oE '[0-9]+ skipped' | grep -oE '[0-9]+' | head -1)
+# Sum failures + errors across the given JUnit XML file(s)/globs. This is the
+# authoritative signal for "did this file actually have failed or error tests":
+# deselected-only, skipped-only, "no tests ran", and all-passed runs report 0,
+# while a synthetic crash report contributes an error. Unparseable XML counts as
+# a failure so a broken/partial report is never silently treated as a pass.
+count_junit_failures() {
+    python - "$@" <<'EOF'
+import sys, glob
+from xml.etree import ElementTree as ET
 
-    if [[ ( "$rc" -ne 0 && "$rc" -ne 1 ) || ${n_error:-0} -gt 0 || ${n_failed:-0} -gt 0 ]]; then
-        echo "failed"
-    elif [[ ${n_passed:-0} -gt 0 || ${n_skipped:-0} -gt 0 ]]; then
-        echo "passed"
-    else
-        echo "failed"
-    fi
+total = 0
+for pattern in sys.argv[1:]:
+    for path in glob.glob(pattern):
+        try:
+            root = ET.parse(path).getroot()
+        except Exception:
+            total += 1
+            continue
+        suites = [root] if root.tag == "testsuite" else root.findall(".//testsuite")
+        for s in suites:
+            total += int(s.get("failures", 0) or 0) + int(s.get("errors", 0) or 0)
+print(total)
+EOF
 }
 
 # Per-test-case timeout (pytest-timeout). Applies to each individual test, not the
@@ -156,25 +162,34 @@ for file in $TEST_FILES; do
         timeout_reason="TIMEOUT (per-test ${PYTEST_TIMEOUT}s cap exceeded)"
     fi
 
-    # Capture hard crashes the JUnit XML missed (signals/timeout, or missing/empty XML).
-    # Must run while $log_file is still at its original path so the tail can be embedded.
-    if [[ ( $rc -ne 0 && $rc -ne 1 ) || ! -s "$xml_file" ]]; then
+    # Capture hard crashes the JUnit XML missed: the process did not exit cleanly
+    # (rc != 0) and either died on a signal/timeout (rc != 1) or never wrote a
+    # usable XML. rc == 0 is always a clean run (incl. deselected/no-tests) and is
+    # never synthesized as a failure. Runs while $log_file is at its original path.
+    crash_xml="$OUT_DIR/junit_report_${test_name}_crash.xml"
+    if [[ $rc -ne 0 ]] && { [[ $rc -ne 1 ]] || [[ ! -s "$xml_file" ]]; }; then
         write_crash_xml "$file" "$test_name" "$rc" "$log_file" "$timeout_reason"
     fi
 
-    # Sort this file's log into output/logs/<outcome>/ by its overall result.
-    outcome=$(classify_outcome "$rc" "$summary")
+    # A file goes to failed/ only if it actually has failed/error tests (per the
+    # JUnit counts, including any synthetic crash report) or a per-test timeout.
+    fail_errors=$(count_junit_failures "$xml_file" "$crash_xml")
+    if [[ -n "$timeout_reason" || ${fail_errors:-0} -gt 0 ]]; then
+        outcome="failed"
+    else
+        outcome="passed"
+    fi
     mv "$log_file" "$LOG_DIR/$outcome/" 2>/dev/null || true
     final_log="$LOG_DIR/$outcome/$(basename "$log_file")"
 
     if [[ -n "$timeout_reason" ]]; then
         echo "[TIMEOUT] $file -- a test exceeded the ${PYTEST_TIMEOUT}s per-test cap -- $final_log"
         ANY_FAIL=1
-    elif [[ $rc -eq 0 ]]; then
-        echo "[PASS] $file -- ${summary:-no summary} -- $final_log"
-    else
+    elif [[ "$outcome" == "failed" ]]; then
         echo "[FAIL] ($rc) $file -- ${summary:-no summary} -- $final_log"
         ANY_FAIL=1
+    else
+        echo "[PASS] $file -- ${summary:-no summary} -- $final_log"
     fi
 
     # Reap any stragglers so a killed run doesn't leak GPU memory into the next file.
