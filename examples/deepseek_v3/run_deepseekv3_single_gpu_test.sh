@@ -36,6 +36,7 @@ export CP=1
 export AC=none
 export USE_GROUPED_GEMM=false
 export GA_FUSION=false
+export FUSED_PADDED_MLA_ATTENTION=true
 export PROFILE=true
 export PROFILE_START=12
 export PROFILE_END=13
