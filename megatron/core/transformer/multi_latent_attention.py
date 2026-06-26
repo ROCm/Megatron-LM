@@ -403,11 +403,6 @@ class MultiLatentAttention(Attention):
             core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[..., :self.config.v_head_dim]
             core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
 
-        if self.config.fused_padded_mla_attention:
-            # [s, b, n * dim] -> [s, b, n, dim=192] -> [s, b, n, dim=128] -> [s, b, n*dim]
-            core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads, self.q_head_dim)[..., :self.config.v_head_dim]
-            core_attn_out = core_attn_out.reshape(seq_length, batch_size, num_heads * self.config.v_head_dim)
-
         # We are doing absorption with cache mla latents and decode mode.
         if self.cache_mla_latents and inference_context.is_decode_only():
             # core_attn_out = self.self.up_v_layer(core_attn_out)
