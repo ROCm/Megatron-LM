@@ -59,17 +59,17 @@ except ImportError:
 
     HAVE_TE = False
 
+logger = logging.getLogger(__name__)
+
 is_rocm = hasattr(torch.version, 'hip') and torch.version.hip is not None
 HAVE_FUSED_PADDING_MCT = False
 if HAVE_TE and is_rocm:
     HAVE_FUSED_PADDING_MCT = hasattr(Fp8Padding, 'compute_padded_splits')
     if not HAVE_FUSED_PADDING_MCT:
-        logging.getLogger(__name__).info(
+        logger.warning(
             "Fp8Padding.compute_padded_splits not found; "
             "using unfused BF16 padding path for MoE."
         )
-
-logger = logging.getLogger(__name__)
 
 
 class GroupedMLP(MegatronModule):
@@ -683,7 +683,7 @@ class TEGroupedMLP(MegatronModule):
             # Probs already applied, so reset to 1.
             permuted_probs = torch.ones_like(permuted_probs)
 
-        _fused_kwargs = {"actual_m_splits": actual_tokens_per_expert} if HAVE_FUSED_PADDING_MCT else {}
+        _fused_kwargs = {"actual_m_splits": actual_tokens_per_expert} if HAVE_FUSED_PADDING_MCT and actual_tokens_per_expert is not None else {}
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
@@ -765,7 +765,7 @@ class TEGroupedMLP(MegatronModule):
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
 
-        _can_unpad_fc2 = HAVE_FUSED_PADDING_MCT and not self.config.add_bias_linear
+        _can_unpad_fc2 = HAVE_FUSED_PADDING_MCT and actual_tokens_per_expert is not None and not self.config.add_bias_linear
         if _can_unpad_fc2:
             _fc2_fused_kwargs = {
                 "actual_m_splits": actual_tokens_per_expert,
