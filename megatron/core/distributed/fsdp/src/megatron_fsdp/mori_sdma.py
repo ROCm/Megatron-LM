@@ -17,10 +17,10 @@
 When the user opts in (via ``--enable-mori-sdma-ag`` /
 ``DistributedDataParallelConfig.enable_mori_sdma_ag``), the Megatron FSDP
 all-gather pipeline routes ``all_gather_into_tensor`` through the mori
-``mori.ccl.AllGatherIntoTensor`` SDMA dispatcher.
+``mori.ccl.AllgatherSdma`` SDMA dispatcher.
 
-The gather is driven entirely on the caller's CUDA stream (the FSDP all-gather
-stream). Completion is exposed as a stream event via ``_SdmaWork``.
+The gather is driven on a dedicated CUDA stream. Completion is exposed as a
+stream event via ``_SdmaWork``.
 Any failure (mori missing, non-AMD/ROCm runtime, shmem init error, oversized
 call, or a group other than the one bound at init time) yields ``None`` and the
 caller falls back to the underlying RCCL/NCCL
@@ -50,19 +50,22 @@ from megatron.core.utils import log_single_rank
 
 # Module-level lazy state. Populated by ``init`` on the first all-gather call.
 _handle = None
-_dtype_map = None
 _max_numel = 0
 _bound_group = None
 _init_attempted = False
 _call_failed_warned = False
 
-# Direct (non-blocking) path state. When the output bucket can be registered with
-# mori's symmetric-memory layer, the SDMA kernel writes straight into it and we can
-# launch without the host-blocking ``finish_sync``, recording a CUDA event instead so
-# the gather actually overlaps prefetch-window compute. ``_direct_unavailable`` latches
-# off the fast path (and logs once) if registration or the launch hook is missing.
+# Output-registration state. Registering the output bucket with mori's symmetric-memory
+# layer lets the SDMA kernel write straight into it.
 _registered_output_ptrs = set()
 _direct_unavailable = False
+
+def _direct_write_enabled(double_buffer: bool) -> bool:
+    """Whether to register + direct-write the output bucket for this gather.
+
+    Follows the FSDP double-buffer setting (safe lockstep registration).
+    """
+    return bool(double_buffer)
 
 # Dedicated stream for the SDMA all-gather kernels, created lazily. Mirrors how
 # ProcessGroupNCCL runs collectives on its own internal stream: by NOT running on the
@@ -99,16 +102,12 @@ _DEFAULT_MAX_NUMEL = 64 * 1024 * 1024
 class _SdmaWork:
     """Duck-type compatible with ``torch.distributed.Work``.
 
-    On the direct path the one-shot SDMA kernel (put + cross-rank wait + direct
-    write into the registered output bucket) is issued on the all-gather stream at
-    gather time and completion is captured by a CUDA event -- no host sync -- so the
-    gather runs concurrently with prefetch-window compute, the same way an async
-    RCCL collective overlaps. :meth:`wait` issues a stream-level ``wait_event`` and
-    never blocks the CPU, mirroring RCCL ``Work.wait()`` semantics so the FSDP
-    prefetch pipeline keeps queueing ahead.
-
-    (On the synchronous fallback path the event is recorded after mori's blocking
-    ``finish_sync`` has already completed the gather, so it is trivially signaled.)
+    The SDMA put + cross-rank wait kernels are issued on a dedicated stream and
+    completion is captured by a CUDA event, so the gather runs concurrently with
+    prefetch-window compute, the same way an async RCCL collective overlaps.
+    :meth:`wait` issues a stream-level ``wait_event`` and never blocks the CPU,
+    mirroring RCCL ``Work.wait()`` semantics so the FSDP prefetch pipeline keeps
+    queueing ahead.
     """
 
     def __init__(self, event):
@@ -142,28 +141,16 @@ def _register_group(group) -> None:
     torch._C._distributed_c10d._register_process_group(_PG_NAME, group)
 
 
-def _build_dtype_map():
-    """torch.dtype -> mori.ccl.DataType (NCCL-style enum)."""
-    from mori.ccl import DataType
-
-    return {
-        torch.uint8: DataType.Uint8,
-        torch.int8: DataType.Int8,
-        torch.int16: DataType.Int16,
-        torch.int32: DataType.Int32,
-        torch.int64: DataType.Int64,
-        torch.float16: DataType.Float16,
-        torch.bfloat16: DataType.BFloat16,
-        torch.float32: DataType.Float32,
-        torch.float64: DataType.Float64,
-    }
-
-
 def _create_sdma_handle(my_pe: int, npes: int, input_bytes: int):
-    """Construct the mori ``AllGatherIntoTensor`` SDMA all-gather handle."""
-    from mori.ccl import AllGatherIntoTensor
+    """Construct the mori ``AllgatherSdma`` SDMA all-gather handle.
 
-    return AllGatherIntoTensor(
+    ``AllgatherSdma`` operates on raw bytes (it gathers the input tensor as a
+    ``uint32`` byte stream), so no dtype enum is needed: the dispatcher accepts the
+    user tensors directly along with the element count.
+    """
+    from mori.ccl import AllgatherSdma
+
+    return AllgatherSdma(
         my_pe=my_pe,
         npes=npes,
         input_buffer_size=input_bytes,
@@ -181,7 +168,7 @@ def init(group, max_numel: int = _DEFAULT_MAX_NUMEL) -> None:
     leaves ``_handle`` unset and logs a single rank-0 info line, so callers
     transparently fall back to RCCL/NCCL.
     """
-    global _handle, _dtype_map, _max_numel, _bound_group, _init_attempted
+    global _handle, _max_numel, _bound_group, _init_attempted
     if _init_attempted:
         return
     _init_attempted = True
@@ -204,18 +191,16 @@ def init(group, max_numel: int = _DEFAULT_MAX_NUMEL) -> None:
         # uint32 lane width.
         input_bytes = max_numel * 4
         _handle = _create_sdma_handle(my_pe, npes, input_bytes)
-        _dtype_map = _build_dtype_map()
         _max_numel = max_numel
         _bound_group = group if group is not None else torch.distributed.group.WORLD
         log_single_rank(
             logger,
             logging.INFO,
-            f"Megatron FSDP SDMA allgather enabled via mori.ccl.AllGatherIntoTensor "
+            f"Megatron FSDP SDMA allgather enabled via mori.ccl.AllgatherSdma "
             f"(max_numel={max_numel})",
         )
     except Exception as e:  # noqa: BLE001 - best-effort, always fall back to RCCL
         _handle = None
-        _dtype_map = None
         _max_numel = 0
         _bound_group = None
         log_single_rank(
@@ -238,8 +223,10 @@ def supports(input_tensor: torch.Tensor, group=None) -> bool:
     - the backend is initialised (``_handle`` set),
     - the call is on the process group bound at init time (mori's shmem layer
       was bound to that group),
-    - the per-rank shard fits inside the pre-allocated transit buffer,
-    - the dtype is supported by mori's public dispatcher.
+    - the per-rank shard fits inside the pre-allocated transit buffer.
+
+    No dtype check is needed: ``AllgatherSdma`` gathers the tensor as a raw byte
+    stream, so any dtype is supported.
     """
     if _handle is None:
         return False
@@ -248,51 +235,44 @@ def supports(input_tensor: torch.Tensor, group=None) -> bool:
         return False
     if input_tensor.numel() > _max_numel:
         return False
-    if _dtype_map is None or input_tensor.dtype not in _dtype_map:
-        return False
     return True
 
 
-def _try_register_output(output_tensor: torch.Tensor) -> bool:
-    """Register the output bucket so the SDMA kernel can write into it directly.
+def _maybe_register_output(output_tensor: torch.Tensor, double_buffer: bool) -> None:
+    """Best-effort: register the output bucket with mori's symmetric-memory layer so
+    the SDMA kernel can write straight into it instead of copying through the transit
+    buffer.
 
-    Returns True when the direct (non-blocking) path is usable for this buffer.
+    This is purely an optimization -- the gather still works via the transit-buffer
+    copy path (``copy_output_to_user=True``) when registration is unavailable.
     Registration is done once per distinct output buffer pointer and cached; FSDP's
     double buffer reuses a small fixed set of bucket buffers, so this is cheap. Any
-    failure (registration unsupported on this build/runtime, or the launch hook
-    missing) latches ``_direct_unavailable`` so we stop trying and fall back to the
-    blocking synchronous path.
+    failure latches ``_direct_unavailable`` so we stop trying.
     """
     global _direct_unavailable
+    # The per-buffer registration is a cross-rank collective that deadlocks unless every
+    # rank registers the same buffers in lockstep, which only holds with the FSDP double
+    # buffer on (see ``_direct_write_enabled``). The transit-buffer copy path is correct
+    # without it.
+    if not _direct_write_enabled(double_buffer):
+        return
     if _direct_unavailable:
-        return False
-    if not hasattr(_handle, "launch_no_sync") or not hasattr(_handle, "register_output_buffer"):
-        _direct_unavailable = True
-        log_single_rank(
-            logger,
-            logging.INFO,
-            "Megatron FSDP SDMA direct launch hook unavailable; using synchronous "
-            "SDMA path (host-blocking, no compute overlap)",
-        )
-        return False
+        return
     ptr = output_tensor.data_ptr()
     if ptr in _registered_output_ptrs:
-        return True
+        return
     try:
-        size = output_tensor.numel() * output_tensor.element_size()
-        _handle.register_output_buffer(ptr, size)
+        if not _handle.is_output_registered(output_tensor):
+            _handle.register_output_buffer(output_tensor)
         _registered_output_ptrs.add(ptr)
-        return True
-    except Exception as e:  # noqa: BLE001 - fall back to the blocking path on any failure
+    except Exception as e:  # noqa: BLE001 - registration is optional; keep gathering
         _direct_unavailable = True
         log_single_rank(
             logger,
             logging.INFO,
             f"Megatron FSDP SDMA output registration unavailable "
-            f"({type(e).__name__}: {e}); using synchronous SDMA path "
-            f"(host-blocking, no compute overlap)",
+            f"({type(e).__name__}: {e}); using the transit-buffer copy path",
         )
-        return False
 
 
 def allgather_into_tensor(
@@ -301,25 +281,22 @@ def allgather_into_tensor(
     group=None,
     max_numel: int = _DEFAULT_MAX_NUMEL,
     serialize_after_stream: Optional["torch.cuda.Stream"] = None,
+    double_buffer: bool = False,
 ) -> Optional[_SdmaWork]:
-    """Issue one all_gather_into_tensor through the SDMA handle.
+    """Issue one all_gather_into_tensor through the mori ``AllgatherSdma`` handle.
 
-    Prefers the *direct, non-blocking* path: the output bucket is registered with
-    mori's symmetric-memory layer so the one-shot SDMA kernel writes straight into
-    it, the kernel is enqueued on the caller's stream via ``launch_no_sync`` (no
-    ``hipStreamSynchronize``), and a CUDA event captures completion. The CPU thread
-    returns immediately, so the gather overlaps prefetch-window compute and
-    ``_SdmaWork.wait()`` defers to a device-side ``wait_event``.
-
-    If the output cannot be registered (or the launch hook is missing), falls back
-    to mori's blocking ``__call__`` (``finish_sync`` -> ``hipStreamSynchronize``),
-    which is correct but serializes against compute.
+    The gather is driven on a dedicated SDMA stream via the async put/wait kernels
+    (``start_async`` + ``wait_async``), both enqueued on that stream so they overlap
+    prefetch-window compute on the main stream; a CUDA event captures completion and
+    ``_SdmaWork.wait()`` defers to a device-side ``wait_event``. The output bucket is
+    registered with mori's symmetric-memory layer when possible so the kernel can
+    write into it directly.
 
     Lazily initialises (bound to ``group``) on the first call. Returns an
     ``_SdmaWork`` (Work-compatible) on success, or ``None`` when SDMA is not
-    applicable (uninitialised, a group other than the bound group, dtype not
-    supported, shard larger than the transit buffer) or the call fails -- the
-    caller then falls back to ``torch.distributed.all_gather_into_tensor``.
+    applicable (uninitialised, a group other than the bound group, or shard larger
+    than the transit buffer) or the call fails -- the caller then falls back to
+    ``torch.distributed.all_gather_into_tensor``.
     """
     global _call_failed_warned, _sdma_stream, _needs_compute_sync
     if not _init_attempted:
@@ -351,28 +328,19 @@ def allgather_into_tensor(
             _sdma_stream.wait_stream(serialize_after_stream)
         sdma_stream = _sdma_stream
 
-        dtype = _dtype_map[input_tensor.dtype]
-        issued = False
-        if _try_register_output(output_tensor):
-            # Direct path: enqueue only; defer completion to the CUDA event below.
-            issued = _handle.launch_no_sync(
-                input_tensor.data_ptr(),
-                output_tensor.data_ptr(),
-                input_tensor.numel(),
-                dtype,
-                sdma_stream.cuda_stream,
-            )
-        if not issued:
-            # Blocking fallback (host-syncs inside finish_sync; no compute overlap).
-            ok = _handle(
-                input_tensor.data_ptr(),
-                output_tensor.data_ptr(),
-                input_tensor.numel(),
-                dtype,
-                sdma_stream.cuda_stream,
-            )
-            if not ok:
-                return None
+        # Best-effort direct-write registration of the output bucket (optional). Only
+        # safe with lockstep buffers (FSDP double buffer on); see _direct_write_enabled.
+        _maybe_register_output(output_tensor, double_buffer)
+
+        count = input_tensor.numel()
+        # Enqueue the async put + cross-rank wait kernels on the dedicated SDMA
+        # stream. They run in order on this stream and overlap compute on the main
+        # stream; the recorded event signals completion to _SdmaWork.wait().
+        if not _handle.start_async(
+            input_tensor, output_tensor, count, sdma_stream.cuda_stream
+        ):
+            return None
+        _handle.wait_async(sdma_stream.cuda_stream)
 
         # Keep the input shard and output bucket alive for the async stream and let
         # the caching allocator order any buffer reuse against this stream (the same

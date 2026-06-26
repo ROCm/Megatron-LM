@@ -3247,6 +3247,7 @@ class GradReducePipeline:
                             input=bucket.data,
                             op=reduce_op,
                             group=gbuf.data_parallel_group,
+                            async_op=True
                         )
                         reduced_grad.append(grad_shard)
                         grad_buffer.append(gbuf.get_shard_from_local_buffer())
@@ -3375,10 +3376,6 @@ class AllGatherPipeline:
         self.rs_stream = rs_stream
         # Track the status of all-gather operations for each bucket.
         self.param_gather_event_map = {}
-        # Track bucket keys whose all-gather was issued through the mori SDMA backend.
-        # These carry their own stream-event Work and must not be overwritten by the
-        # NCCL/RCCL coalescing event in `all_gather_params`.
-        self._sdma_bucket_keys = set()
         # All buckets are initially deallocated / empty after initialization of ParamAndGradBuffer.
         self.bucket_status = {}
         for i in range(self.buffer.num_buckets):
@@ -3611,31 +3608,29 @@ class AllGatherPipeline:
                 # Wait for the outer-DP group all-gather to finish.
                 all_gather_stream.wait_stream(self.outer_fsdp_group_param_gather_stream)
 
-            # Coalesce the asynchronous NCCL operations in this context.
             all_gather_stream.wait_stream(torch.cuda.current_stream())
             dp_group = self.get_fsdp_buffer(buckets[0]).data_parallel_group
-            with torch.cuda.stream(all_gather_stream):
-                with _coalescing_manager(
-                    dp_group, async_ops=async_param_gather
-                ) as coalescing_event:
+            if getattr(self.buffer.ddp_config, "enable_mori_sdma_ag", False):
+                # Try to route each bucket's all-gather through the mori SDMA backend.
+                # SDMA runs on its own dedicated stream and is not an NCCL/RCCL
+                # collective, so it must not be issued under the coalescing manager.
+                # Any bucket that SDMA cannot service (unsupported / oversized shard,
+                # or a backend failure) falls back to the original coalesced RCCL/NCCL
+                # path below, so the fallback keeps its collective coalescing.
+                fallback_buckets = []
+                with torch.cuda.stream(all_gather_stream):
                     for bucket_id in buckets:
-                        # All-gather the module weights from each FSDP buffer shard
-                        # into an allocated bucket containing unsharded weights.
-                        self.async_bucket_gather(bucket_id, bwd)
-
-            # Replace the parameter all-gather event with coalescing event.
-            for bucket_id in buckets:
-                bucket_key = self.get_bucket_key(bucket_id, bwd)
-                if bucket_key in self._sdma_bucket_keys:
-                    # SDMA buckets carry their own stream-event Work (not an NCCL/RCCL
-                    # collective), so they are not tracked by the coalescing manager.
-                    # Keep their existing event and clear the marker.
-                    self._sdma_bucket_keys.discard(bucket_key)
-                    continue
-                _, mark_bucket_ready_to_use = self.param_gather_event_map[bucket_key]
-                self.param_gather_event_map[bucket_key] = (
-                    coalescing_event,
-                    mark_bucket_ready_to_use,
+                        # mori's all-gather never raises; a False return (None result)
+                        # is the signal to fall back to the coalesced RCCL/NCCL path.
+                        if not self._try_bucket_gather_via_sdma(bucket_id, bwd):
+                            fallback_buckets.append(bucket_id)
+                # Fallback buckets go through the original coalesced RCCL/NCCL path.
+                self._coalesced_bucket_gather(
+                    fallback_buckets, dp_group, all_gather_stream, async_param_gather, bwd
+                )
+            else:
+                self._coalesced_bucket_gather(
+                    buckets, dp_group, all_gather_stream, async_param_gather, bwd
                 )
 
         # Wait for all-gather to finish
@@ -3732,13 +3727,20 @@ class AllGatherPipeline:
         else:
             return param_group.model_weight_buffer
 
+    def _mark_bucket_ready_closure(self, bucket_id, bwd):
+        """Return a closure that marks the bucket ready once its comm completes."""
+
+        @torch.no_grad()
+        def mark_bucket_ready_to_use():
+            # Mark the bucket as ready to use - all comm operations are complete.
+            self.bucket_status[self.get_bucket_key(bucket_id, bwd)] = BucketStatus.READY_TO_USE
+
+        return mark_bucket_ready_to_use
+
     @torch.no_grad()
     def async_bucket_gather(self, bucket_id, bwd) -> None:
         """All-gather the bucket and set the items."""
         bucket_key = self.get_bucket_key(bucket_id, bwd)
-
-        # Reset any stale SDMA marker so the set reflects only the current gather.
-        self._sdma_bucket_keys.discard(bucket_key)
 
         self.bucket_can_be_released[bucket_key] = False
         if self.bucket_status[bucket_key] != BucketStatus.EMPTY:
@@ -3754,53 +3756,110 @@ class AllGatherPipeline:
         bucket = wbuf.fetch_bucket(set_param_data=True)
         # All-gather the module weights in each buffer shard into the allocated bucket.
         # Now each rank will have a copy of this FSDP unit module's weights.
-        input_shard = wbuf.get_shard_from_local_buffer()
-        param_gather_event = None
-        if getattr(self.buffer.ddp_config, "enable_mori_sdma_ag", False):
-            # Try the mori SDMA backend (intra-node System DMA copy).
-            # Returns None whenever SDMA is not applicable (mori unavailable, dtype
-            # unsupported, shard too large, or a group other than the one bound at init),
-            # in which case we transparently fall back to RCCL/NCCL below.
-            max_numel = getattr(
-                self.buffer.ddp_config, "mori_sdma_ag_max_numel", 64 * 1024 * 1024
-            )
-            if input_shard.numel() <= max_numel:
-                param_gather_event = mori_sdma.allgather_into_tensor(
-                    input_tensor=input_shard,
-                    output_tensor=bucket.data,
-                    group=wbuf.data_parallel_group,
-                    max_numel=max_numel,
-                    # In backward, keep the SDMA gather from co-running with the NCCL
-                    # reduce-scatter (HBM-bandwidth contention slows RS onto the
-                    # critical path). No-op in forward (no RS in flight).
-                    serialize_after_stream=(self.rs_stream if bwd else None),
-                )
-            if param_gather_event is not None:
-                # SDMA work carries its own stream-event; exclude it from coalescing.
-                self._sdma_bucket_keys.add(bucket_key)
-        if param_gather_event is None:
-            param_gather_event = torch.distributed.all_gather_into_tensor(
-                output_tensor=bucket.data,
-                input_tensor=input_shard,
-                group=wbuf.data_parallel_group,
-                async_op=True,
-            )
-
-        def get_closure(bucket_id, bwd):
-            @torch.no_grad()
-            def mark_bucket_ready_to_use():
-                # Mark the bucket as ready to use - all NCCL operations are complete.
-                self.bucket_status[self.get_bucket_key(bucket_id, bwd)] = BucketStatus.READY_TO_USE
-
-            return mark_bucket_ready_to_use
-
-        mark_bucket_ready_to_use = get_closure(bucket_id, bwd)
+        param_gather_event = torch.distributed.all_gather_into_tensor(
+            output_tensor=bucket.data,
+            input_tensor=wbuf.get_shard_from_local_buffer(),
+            group=wbuf.data_parallel_group,
+            async_op=True,
+        )
 
         # Track the async all-gather operation for the bucket.
         self.param_gather_event_map[self.get_bucket_key(bucket_id, bwd)] = (
             param_gather_event,
-            mark_bucket_ready_to_use,
+            self._mark_bucket_ready_closure(bucket_id, bwd),
         )
+
+    @torch.no_grad()
+    def _try_bucket_gather_via_sdma(self, bucket_id, bwd) -> bool:
+        """Attempt to all-gather a bucket through the mori SDMA backend.
+
+        Returns True if the gather was issued via SDMA and recorded in
+        ``param_gather_event_map``. Returns False if SDMA is not applicable for this
+        bucket (mori unavailable, unsupported dtype/group, oversized shard, or a
+        backend failure), undoing the bucket allocation and leaving it EMPTY so the
+        caller can safely fall back to the coalesced RCCL/NCCL path.
+        """
+        bucket_key = self.get_bucket_key(bucket_id, bwd)
+
+        self.bucket_can_be_released[bucket_key] = False
+        if self.bucket_status[bucket_key] != BucketStatus.EMPTY:
+            # Already allocated / in flight; nothing to gather.
+            return True
+
+        self.bucket_status[bucket_key] = BucketStatus.COMMUNICATING
+
+        wbuf = self.get_fsdp_buffer(bucket_id, bwd)
+
+        # Lazy release the unused buckets.
+        self.recycle_unused_buckets()
+        # Allocate an empty bucket to store the module weights.
+        bucket = wbuf.fetch_bucket(set_param_data=True)
+        input_shard = wbuf.get_shard_from_local_buffer()
+
+        def _undo_allocation():
+            # Free the just-allocated bucket and mark it EMPTY so the caller can fall
+            # back to the coalesced RCCL/NCCL path.
+            wbuf.free_bucket_storage()
+            self.bucket_status[bucket_key] = BucketStatus.EMPTY
+
+        max_numel = getattr(self.buffer.ddp_config, "mori_sdma_ag_max_numel", 64 * 1024 * 1024)
+        if input_shard.numel() > max_numel:
+            # Shard is too large for the SDMA transit buffer; fall back.
+            _undo_allocation()
+            return False
+
+        # mori's allgather_into_tensor is best-effort: it catches all backend errors
+        # internally and returns None (it never raises), so a None result is the single
+        # signal to fall back to RCCL/NCCL. It returns None whenever SDMA is not
+        # applicable (mori unavailable, dtype unsupported, a group other than the one
+        # bound at init) or the backend fails.
+        param_gather_event = mori_sdma.allgather_into_tensor(
+            input_tensor=input_shard,
+            output_tensor=bucket.data,
+            group=wbuf.data_parallel_group,
+            max_numel=max_numel,
+            # In backward, keep the SDMA gather from co-running with the NCCL
+            # reduce-scatter (HBM-bandwidth contention slows RS onto the critical
+            # path). No-op in forward (no RS in flight).
+            serialize_after_stream=(self.rs_stream if bwd else None),
+        )
+        if param_gather_event is None:
+            _undo_allocation()
+            return False
+
+        # Track the async SDMA all-gather operation for the bucket.
+        self.param_gather_event_map[bucket_key] = (
+            param_gather_event,
+            self._mark_bucket_ready_closure(bucket_id, bwd),
+        )
+        return True
+
+    def _coalesced_bucket_gather(
+        self, buckets, dp_group, all_gather_stream, async_param_gather, bwd
+    ) -> None:
+        """Issue a coalesced RCCL/NCCL all-gather for ``buckets`` and point each
+        bucket's tracked event at the shared coalescing event."""
+        if len(buckets) == 0:
+            return
+
+        # Coalesce the asynchronous NCCL operations in this context.
+        with torch.cuda.stream(all_gather_stream):
+            with _coalescing_manager(
+                dp_group, async_ops=async_param_gather
+            ) as coalescing_event:
+                for bucket_id in buckets:
+                    # All-gather the module weights from each FSDP buffer shard
+                    # into an allocated bucket containing unsharded weights.
+                    self.async_bucket_gather(bucket_id, bwd)
+
+        # Replace the parameter all-gather event with coalescing event.
+        for bucket_id in buckets:
+            bucket_key = self.get_bucket_key(bucket_id, bwd)
+            _, mark_bucket_ready_to_use = self.param_gather_event_map[bucket_key]
+            self.param_gather_event_map[bucket_key] = (
+                coalescing_event,
+                mark_bucket_ready_to_use,
+            )
 
 
 @torch.no_grad()

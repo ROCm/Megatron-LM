@@ -523,6 +523,233 @@ class TestFullyShardedDataParallel:
             )
 
 
+@pytest.mark.test_on_rocm
+class TestMegatronFSDPMoriSDMA:
+    """Compare the MORI SDMA all-gather backend against the RCCL/NCCL baseline.
+
+    This is intentionally NOT marked flaky / flaky_in_dev: the MORI SDMA path only
+    changes how parameters are all-gathered (a pure copy collective), so it must be
+    numerically equivalent to the RCCL/NCCL baseline. On platforms where mori is
+    unavailable (e.g. NVIDIA/CI) the backend transparently falls back to RCCL/NCCL,
+    in which case the comparison is trivially exact.
+
+    Coverage notes:
+    - model_type "linear" exercises a plain ``torch.nn.Linear`` unit, while
+      "te_transformer" exercises ``transformer_engine`` ``TransformerLayer`` units,
+      which is what real models actually shard.
+    - fsdp_double_buffer is parametrized because the SDMA direct-write registration
+      path is gated on ``fsdp_double_buffer`` (with non-empty ``fsdp_unit_modules``),
+      so both buffering modes must be validated against the baseline.
+    """
+
+    @classmethod
+    def setup_class(cls):
+        Utils.initialize_model_parallel()
+
+    @classmethod
+    def teardown_class(cls):
+        Utils.destroy_model_parallel()
+
+    @staticmethod
+    def _build_model_units_and_input(model_type):
+        """Build a (model, fsdp_unit_modules, input_tensor) tuple for the given type.
+
+        TE-based models are skipped gracefully when transformer_engine is unavailable.
+        """
+        if model_type == "linear":
+            input_dim = 13
+            output_dim = 17
+            model = TestModel(input_dim=input_dim, output_dim=output_dim).cuda()
+            unit_modules = [torch.nn.Linear]
+            input_data = torch.randint(
+                0, 10, (2, input_dim), device="cuda", dtype=torch.long
+            ).float()
+            return model, unit_modules, input_data
+
+        if model_type == "te_transformer":
+            te = pytest.importorskip(
+                "transformer_engine", reason="transformer_engine is required for TE FSDP units"
+            )
+
+            hidden_dim = 16
+            num_heads = 2
+            num_layers = 2
+            seq_len = 4
+            batch_size = 2
+
+            class _ToyTETransformer(torch.nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.layers = torch.nn.ModuleList(
+                        [
+                            te.pytorch.TransformerLayer(
+                                hidden_size=hidden_dim,
+                                ffn_hidden_size=hidden_dim,
+                                num_attention_heads=num_heads,
+                                # Disable dropout so the only difference between the
+                                # baseline and target is the all-gather backend; otherwise
+                                # the two model instances draw independent dropout masks and
+                                # diverge even though weights/inputs are identical.
+                                hidden_dropout=0.0,
+                                attention_dropout=0.0,
+                                params_dtype=torch.float32,
+                                device="cuda",
+                            )
+                            for _ in range(num_layers)
+                        ]
+                    )
+                    self.fc_out = te.pytorch.Linear(
+                        hidden_dim, hidden_dim, params_dtype=torch.float32, device="cuda"
+                    )
+
+                def forward(self, x):
+                    for layer in self.layers:
+                        x = layer(x)
+                    return self.fc_out(x)
+
+            model = _ToyTETransformer().cuda()
+            unit_modules = [te.pytorch.TransformerLayer]
+            input_data = torch.randn(seq_len, batch_size, hidden_dim, device="cuda")
+            return model, unit_modules, input_data
+
+        raise ValueError(f"Unknown model_type: {model_type}")
+
+    @pytest.mark.skipif(
+        version.parse(torch.__version__) < version.parse('2.3.0'),
+        reason="Device mesh feature requires PyTorch 2.3 or later",
+    )
+    @pytest.mark.parametrize("dp_size", [8])
+    @pytest.mark.parametrize("fsdp_double_buffer", [False, True])
+    @pytest.mark.parametrize("model_type", ["linear", "te_transformer"])
+    def test_mori_sdma_matches_rccl_baseline(self, model_type, fsdp_double_buffer, dp_size):
+        """MORI SDMA all-gather must match the RCCL/NCCL baseline across model types
+        and both single-buffer and double-buffer configurations."""
+        if not is_torch_min_version("2.4.0"):
+            pytest.skip("Megatron FSDP requires torch >= 2.4.0")
+
+        # Initialize torch.distributed if not already initialized
+        if not torch.distributed.is_initialized():
+            torch.distributed.init_process_group(backend='nccl')
+
+        # Skip test if we don't have enough GPUs
+        world_size = torch.distributed.get_world_size()
+        if world_size != dp_size:
+            pytest.skip(f"This test requires {dp_size} GPUs, but only {world_size} are available")
+
+        def make_fsdp_config(enable_mori_sdma_ag):
+            return DistributedDataParallelConfig(
+                data_parallel_sharding_strategy="optim_grads_params",
+                overlap_grad_reduce=True,
+                overlap_param_gather=True,
+                bucket_size=10000,
+                use_megatron_fsdp=True,
+                fsdp_double_buffer=fsdp_double_buffer,
+                enable_mori_sdma_ag=enable_mori_sdma_ag,
+            )
+
+        # Baseline uses RCCL/NCCL all-gather; target uses the MORI SDMA all-gather backend.
+        baseline_fsdp_config = make_fsdp_config(enable_mori_sdma_ag=False)
+        target_fsdp_config = make_fsdp_config(enable_mori_sdma_ag=True)
+
+        # Create two identical models (same architecture, then copy weights).
+        baseline_model, unit_modules, input_data = self._build_model_units_and_input(model_type)
+        target_model, _, _ = self._build_model_units_and_input(model_type)
+        for p1, p2 in zip(baseline_model.parameters(), target_model.parameters()):
+            p2.data.copy_(p1.data)
+
+        transformer_config = TransformerConfig(
+            num_attention_heads=1, num_layers=1, context_parallel_size=1  # Explicitly set CP=1
+        )
+        baseline_fsdp_model = FullyShardedDataParallel(
+            config=transformer_config,
+            ddp_config=baseline_fsdp_config,
+            module=baseline_model,
+            fsdp_unit_modules=unit_modules,
+        )
+        target_fsdp_model = FullyShardedDataParallel(
+            config=transformer_config,
+            ddp_config=target_fsdp_config,
+            module=target_model,
+            fsdp_unit_modules=unit_modules,
+        )
+
+        # Create optimizer config
+        lr = 3
+        optimizer_config = OptimizerConfig(optimizer="adam", lr=lr)
+        grad_scaler = None
+
+        baseline_optimizer = DistributedOptimizer(
+            optimizer=None,
+            config=optimizer_config,
+            grad_scaler=grad_scaler,
+            init_state_fn=None,
+            model_chunks=[baseline_fsdp_model],
+            per_model_buffers={0: [baseline_fsdp_model.param_and_grad_buffer]},
+            data_parallel_group=baseline_fsdp_model.megatron_fsdp_dist_index.get_dp_group(),
+            data_parallel_group_gloo=None,
+            data_parallel_group_idx=0,
+            distributed_optimizer_instance_id=0,
+        )
+        target_optimizer = DistributedOptimizer(
+            optimizer=None,
+            config=optimizer_config,
+            grad_scaler=grad_scaler,
+            init_state_fn=None,
+            model_chunks=[target_fsdp_model],
+            per_model_buffers={0: [target_fsdp_model.param_and_grad_buffer]},
+            data_parallel_group=target_fsdp_model.megatron_fsdp_dist_index.get_dp_group(),
+            data_parallel_group_gloo=None,
+            data_parallel_group_idx=0,
+            distributed_optimizer_instance_id=1,
+        )
+
+        input_data.requires_grad = True
+
+        def loss_fn(output, _):
+            return output.sum()
+
+        def train_step(model, optimizer, inputs):
+            inputs_clone = inputs.clone().detach().requires_grad_(True)
+            optimizer.zero_grad()
+            outputs = model(inputs_clone)
+            loss = loss_fn(outputs, None)
+            loss.backward()
+            optimizer.step()
+            return outputs, loss
+
+        out_baseline, loss_baseline = train_step(
+            baseline_fsdp_model, baseline_optimizer, input_data
+        )
+        out_target, loss_target = train_step(target_fsdp_model, target_optimizer, input_data)
+
+        # The all-gather backend is the only difference; the gathered params and the
+        # compute kernels are identical, so results should match the baseline. TE kernels
+        # can use non-deterministic atomics in the backward pass, so allow a small
+        # tolerance for TE models while keeping the linear path exact.
+        if model_type == "linear":
+            atol, rtol = 0, 0
+        else:
+            atol, rtol = 1e-4, 1e-4
+
+        testing.assert_close(out_target, out_baseline, rtol=rtol, atol=atol)
+        testing.assert_close(loss_target, loss_baseline, rtol=rtol, atol=atol)
+
+        baseline_fsdp_model.stop_communication()
+        target_fsdp_model.stop_communication()
+
+        # Check parameters after optimization step match the RCCL/NCCL baseline.
+        for (name1, param1), (_, param2) in zip(
+            baseline_fsdp_model.named_parameters(), target_fsdp_model.named_parameters()
+        ):
+            testing.assert_close(
+                param1._local_tensor,
+                param2._local_tensor,
+                rtol=rtol,
+                atol=atol,
+                msg=f"Parameters for {name1} don't match the RCCL/NCCL baseline",
+            )
+
+
 @pytest.fixture(scope="class")
 def ref_cache():
     """
