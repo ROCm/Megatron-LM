@@ -17,6 +17,14 @@ class DistributedDataParallelConfig:
     overlap_param_gather: bool = False
     """If true, overlap param all-gather with forward compute."""
 
+    use_mori_sdma_all_gather: bool = False
+    """If true, use MORI's SDMA copy engines for the parameter all-gather instead of
+       torch.distributed.all_gather_into_tensor. This offloads the intra-node all-gather to
+       the GPU DMA engines, freeing compute units. SDMA all-gather is intra-node only; whenever
+       it cannot apply (multi-node all-gather group, oversized bucket, or unsupported dtype), the
+       implementation automatically falls back to torch.distributed.all_gather_into_tensor and
+       emits a one-time warning. Requires the `mori` package and AMD SDMA-capable GPUs."""
+
     align_param_gather: bool = False
     """If true, all PP stages will launch param all-gathers simultaneously. Otherwise, each
     PP stage will independently launch as needed.

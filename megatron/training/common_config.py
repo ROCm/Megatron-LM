@@ -33,7 +33,7 @@ class ProfilingConfig:
     profile_step_start: int = 10
     """Global step to start profiling."""
 
-    profile_step_end: int = 12
+    profile_step_end: int = 11
     """Global step to stop profiling."""
 
     use_pytorch_profiler: bool = False

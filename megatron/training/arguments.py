@@ -2444,6 +2444,12 @@ def _add_distributed_args(parser):
                    'to overlap reduce-scatter and all-gather operations.')
     group.add_argument('--use-megatron-fsdp', action='store_true',
                        help='Use the Megatron FSDP code path in DDP.')
+    group.add_argument('--use-mori-sdma-all-gather', action='store_true',
+                       dest='use_mori_sdma_all_gather', default=False,
+                       help='Use MORI SDMA copy engines for the Megatron-FSDP parameter all-gather '
+                       '(intra-node only; automatically falls back to '
+                       'torch.distributed.all_gather_into_tensor when not applicable). '
+                       'Requires the `mori` package and AMD SDMA-capable GPUs.')
     group.add_argument('--data-parallel-sharding-strategy', type=str, default='no_shard',
                        choices=['no_shard', 'optim', 'optim_grads', 'optim_grads_params'],
                        help='Sharding strategy of data parallelism.')

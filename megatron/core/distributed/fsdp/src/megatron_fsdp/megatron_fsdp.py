@@ -366,9 +366,25 @@ class MegatronFSDP(torch.nn.Module):
             self.param_and_grad_buffer, rs_stream=self.side_stream_for_buffer_copy_and_grad_accum
         )
 
+        # Optionally build the MORI SDMA all-gather backend (intra-node only; auto-falls back to
+        # torch.distributed.all_gather_into_tensor when it cannot apply).
+        mori_sdma = None
+        if (
+            self.ddp_config.use_mori_sdma_all_gather
+            and self.data_parallel_sharding_strategy != "no_shard"
+        ):
+            from .mori_sdma import MoriSdmaAllGather
+
+            ag_group = self.dist_index.get_fsdp_group(independent_all_gather=True)
+            if ag_group is None:
+                ag_group = self.dist_index.get_dp_group()
+            mori_sdma = MoriSdmaAllGather(ag_group)
+
         # Initialize the all-gather pipeline.
         self.all_gather_pipeline = AllGatherPipeline(
-            self.param_and_grad_buffer, ag_stream=self.side_stream_for_param_gather
+            self.param_and_grad_buffer,
+            ag_stream=self.side_stream_for_param_gather,
+            mori_sdma=mori_sdma,
         )
 
         # Set the suggested communication unit size for reduce-scatter and all-gather pipelines.

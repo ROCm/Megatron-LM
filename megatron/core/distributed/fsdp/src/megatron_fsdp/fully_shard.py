@@ -98,6 +98,7 @@ def fully_shard_model(
     fsdp_double_buffer: bool = False,
     disable_symmetric_registration: bool = False,
     enable_fine_grained_param_gather: bool = False,
+    use_mori_sdma_all_gather: bool = False,
 ) -> torch.nn.Module:
     """
     Fully-shard the model for Megatron-FSDP. This wraps the model in a MegatronFSDP
@@ -241,6 +242,15 @@ def fully_shard_model(
             unshards parameters per-Module instead of unsharding all sub-modules of an FSDP
             unit module simultaneously. Defaults to False.
 
+        use_mori_sdma_all_gather (bool):
+            Whether to use MORI's SDMA copy engines for the parameter all-gather instead of
+            torch.distributed.all_gather_into_tensor. Offloads the intra-node all-gather to the
+            GPU DMA engines, freeing compute units. SDMA all-gather is intra-node only;
+            non-applicable cases (multi-node all-gather group, oversized bucket, unsupported
+            dtype) automatically fall back to torch.distributed.all_gather_into_tensor with a
+            one-time warning. Requires the `mori` package and AMD SDMA-capable GPUs.
+            Defaults to False.
+
     Returns:
         model (MegatronFSDP): The wrapped Megatron-FSDP model configured for FSDP.
     """
@@ -337,6 +347,7 @@ def fully_shard_model(
         fsdp_double_buffer=fsdp_double_buffer or nccl_ub,
         disable_symmetric_registration=disable_symmetric_registration,
         check_for_nan_in_grad=check_for_nan_in_grad,
+        use_mori_sdma_all_gather=use_mori_sdma_all_gather,
     )
 
     # Create FSDPDistributedIndex.
@@ -542,6 +553,7 @@ def fully_shard(
     fsdp_double_buffer: bool = False,
     disable_symmetric_registration: bool = False,
     enable_fine_grained_param_gather: bool = False,
+    use_mori_sdma_all_gather: bool = False,
 ) -> tuple[MegatronFSDP, torch.optim.Optimizer]:
     """
     Fully shard the model and the optimizer for Megatron-FSDP.
@@ -589,6 +601,7 @@ def fully_shard(
         fsdp_double_buffer=fsdp_double_buffer,
         disable_symmetric_registration=disable_symmetric_registration,
         enable_fine_grained_param_gather=enable_fine_grained_param_gather,
+        use_mori_sdma_all_gather=use_mori_sdma_all_gather,
     )
 
     # Extend optimizer methods to support Megatron-FSDP operations.

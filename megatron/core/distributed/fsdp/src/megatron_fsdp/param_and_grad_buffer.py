@@ -26,7 +26,7 @@ import warnings
 from collections import defaultdict, namedtuple
 from contextlib import ExitStack, nullcontext
 from enum import Enum
-from typing import Any, Callable, Dict, List, Optional, Tuple, cast
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple, cast
 
 import torch
 from torch.distributed import _coalescing_manager
@@ -55,6 +55,9 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from .mori_sdma import MoriSdmaAllGather
 
 
 try:
@@ -3363,9 +3366,13 @@ class AllGatherPipeline:
         self,
         param_and_grad_buffer: ParamAndGradBuffer,
         ag_stream: Optional[torch.cuda.Stream] = None,
+        mori_sdma: Optional["MoriSdmaAllGather"] = None,
     ) -> None:
         self.buffer = param_and_grad_buffer
         self.ag_stream = ag_stream
+        # Optional MORI SDMA all-gather backend. When set and applicable, the parameter all-gather
+        # is offloaded to the GPU DMA engines; otherwise per-bucket fallback to torch.distributed.
+        self.mori_sdma = mori_sdma
         # Track the status of all-gather operations for each bucket.
         self.param_gather_event_map = {}
         # All buckets are initially deallocated / empty after initialization of ParamAndGradBuffer.
@@ -3603,23 +3610,34 @@ class AllGatherPipeline:
             # Coalesce the asynchronous NCCL operations in this context.
             all_gather_stream.wait_stream(torch.cuda.current_stream())
             dp_group = self.get_fsdp_buffer(buckets[0]).data_parallel_group
-            with torch.cuda.stream(all_gather_stream):
-                with _coalescing_manager(
-                    dp_group, async_ops=async_param_gather
-                ) as coalescing_event:
+            if self.mori_sdma is not None:
+                # The MORI SDMA backend does not use NCCL coalescing. Each bucket records its own
+                # per-bucket completion event inside async_bucket_gather (SDMA event, or a fallback
+                # torch.distributed Work handle), so we issue the gathers directly on the all-gather
+                # stream and leave those per-bucket events in place.
+                with torch.cuda.stream(all_gather_stream):
                     for bucket_id in buckets:
                         # All-gather the module weights from each FSDP buffer shard
                         # into an allocated bucket containing unsharded weights.
                         self.async_bucket_gather(bucket_id, bwd)
+            else:
+                with torch.cuda.stream(all_gather_stream):
+                    with _coalescing_manager(
+                        dp_group, async_ops=async_param_gather
+                    ) as coalescing_event:
+                        for bucket_id in buckets:
+                            # All-gather the module weights from each FSDP buffer shard
+                            # into an allocated bucket containing unsharded weights.
+                            self.async_bucket_gather(bucket_id, bwd)
 
-            # Replace the parameter all-gather event with coalescing event.
-            for bucket_id in buckets:
-                bucket_key = self.get_bucket_key(bucket_id, bwd)
-                _, mark_bucket_ready_to_use = self.param_gather_event_map[bucket_key]
-                self.param_gather_event_map[bucket_key] = (
-                    coalescing_event,
-                    mark_bucket_ready_to_use,
-                )
+                # Replace the parameter all-gather event with coalescing event.
+                for bucket_id in buckets:
+                    bucket_key = self.get_bucket_key(bucket_id, bwd)
+                    _, mark_bucket_ready_to_use = self.param_gather_event_map[bucket_key]
+                    self.param_gather_event_map[bucket_key] = (
+                        coalescing_event,
+                        mark_bucket_ready_to_use,
+                    )
 
         # Wait for all-gather to finish
         if not async_param_gather:
@@ -3734,12 +3752,23 @@ class AllGatherPipeline:
         bucket = wbuf.fetch_bucket(set_param_data=True)
         # All-gather the module weights in each buffer shard into the allocated bucket.
         # Now each rank will have a copy of this FSDP unit module's weights.
-        param_gather_event = torch.distributed.all_gather_into_tensor(
-            output_tensor=bucket.data,
-            input_tensor=wbuf.get_shard_from_local_buffer(),
-            group=wbuf.data_parallel_group,
-            async_op=True,
-        )
+        shard = wbuf.get_shard_from_local_buffer()
+        param_gather_event = None
+        if self.mori_sdma is not None:
+            # Try the MORI SDMA backend on the current (all-gather) stream. Returns None to signal
+            # fallback when SDMA cannot apply (multi-node group, oversized bucket, unsupported dtype).
+            param_gather_event = self.mori_sdma.all_gather_into_tensor(
+                output_tensor=bucket.data,
+                input_tensor=shard,
+                stream=torch.cuda.current_stream(),
+            )
+        if param_gather_event is None:
+            param_gather_event = torch.distributed.all_gather_into_tensor(
+                output_tensor=bucket.data,
+                input_tensor=shard,
+                group=wbuf.data_parallel_group,
+                async_op=True,
+            )
 
         def get_closure(bucket_id, bwd):
             @torch.no_grad()

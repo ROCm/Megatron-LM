@@ -125,6 +125,7 @@ EVAL_ITERS="${EVAL_ITERS:-'-1'}"
 CKPT_FORMAT="${CKPT_FORMAT:-torch}"
 DATA_CACHE_PATH="${DATA_CACHE_PATH:-/root/cache}"
 MEGATRON_FSDP="${MEGATRON_FSDP:-0}"
+MORI_SDMA_AG="${MORI_SDMA_AG:-0}"
 FP8_PARAM_GATHER="${FP8_PARAM_GATHER:-0}"
 FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
 ENABLE_HSDP="${ENABLE_HSDP:-0}"
@@ -468,12 +469,19 @@ else
 fi
 
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params"
     
     if [ "$ENABLE_HSDP" -eq 1 ]; then
         echo "Megatron HSDP is enabled with $HSDP_NUM_REPLICAS DP outer replicas"
         EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_REPLICAS"
     fi
+
+    if [ "$MORI_SDMA_AG" -eq 1 ]; then
+        echo "MORI SDMA all-gather is enabled for Megatron-FSDP (intra-node only; auto-falls back to RCCL)"
+        EXTRA_ARGS="$EXTRA_ARGS --use-mori-sdma-all-gather"
+    fi
+elif [ "$MORI_SDMA_AG" -eq 1 ]; then
+    echo "Warning: MORI_SDMA_AG=1 requires MEGATRON_FSDP=1; ignoring MORI SDMA all-gather."
 fi
 
 # DP-comm toggle -> EXTRA_ARGS ('distributed' arg group in arguments.py, alongside --overlap-grad-reduce)
