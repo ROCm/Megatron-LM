@@ -386,6 +386,10 @@ class MegatronFSDP(torch.nn.Module):
             ag_stream=self.side_stream_for_param_gather,
             mori_sdma=mori_sdma,
         )
+        # Give the all-gather pipeline a handle to the reduce-scatter pipeline so the SDMA
+        # all-gather always serializes behind reduce-scatter, avoiding XGMI bandwidth contention
+        # between SDMA copies and RCCL reduce-scatter.
+        self.all_gather_pipeline.grad_reduce_pipeline = self.grad_reduce_pipeline
 
         # Set the suggested communication unit size for reduce-scatter and all-gather pipelines.
         suggested_communication_unit_size = self.ddp_config.suggested_communication_unit_size

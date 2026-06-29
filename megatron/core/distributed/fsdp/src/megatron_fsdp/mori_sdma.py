@@ -178,6 +178,37 @@ class MoriSdmaAllGather:
             self._handle_capacity[dtype] = shard_bytes
         return self._handles[dtype]
 
+    def presize(self, full_bucket_numel_by_dtype: Dict[torch.dtype, int]) -> None:
+        """Pre-build the per-dtype handles sized to the largest bucket up front.
+
+        ``_get_handle`` otherwise grows (re-creates) the handle the first time a larger shard
+        appears, which tears down the (multi-hundred-MB) transit buffers and rebuilds bigger ones.
+        Sizing each handle to the maximum bucket here makes the handle stable for the whole run.
+
+        ``full_bucket_numel_by_dtype`` maps dtype -> largest *unsharded* bucket element count. That
+        value is identical on every rank (it is the full bucket size, not the per-rank shard), so
+        the underlying symmetric allocations are built collectively with matching sizes. We process
+        dtypes in a stable (sorted) order for the same reason.
+        """
+        if not self.active:
+            return
+        for dtype in sorted(full_bucket_numel_by_dtype, key=str):
+            if dtype not in _SUPPORTED_DTYPES:
+                continue
+            full_numel = full_bucket_numel_by_dtype[dtype]
+            if not full_numel or full_numel <= 0:
+                continue
+            # Upper bound on the per-rank shard (ceil-divide); >= every rank's actual shard.
+            shard_numel = (full_numel + self.npes - 1) // self.npes
+            try:
+                self._get_handle(dtype, shard_numel)
+            except Exception as exc:  # pragma: no cover - environment dependent
+                self._warn_once(
+                    "presize_failed",
+                    f"MORI SDMA handle pre-sizing failed for dtype {dtype} ({exc}); "
+                    "handles will be built lazily on first use instead.",
+                )
+
     @torch.no_grad()
     def all_gather_into_tensor(
         self,
@@ -220,8 +251,8 @@ class MoriSdmaAllGather:
             handle = self._get_handle(dtype, shard_numel)
             # Enqueue PUT (input -> peers' transit buffers) on the all-gather stream.
             handle.start_async(input_tensor, output_tensor, shard_numel, stream=stream)
-            # Enqueue the wait kernel + transit->user copy on the same stream; blocking=False means
-            # the host does NOT synchronize - only GPU work is enqueued.
+            # Enqueue the wait kernel and the transit->user copy on the same stream;
+            # blocking=False means the host does NOT synchronize - only GPU work is enqueued.
             handle.wait_async(stream=stream, blocking=False)
         except Exception as exc:  # pragma: no cover - environment dependent
             self._warn_once(
