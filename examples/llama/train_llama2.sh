@@ -473,8 +473,18 @@ else
     run_cmd="$run_cmd |& tee $TRAIN_LOG"
 fi
 
-if [ "$NO_TRAINING" -eq 0 ]; then 
+TRAIN_RC=0
+if [ "$NO_TRAINING" -eq 0 ]; then
+    # pipefail so the run's `... |& tee $TRAIN_LOG` (TEE_OUTPUT=1) returns torchrun's status, not tee's
+    # (~always 0). Without it a training crash is masked and the script would exit 0. ($? after `eval`
+    # of the pipeline, since `eval` collapses PIPESTATUS to a single element = tee's status.)
+    set -o pipefail
     eval $run_cmd
+    TRAIN_RC=$?
+    set +o pipefail
+    if [ "$TRAIN_RC" -ne 0 ]; then
+        echo "ERROR: training (torchrun pretrain_gpt.py) failed with exit code $TRAIN_RC" |& tee -a $TRAIN_LOG
+    fi
 fi
 
 
@@ -515,4 +525,7 @@ grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*
 MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
 echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt
+
+# Propagate the training exit status (the perf-parse above must not mask a torchrun failure).
+exit $TRAIN_RC
 
