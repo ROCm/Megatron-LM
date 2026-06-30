@@ -2398,10 +2398,20 @@ class ParamAndGradBuffer:
                 p._item_id = item_id
 
                 def main_grad_getter(p):
-                    # Make sure main_grad memory is allocated when initially accessed.
-                    bucket = p._gbuf.fetch_bucket()
                     gbuf = p._gbuf
                     item_id = p._item_id
+                    # Before lazily allocating this bucket's grad buffer, drain the oldest pending
+                    # reduce-scatter if admitting it would push more than two FSDP units' grad
+                    # buckets live at once. Without this back-pressure the fixed double-buffer pool
+                    # (size 2) overflows during backward and FixedPoolAllocator.allocate asserts
+                    # ("No buffer found for bucket_id"). Ports NVIDIA/Megatron-LM commit 55638bc4.
+                    grad_reduce_pipeline = getattr(self, "grad_reduce_pipeline", None)
+                    if grad_reduce_pipeline is not None:
+                        grad_reduce_pipeline._enforce_double_buffer_limit(
+                            [gbuf.bucket_index.bucket_id]
+                        )
+                    # Make sure main_grad memory is allocated when initially accessed.
+                    bucket = gbuf.fetch_bucket()
                     # View it as p.shape so you can insert the param.grad into
                     # the bucket seamlessly.
                     return gbuf.get_item_from_bucket(bucket, item_id).view(
@@ -3144,7 +3154,11 @@ class GradReducePipeline:
             double_buf_units.add(fsdp_unit_id)
             if len(double_buf_units) > 2:
                 keep_n -= 1
-        self.wait_for_previous_grad_reduce(keep_n)
+        # Issue the drain (RS-completion waits + buffer frees) on the reduce-scatter stream rather
+        # than the caller's stream: this is also invoked lazily from main_grad_getter on the compute
+        # stream during backward, and the frees must order against the reduce-scatter, not compute.
+        with torch.cuda.stream(self.rs_stream):
+            self.wait_for_previous_grad_reduce(keep_n)
 
     def get_ready_bucket_group_for_reduction(self, bucket_id: int) -> Optional[List[int]]:
         """Checks if all buckets in the bucket group containing the given bucket_id
