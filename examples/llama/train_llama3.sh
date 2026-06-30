@@ -137,6 +137,13 @@ fi
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
+    # Gradient accumulation fusion is incompatible with FSDP: torch-FSDP2 hard-asserts against it
+    # in arguments.py, and Megatron-FSDP crashes at runtime with an fsdp_grads "No buffer found for
+    # bucket_id" assertion. Force it off so the default-on toggle does not break the FSDP suites.
+    if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ]; then
+        echo "FSDP is incompatible with gradient accumulation fusion; disabling fusion (GRADIENT_ACCUMULATION_FUSION=0)."
+        GRADIENT_ACCUMULATION_FUSION=0
+    fi
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
