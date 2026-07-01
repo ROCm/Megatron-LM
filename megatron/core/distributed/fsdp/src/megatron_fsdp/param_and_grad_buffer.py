@@ -2401,10 +2401,20 @@ class ParamAndGradBuffer:
                 p._item_id = item_id
 
                 def main_grad_getter(p):
-                    # Make sure main_grad memory is allocated when initially accessed.
-                    bucket = p._gbuf.fetch_bucket()
                     gbuf = p._gbuf
                     item_id = p._item_id
+                    # Before lazily allocating this bucket's grad buffer, drain the oldest pending
+                    # reduce-scatter if admitting it would push more than two FSDP units' grad
+                    # buckets live at once. Without this back-pressure the fixed double-buffer pool
+                    # (size 2) overflows during backward and FixedPoolAllocator.allocate asserts
+                    # ("No buffer found for bucket_id"). Ports NVIDIA/Megatron-LM commit 55638bc4;
+                    grad_reduce_pipeline = getattr(self, "grad_reduce_pipeline", None)
+                    if grad_reduce_pipeline is not None:
+                        grad_reduce_pipeline._enforce_double_buffer_limit(
+                            [gbuf.bucket_index.bucket_id]
+                        )
+                    # Make sure main_grad memory is allocated when initially accessed.
+                    bucket = gbuf.fetch_bucket()
                     # View it as p.shape so you can insert the param.grad into
                     # the bucket seamlessly.
                     return gbuf.get_item_from_bucket(bucket, item_id).view(
@@ -3015,11 +3025,6 @@ class GradReducePipeline:
         self.rs_stream = rs_stream
         self.check_nans = check_nans
 
-        # Most recently recorded reduce-scatter completion event. The SDMA parameter all-gather
-        # serializes behind this so the two collectives do not contend for XGMI bandwidth
-        # (see AllGatherPipeline.all_gather_params).
-        self.last_grad_reduce_event = None
-
         # Init outer-DP group gradient reduction related attributes.
         dist_index = self.buffer.dist_index
         if dist_index.use_hybrid_fsdp:
@@ -3152,7 +3157,11 @@ class GradReducePipeline:
             double_buf_units.add(fsdp_unit_id)
             if len(double_buf_units) > 2:
                 keep_n -= 1
-        self.wait_for_previous_grad_reduce(keep_n)
+        # Issue the drain (RS-completion waits + buffer frees) on the reduce-scatter stream rather
+        # than the caller's stream: this is also invoked lazily from main_grad_getter on the compute
+        # stream during backward.
+        with torch.cuda.stream(self.rs_stream):
+            self.wait_for_previous_grad_reduce(keep_n)
 
     def get_ready_bucket_group_for_reduction(self, bucket_id: int) -> Optional[List[int]]:
         """Checks if all buckets in the bucket group containing the given bucket_id
@@ -3336,10 +3345,6 @@ class GradReducePipeline:
 
             free_up_grad_bucket_func[bucket_id] = get_closure(bucket_id)
 
-        # Publish the completion event of this reduce-scatter so the all-gather pipeline can make
-        # its (SDMA) stream wait on it, serializing AG behind RS.
-        self.last_grad_reduce_event = reduce_scatter_view_out_event
-
         if async_op:
             for bucket_id, free_up_grad_bucket in free_up_grad_bucket_func.items():
                 self.grad_reduce_queue.append(
@@ -3383,14 +3388,6 @@ class AllGatherPipeline:
         # is offloaded to the GPU DMA engines; otherwise per-bucket fallback to torch.distributed.
         self.mori_sdma = mori_sdma
 
-        # Handle to the reduce-scatter pipeline. When the SDMA backend is active, the SDMA all-gather
-        # always serializes behind the most recent reduce-scatter: the SDMA copy engines and RCCL
-        # reduce-scatter kernels both drive XGMI, so running them concurrently saturates interconnect
-        # bandwidth. The AG stream waits (device-side) on the latest RS completion event before
-        # launching SDMA gathers, so AG and RS run back-to-back on the interconnect while still
-        # overlapping with compute. Set by the owning module.
-        self.grad_reduce_pipeline: Optional["GradReducePipeline"] = None
-
         # Track the status of all-gather operations for each bucket.
         self.param_gather_event_map = {}
         # All buckets are initially deallocated / empty after initialization of ParamAndGradBuffer.
@@ -3430,8 +3427,8 @@ class AllGatherPipeline:
 
         # Pre-size the MORI SDMA handles to the largest bucket so they are built once (collectively)
         # rather than re-created mid-run when a larger shard appears - re-creation reallocates the
-        # transit buffers. We key on the full (unsharded) bucket size, which is identical on every
-        # rank, so the symmetric allocations match.
+        # transit buffers and drops output-buffer registrations. We key on the full (unsharded)
+        # bucket size, which is identical on every rank, so the symmetric allocations match.
         if self.mori_sdma is not None and getattr(self.mori_sdma, "active", False):
             max_full_numel_by_dtype: Dict[torch.dtype, int] = {}
             for group in self.buffer.parameter_groups:
@@ -3647,14 +3644,6 @@ class AllGatherPipeline:
             all_gather_stream.wait_stream(torch.cuda.current_stream())
             dp_group = self.get_fsdp_buffer(buckets[0]).data_parallel_group
             if self.mori_sdma is not None:
-                # Always serialize the SDMA all-gather behind the most recent reduce-scatter to
-                # avoid XGMI bandwidth contention between the SDMA copy engines and the RCCL
-                # reduce-scatter kernels. This is a device-side wait on the AG stream only, so it
-                # does not block the host and still allows compute to overlap.
-                if self.grad_reduce_pipeline is not None:
-                    rs_event = self.grad_reduce_pipeline.last_grad_reduce_event
-                    if rs_event is not None:
-                        all_gather_stream.wait_event(rs_event)
                 # The MORI SDMA backend does not use NCCL coalescing. Each bucket records its own
                 # per-bucket completion event inside async_bucket_gather (SDMA event, or a fallback
                 # torch.distributed Work handle), so we issue the gathers directly on the all-gather

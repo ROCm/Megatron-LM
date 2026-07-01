@@ -378,7 +378,11 @@ class MegatronFSDP(torch.nn.Module):
             ag_group = self.dist_index.get_fsdp_group(independent_all_gather=True)
             if ag_group is None:
                 ag_group = self.dist_index.get_dp_group()
-            mori_sdma = MoriSdmaAllGather(ag_group)
+            # No-copy (registered-output) mode requires stable output buffer addresses, which only
+            # the fixed-pool double buffer provides; enable it exactly when fsdp_double_buffer is on.
+            mori_sdma = MoriSdmaAllGather(
+                ag_group, register_output=self.ddp_config.fsdp_double_buffer
+            )
 
         # Initialize the all-gather pipeline.
         self.all_gather_pipeline = AllGatherPipeline(
@@ -386,10 +390,10 @@ class MegatronFSDP(torch.nn.Module):
             ag_stream=self.side_stream_for_param_gather,
             mori_sdma=mori_sdma,
         )
-        # Give the all-gather pipeline a handle to the reduce-scatter pipeline so the SDMA
-        # all-gather always serializes behind reduce-scatter, avoiding XGMI bandwidth contention
-        # between SDMA copies and RCCL reduce-scatter.
-        self.all_gather_pipeline.grad_reduce_pipeline = self.grad_reduce_pipeline
+        # Expose the reduce-scatter pipeline on the buffer so the lazy main_grad_getter can apply
+        # double-buffer back-pressure. This fork's parameters do not carry a `_megatron_fsdp_model`
+        # back-reference (a later megatron_fsdp mechanism), so we reach the pipeline via the buffer.
+        self.param_and_grad_buffer.grad_reduce_pipeline = self.grad_reduce_pipeline
 
         # Set the suggested communication unit size for reduce-scatter and all-gather pipelines.
         suggested_communication_unit_size = self.ddp_config.suggested_communication_unit_size

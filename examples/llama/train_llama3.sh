@@ -469,7 +469,7 @@ else
 fi
 
 if [ "$MEGATRON_FSDP" -eq 1 ]; then
-    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params"
+    EXTRA_ARGS="$EXTRA_ARGS --use-megatron-fsdp --ckpt-format fsdp_dtensor --data-parallel-sharding-strategy optim_grads_params --fsdp-double-buffer"
     
     if [ "$ENABLE_HSDP" -eq 1 ]; then
         echo "Megatron HSDP is enabled with $HSDP_NUM_REPLICAS DP outer replicas"
