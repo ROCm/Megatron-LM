@@ -16,12 +16,16 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     DummyState,
+    apply_dispatcher_extra_kwargs,
     build_data,
     compare_captures,
     deterministic_mode,
+    get_compare_tolerances,
     get_test_config,
+    get_valid_dispatcher_configs,
     get_valid_fp8_flags,
-    get_valid_token_dispatcher_types,
+    is_mori_available,
+    reinitialize_model_parallel_for_mori,
     reset_model,
 )
 from tests.unit_tests.test_utilities import Utils
@@ -256,6 +260,13 @@ class TestA2AOverlap:
         )
 
     def teardown_method(self, method):
+        # Full MORI teardown so the next parametrized case (different tp/ep layout)
+        # cannot inherit shmem staging or a stale EpDispatchCombineOp handle. These
+        # are safe no-ops when MORI is not installed.
+        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+
+        reset_mori_op()
+        finalize_mori_shmem()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
@@ -401,24 +412,42 @@ class TestA2AOverlap:
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
-    def test_transformer_layer_overlap(self, dispatcher_type, fp8_flag):
+    def test_transformer_layer_overlap(self, dispatcher_type, flex_backend, fp8_flag):
         """
         Verifies all-to-all overlap optimization in transformer layer produces
         the same results as the reference implementation.
         """
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, dispatcher_type, flex_backend)
+        self._run_transformer_layer_overlap(flex_backend, fp8_flag, extra_kwargs)
 
-        extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
-            extra_kwargs["moe_router_dtype"] = "fp32"
+    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
+    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+    def test_transformer_layer_overlap_mori(self):
+        """
+        MORI variant of ``test_transformer_layer_overlap``.
+
+        Kept as a dedicated test (rather than in the shared parametrization) because MORI's
+        ``EpDispatchCombineHandle`` requires the expert (ETPxEP) communicator to span whole
+        nodes. This test re-initializes a full-node expert-parallel layout that it fully
+        owns; interleaving that re-init with the sub-node parametrized cases corrupts the
+        shared process-group state and desyncs collectives. Skipped when the node's GPU
+        count is not a power of two.
+        """
+        ep_size = reinitialize_model_parallel_for_mori()
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", "mori")
+        extra_kwargs["expert_model_parallel_size"] = ep_size
+        self._run_transformer_layer_overlap("mori", None, extra_kwargs)
+
+    def _run_transformer_layer_overlap(self, flex_backend, fp8_flag, extra_kwargs):
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
             extra_kwargs["fp8"] = fp8_flag[0]
             extra_kwargs["fp8_recipe"] = fp8_flag[1]
         config = get_test_config(extra_kwargs=extra_kwargs)
+        atol, rtol = get_compare_tolerances(flex_backend)
         microbatches = 4
         with deterministic_mode():
             transformer_layer_spec = get_gpt_decoder_block_spec(
@@ -445,32 +474,46 @@ class TestA2AOverlap:
             capture_a2a_overlap = run_transformer_layer_a2a_overlap_with_capture(
                 gpt_model, input_tensors, microbatches
             )
-            comp_res = compare_captures(capture_ref, capture_a2a_overlap, True)
+            comp_res = compare_captures(
+                capture_ref, capture_a2a_overlap, True, atol=atol, rtol=rtol
+            )
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
-    def test_mtp_layer_overlap(self, dispatcher_type, fp8_flag):
+    def test_mtp_layer_overlap(self, dispatcher_type, flex_backend, fp8_flag):
         """
         Verifies all-to-all overlap optimization in MTP layer produces
         the same results as the reference implementation.
         """
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, dispatcher_type, flex_backend)
+        self._run_mtp_layer_overlap(flex_backend, fp8_flag, extra_kwargs)
 
-        extra_kwargs = {
-            "moe_token_dispatcher_type": dispatcher_type,
-            "mtp_num_layers": 1,
-            "mtp_loss_scaling_factor": 1.1,
-        }
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
-            extra_kwargs["moe_router_dtype"] = "fp32"
+    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
+    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+    def test_mtp_layer_overlap_mori(self):
+        """
+        MORI variant of ``test_mtp_layer_overlap``. Kept as a dedicated test for the same
+        reason as ``test_transformer_layer_overlap_mori``: MORI needs a node-spanning
+        expert communicator, so it owns its full-node re-initialization here instead of
+        being interleaved into the sub-node parametrization.
+        """
+        ep_size = reinitialize_model_parallel_for_mori()
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", "mori")
+        extra_kwargs["expert_model_parallel_size"] = ep_size
+        self._run_mtp_layer_overlap("mori", None, extra_kwargs)
+
+    def _run_mtp_layer_overlap(self, flex_backend, fp8_flag, extra_kwargs):
+        extra_kwargs["mtp_num_layers"] = 1
+        extra_kwargs["mtp_loss_scaling_factor"] = 1.1
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
             extra_kwargs["fp8_recipe"] = fp8_flag[1]
             extra_kwargs["fp8"] = fp8_flag[0]
         config = get_test_config(extra_kwargs=extra_kwargs)
+        atol, rtol = get_compare_tolerances(flex_backend)
         microbatches = 1
         seq_len = 32
         with deterministic_mode():
@@ -539,5 +582,7 @@ class TestA2AOverlap:
                 rotary_pos_sin=rotary_pos_sin,
                 microbatches=microbatches,
             )
-            comp_res = compare_captures(capture_ref, capture_a2a_overlap, True, True)
+            comp_res = compare_captures(
+                capture_ref, capture_a2a_overlap, True, True, atol=atol, rtol=rtol
+            )
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"

@@ -15,11 +15,15 @@ from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
+    apply_dispatcher_extra_kwargs,
     compare_captures,
     deterministic_mode,
+    get_compare_tolerances,
     get_test_config,
+    get_valid_dispatcher_configs,
     get_valid_fp8_flags,
-    get_valid_token_dispatcher_types,
+    is_mori_available,
+    reinitialize_model_parallel_for_mori,
 )
 from tests.unit_tests.test_utilities import Utils
 
@@ -81,14 +85,23 @@ class TestA2AOverlap:
         set_streams()
 
     def teardown_method(self, method):
+        # Full MORI teardown so the next parametrized case (different tp/ep layout)
+        # cannot inherit shmem staging or a stale EpDispatchCombineOp handle. These
+        # are safe no-ops when MORI is not installed.
+        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+
+        reset_mori_op()
+        finalize_mori_shmem()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("mtp_layers", [0, 1])
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
     @pytest.mark.parametrize("layers", [[2, 1], [1, 2], [1, 1]])
-    def test_1f1b_schedule_model_chunk(self, mtp_layers, dispatcher_type, fp8_flag, layers):
+    def test_1f1b_schedule_model_chunk(
+        self, mtp_layers, dispatcher_type, flex_backend, fp8_flag, layers
+    ):
         """
         Verifies all-to-all overlap optimization in transformer layer produces
         the same results as the reference implementation.
@@ -101,11 +114,8 @@ class TestA2AOverlap:
         datas = []
 
         # create TransformerConfig
-        extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, dispatcher_type, flex_backend)
 
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
-            extra_kwargs["moe_router_dtype"] = "fp32"
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
@@ -168,8 +178,11 @@ class TestA2AOverlap:
                     a2a_captures[i][name] = param.grad
 
             # compare results
+            atol, rtol = get_compare_tolerances(flex_backend)
             for i in range(len(ref_captures)):
-                comp_res = compare_captures(ref_captures[i], a2a_captures[i], True, True)
+                comp_res = compare_captures(
+                    ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
+                )
                 assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
             # release resources is necessary, otherwise later testcases will oom
@@ -186,10 +199,12 @@ class TestA2AOverlap:
             torch.cuda.empty_cache()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
     @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-    def test_1f1b_schedule_model_chunk_with_padding_mask(self, dispatcher_type, layers, tp_size):
+    def test_1f1b_schedule_model_chunk_with_padding_mask(
+        self, dispatcher_type, flex_backend, layers, tp_size
+    ):
         """
         Verifies all-to-all overlap optimization with padding_mask produces
         the same results as the reference implementation with various TP/EP/CP combinations.
@@ -212,14 +227,9 @@ class TestA2AOverlap:
         datas = []
 
         # create TransformerConfig
-        extra_kwargs = {
-            "moe_token_dispatcher_type": dispatcher_type,
-            "tensor_model_parallel_size": tp_size,
-            "sequence_parallel": tp_size > 1,
-        }
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
-            extra_kwargs["moe_router_dtype"] = "fp32"
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, dispatcher_type, flex_backend)
+        extra_kwargs["tensor_model_parallel_size"] = tp_size
+        extra_kwargs["sequence_parallel"] = tp_size > 1
         with deterministic_mode():
             for layer_num in layers:
                 output_tensors = []
@@ -274,8 +284,110 @@ class TestA2AOverlap:
                     a2a_captures[i][name] = param.grad
 
             # compare results
+            atol, rtol = get_compare_tolerances(flex_backend)
             for i in range(len(ref_captures)):
-                comp_res = compare_captures(ref_captures[i], a2a_captures[i], True, True)
+                comp_res = compare_captures(
+                    ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
+                )
+                assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
+
+            # release resources is necessary, otherwise later testcases will oom
+            for i in range(len(schedule_plans)):
+                schedule_plans[i] = None
+                ref_captures[i] = None
+                a2a_captures[i] = None
+                for k in datas[i]:
+                    datas[i][k] = None
+                datas[i] = None
+                gpt_models[i].zero_grad()
+                gpt_models[i] = None
+            gc.collect()
+            torch.cuda.empty_cache()
+
+    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
+    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+    @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
+    @pytest.mark.parametrize("use_padding_mask", [False, True])
+    def test_1f1b_schedule_model_chunk_mori(self, layers, use_padding_mask):
+        """
+        Verifies all-to-all overlap optimization with the MORI EP backend produces the
+        same results as the reference implementation.
+
+        MORI is kept in a dedicated test (rather than the shared parametrization) because
+        its ``EpDispatchCombineHandle`` requires the expert (ETPxEP) communicator to span
+        whole nodes. This test re-initializes a full-node expert-parallel layout
+        (ETP=1, EP=gpus_per_node) that it fully owns; interleaving that re-init with the
+        sub-node cases in the parametrized tests corrupts the shared process-group state
+        and desyncs collectives. Skipped when the node's GPU count is not a power of two.
+        """
+        # Re-initialize with a full-node expert-parallel layout so the MORI expert
+        # communicator aligns to the node (ETPxEP == gpus_per_node). Skips when the node
+        # GPU count is not a power of two.
+        ep_size = reinitialize_model_parallel_for_mori()
+
+        microbatches = 1
+
+        gpt_models = []
+        schedule_plans = []
+        ref_captures = []
+        datas = []
+
+        # create TransformerConfig with a node-spanning MORI expert-parallel layout
+        flex_backend = "mori"
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", flex_backend)
+        extra_kwargs["expert_model_parallel_size"] = ep_size
+        with deterministic_mode():
+            for layer_num in layers:
+                output_tensors = []
+                config = get_test_config(num_layers=layer_num, extra_kwargs=extra_kwargs)
+                gpt_model, schedule_plan, data = build_model(
+                    config, use_padding_mask=use_padding_mask
+                )
+                gpt_model.cuda()
+                gpt_models.append(gpt_model)
+                datas.append(data)
+                schedule_plans.append(schedule_plan)
+
+                # run reference
+                for _ in range(microbatches):
+                    loss = gpt_model.forward(**data)
+                    loss = float16_to_fp32(loss)
+                    loss.backward(torch.ones_like(loss))
+                    output_tensors.append(loss)
+
+                capture = {"outputs": output_tensors}
+                for name, param in gpt_model.named_parameters():
+                    capture[name] = param.grad
+                ref_captures.append(capture)
+                gpt_model.zero_grad()
+            assert gpt_models[0].embedding is not None
+            assert gpt_models[1].embedding is not None
+            # run a2a overlap
+            capture_0 = {"outputs": []}
+            capture_1 = {"outputs": []}
+            a2a_captures = [capture_0, capture_1]
+            for i in range(microbatches):
+                f_input_0 = TransformerModelChunkSchedulePlan.run(schedule_plans[0], None)
+                capture_0["outputs"].append(f_input_0)
+                # overlap
+                f_input_1 = TransformerModelChunkSchedulePlan.run(
+                    schedule_plans[1], schedule_plans[0], b_grad=torch.ones_like(f_input_0)
+                )
+                capture_1["outputs"].append(f_input_1)
+                # last backward
+                TransformerModelChunkSchedulePlan.run(
+                    None, schedule_plans[1], b_grad=torch.ones_like(f_input_1)
+                )
+            for i in range(len(gpt_models)):
+                for name, param in gpt_models[i].named_parameters():
+                    a2a_captures[i][name] = param.grad
+
+            # compare results
+            atol, rtol = get_compare_tolerances(flex_backend)
+            for i in range(len(ref_captures)):
+                comp_res = compare_captures(
+                    ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
+                )
                 assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
             # release resources is necessary, otherwise later testcases will oom

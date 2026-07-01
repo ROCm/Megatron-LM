@@ -884,25 +884,51 @@ class MoriDispatch(torch.autograd.Function):
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         # Stashed so backward can replay this layer's exact routing layout.
         ctx.routing_handle = routing_handle
-        # dispatch_weights: recv layout for dispatch-backward op.combine().
-        # token_indices: sender layout (same as dispatch() input) per MORI API.
-        ctx.save_for_backward(token_indices, dispatch_weights)
+        # token_indices: sender-layout topk indices (same tensor as dispatch()'s
+        # input) required by backward's op.combine(). It is not a symmetric-memory
+        # buffer, so it is safe to save directly. (The recv-layout dispatch_weights
+        # is NOT saved: backward derives the probs gradient from the incoming
+        # grad_probs, not from the forward weights -- see MoriDispatch.backward.)
+        ctx.save_for_backward(token_indices)
 
         # NOTE: recv_x, recv_token_probs and dispatch_weights are the FULL [max_recv, ...] buffers
         # (no slicing). recv_token_indices carries `-1` in every invalid/padding row.
         #
-        # dispatch_weights is intentionally returned in two slots because the caller
-        # consumes the same tensor two different ways:
-        #   - slot 3 (recv_probs): fed into _indices_to_multihot / fused_indices_to_multihot,
+        # dispatch_weights is exposed in two slots because the caller consumes it two ways:
+        #   - slot 2 (recv_probs): fed into _indices_to_multihot / fused_indices_to_multihot,
         #     which transforms it into the routing map + permuted probs (overwritten downstream).
-        #   - slot 5 (dispatch_weights): kept RAW as the recv-layout weights buffer that
-        #     op.combine() needs in combine forward and dispatch-backward.
+        #     This is the autograd-carrying copy.
+        #   - slot 4 (raw dispatch_weights): kept RAW as the recv-layout weights buffer that
+        #     op.combine() needs in the combine forward (MoriCombine.forward's recv_token_probs).
+        #     It is exposed as a SEPARATE tensor object and marked non-differentiable below:
+        #     op.combine() only reads its values and MoriCombine.backward returns None for it,
+        #     so it must not
+        #     carry a grad_fn. Otherwise the combine node (which consumes this buffer) and the
+        #     dispatch node would each backward through this same MoriDispatch, tripping a
+        #     double-backward error in the fine-grained 1f1b overlap schedule where the two
+        #     nodes are backwarded as separate autograd subgraphs.
+        #
+        # .clone(): like dispatch_out, dispatch_weights is a view into MORI's reusable
+        # per-handle dispatch output buffer (the outW sub-buffer). combine() consumes
+        # these raw weights only at combine time -- by which point a sibling layer /
+        # microbatch dispatch() in the 1f1b overlap schedule may have overwritten the
+        # buffer. Clone to give combine a stable private copy of this layer's weights.
+        raw_dispatch_weights = dispatch_weights.detach().clone()
+        ctx.mark_non_differentiable(recv_token_indices, tokens_per_expert, raw_dispatch_weights)
+        # dispatch_out is a view into MORI's reusable symmetric-memory dispatch output
+        # buffer. It is the expert GEMM's input activation, which the GEMM saves for its
+        # weight-gradient pass. The next dispatch() on the same cached op overwrites this
+        # buffer, so by wgrad time (after later layers/microbatches dispatch in the 1f1b
+        # overlap schedule) the saved activation would be corrupted -- the forward output
+        # is already computed (so loss matches) but wgrad would read stale tokens. Clone
+        # to give the experts a stable private copy of this layer's dispatched tokens.
+        dispatch_out = dispatch_out.clone()
         return (
             dispatch_out,
             recv_token_indices,
             dispatch_weights,
             tokens_per_expert,
-            dispatch_weights,
+            raw_dispatch_weights,
             routing_handle,
         )
 
@@ -917,7 +943,7 @@ class MoriDispatch(torch.autograd.Function):
         grad_routing_handle,
     ):
         """Backward pass: combine gradients back using MORI."""
-        token_indices, dispatch_weights = ctx.saved_tensors
+        (token_indices,) = ctx.saved_tensors
         op = get_mori_op(
             group=ctx.group,
             hidden_dim=grad_output.shape[1],
@@ -928,10 +954,19 @@ class MoriDispatch(torch.autograd.Function):
             fp8_dispatch=ctx.fp8_dispatch,
         )
         num_tokens = ctx.local_num_tokens
-        combined_x, _ = _run_mori_op_on_stream(
+        # grad_probs is d(loss)/d(dispatch_weights) in recv layout (output slot 2).
+        # In forward, op.dispatch() fans each sender token's probs out to one recv
+        # copy per destination PE, so the sender-side probs gradient is the SUM of
+        # those recv copies. MORI's op.combine() accumulates whatever is passed in
+        # its `weights` slot exactly that way and returns it as the second output,
+        # so feeding grad_probs through the weight slot yields grad_token_probs in
+        # sender layout -- the same single-combine trick DeepEP uses
+        # (buffer.combine(..., topk_weights=grad_token_probs)). The hidden output
+        # is independent of `weights`, so combined_x is unaffected by this.
+        combined_x, combined_weights = _run_mori_op_on_stream(
             lambda: op.combine(
                 grad_output.contiguous(),
-                dispatch_weights,
+                grad_probs.contiguous().float(),
                 token_indices.to(torch.int32),
                 routing=ctx.routing_handle,
             ),
@@ -941,11 +976,23 @@ class MoriDispatch(torch.autograd.Function):
         # See MoriCombine.forward: op.combine() returns the full
         # [max_num_inp_token_per_rank, hidden_dim] buffer; slice to the
         # sender-side row count so the gradient matches `x`'s shape.
-        combined_x = combined_x[:num_tokens]
+        #
+        # .clone(): combined_x is a view into MORI's reusable symmetric-memory combine
+        # output buffer. It is returned as the input gradient and outlives this call, so
+        # a later MORI op (a sibling layer / microbatch in the 1f1b overlap schedule)
+        # would overwrite it before it is consumed. Clone to snapshot this layer's grad.
+        combined_x = combined_x[:num_tokens].clone()
+        # Sender-layout router-probs gradient from combine's weight output. token_probs
+        # is always float32 (MORI's probs contract, enforced by the dispatcher), so this
+        # matches the input dtype with no cast. Slice to the live sender rows and clone
+        # off MORI's reusable symmetric-memory weight buffer (overwritten by later
+        # overlap ops). combine() always returns a weight output since grad_probs (a
+        # non-empty `weights` input) is always present.
+        grad_token_probs = combined_weights[:num_tokens].clone()
         return (
             combined_x,
             None,
-            None,
+            grad_token_probs,
             None,
             None,
             None,
@@ -1061,9 +1108,12 @@ class MoriCombine(torch.autograd.Function):
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # Reuse the total_recv saved in forward.
+        # Reuse the total_recv saved in forward. .clone(): dispatch_out is a view into
+        # MORI's reusable symmetric-memory dispatch output buffer and is returned as the
+        # input gradient; clone so a later MORI op in the overlap schedule cannot
+        # overwrite this layer's gradient before it is consumed.
         return (
-            dispatch_out[: ctx.total_recv],
+            dispatch_out[: ctx.total_recv].clone(),
             None,
             None,
             None,

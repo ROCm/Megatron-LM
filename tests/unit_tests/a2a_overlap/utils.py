@@ -124,7 +124,14 @@ def reset_model(model, params=None):
             param.data.copy_(params[name])
 
 
-def compare_captures(capture_ref, capture_a2a_overlap, verbose=False, skip_embedding=False):
+def compare_captures(
+    capture_ref,
+    capture_a2a_overlap,
+    verbose=False,
+    skip_embedding=False,
+    atol=None,
+    rtol=None,
+):
     """
     Compares two capture dictionaries to check if they contain the same values.
 
@@ -132,17 +139,33 @@ def compare_captures(capture_ref, capture_a2a_overlap, verbose=False, skip_embed
         capture_ref: Reference capture dictionary.
         capture_a2a_overlap: All-to-all overlap capture dictionary to compare against.
         verbose: Whether to print detailed information about mismatches.
+        skip_embedding: Skip embedding / output_layer tensors in the comparison.
+        atol: Absolute tolerance. When both ``atol`` and ``rtol`` are ``None`` (default)
+            the comparison is bit-exact (raw integer bit patterns must match). When
+            either is set, tensors are compared with ``torch.allclose`` instead. This
+            is required for backends whose dispatch is not reproducible across two
+            separate runs (e.g. MORI's nondeterministic recv-slot ordering), where the
+            reference and overlap paths differ only by floating-point accumulation
+            order (a few ULP in bf16) rather than by any real numerical error.
+        rtol: Relative tolerance. See ``atol``.
 
     Returns:
         tuple: (bool, str) - Whether the captures match and a message describing any mismatch.
     """
+
+    tolerance_mode = atol is not None or rtol is not None
+    # torch.allclose requires both tolerances; fill the unset one with its default.
+    allclose_atol = atol if atol is not None else 1e-8
+    allclose_rtol = rtol if rtol is not None else 1e-5
 
     def bit_same(a, b):
         if not a.dtype == b.dtype:
             return False, "dtype mismatch"
         if not a.shape == b.shape:
             return False, "shape mismatch"
-        if a.dtype in [torch.bfloat16, torch.half]:
+        if tolerance_mode:
+            res = torch.allclose(a, b, atol=allclose_atol, rtol=allclose_rtol)
+        elif a.dtype in [torch.bfloat16, torch.half]:
             res = torch.all(a.view(torch.int16) == b.view(torch.int16))
         else:
             res = torch.all(a.view(torch.int32) == b.view(torch.int32))
@@ -197,10 +220,16 @@ def compare_captures(capture_ref, capture_a2a_overlap, verbose=False, skip_embed
 
 
 def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_grouped_gemm=True):
+    # Allow callers to override the expert parallel size (e.g. MORI needs the expert
+    # communicator to span the whole node). Copy so the caller's dict is left untouched.
+    extra_kwargs = dict(extra_kwargs)
+    expert_model_parallel_size = extra_kwargs.pop(
+        "expert_model_parallel_size", 4 if num_moe_experts is not None else 1
+    )
     config = MLATransformerConfig(
         attention_backend="unfused",
         pipeline_model_parallel_size=1,
-        expert_model_parallel_size=4 if num_moe_experts is not None else 1,
+        expert_model_parallel_size=expert_model_parallel_size,
         deterministic_mode=True,
         bf16=True,
         params_dtype=torch.bfloat16,
@@ -229,6 +258,131 @@ def get_valid_token_dispatcher_types():
         return ["alltoall", "flex"]
     except ImportError:
         return ["alltoall"]
+
+
+def is_deepep_available():
+    try:
+        from deep_ep import Buffer
+        from deep_ep.utils import EventHandle, EventOverlap
+
+        return True
+    except ImportError:
+        return False
+
+
+def is_mori_available():
+    from megatron.core.transformer.moe.fused_a2a import HAVE_MORI
+
+    return HAVE_MORI
+
+
+def get_gpus_per_node():
+    """Return the physical GPU count per node for MORI topology checks.
+
+    Under ``torchrun``, each rank often sees ``torch.cuda.device_count() == 1``;
+    ``LOCAL_WORLD_SIZE`` (or the initialized world size on a single-node job) gives
+    the true node width MORI's ``gpuPerNode`` constraint refers to.
+    """
+    import os
+
+    if "LOCAL_WORLD_SIZE" in os.environ:
+        return int(os.environ["LOCAL_WORLD_SIZE"])
+    if torch.distributed.is_initialized():
+        return torch.distributed.get_world_size()
+    return torch.cuda.device_count()
+
+
+def reinitialize_model_parallel_for_mori():
+    """Re-initialize a node-spanning expert-parallel layout for MORI and return ``ep_size``.
+
+    MORI's ``EpDispatchCombineHandle`` requires the expert (ETPxEP) communicator to span
+    whole nodes (``ETPxEP % gpuPerNode == 0``). The a2a-overlap test classes initialize a
+    sub-node ``EP=4`` / ``ETP=1`` layout in ``setup_method`` (fine for alltoall/DeepEP but
+    ``4 % 8 != 0`` for MORI on an 8-GPU node), so a MORI case must re-initialize to a
+    node-spanning layout instead of skipping. This mirrors ``test_1f1b_schedule_model_chunk_mori``:
+    ``EP == gpuPerNode`` with ``ETP=1``.
+
+    ``pytest.skip`` is raised only when the node GPU count is not a power of two -- MORI's
+    other hard constraint, which no layout can satisfy.
+
+    Returns the expert-parallel size used, to be forwarded to ``get_test_config`` via
+    ``extra_kwargs["expert_model_parallel_size"]``.
+    """
+    import pytest
+
+    from megatron.core.pipeline_parallel.utils import set_streams
+    from tests.unit_tests.test_utilities import Utils
+
+    gpus_per_node = get_gpus_per_node()
+    if gpus_per_node < 2 or (gpus_per_node & (gpus_per_node - 1)) != 0:
+        pytest.skip(
+            "MORI EP requires a power-of-two GPU count that the expert communicator "
+            f"can span; got gpus_per_node={gpus_per_node}."
+        )
+    Utils.destroy_model_parallel()
+    Utils.initialize_model_parallel(
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        expert_model_parallel_size=gpus_per_node,
+        expert_tensor_parallel_size=1,
+    )
+    set_streams()
+    return gpus_per_node
+
+
+# Bit-exact comparison is impossible for MORI: its dispatch assigns recv-buffer slots
+# nondeterministically across separate runs, so the reference and overlap paths sum in
+# different orders and differ by a few bf16 ULP -- an accumulation-order artifact, not a
+# real numerical error. Compare MORI captures with this tolerance instead; all other
+# backends (alltoall/deepep) stay bit-exact.
+MORI_COMPARE_ATOL = 1e-2
+MORI_COMPARE_RTOL = 1e-2
+
+
+def get_compare_tolerances(flex_backend):
+    """Return the ``(atol, rtol)`` for :func:`compare_captures` given the flex EP backend.
+
+    MORI requires a tolerance-based comparison (see ``MORI_COMPARE_ATOL``); every other
+    backend stays bit-exact, signalled by ``(None, None)``.
+    """
+    if flex_backend == "mori":
+        return MORI_COMPARE_ATOL, MORI_COMPARE_RTOL
+    return None, None
+
+
+def get_valid_dispatcher_configs():
+    """Return the (dispatcher_type, flex_backend) combinations available in this environment.
+
+    ``alltoall`` is always available. The ``flex`` dispatcher is exercised with every
+    fused EP backend that can actually be imported (currently ``deepep``), so the same
+    1f1b overlap test validates each backend without generating cases for backends that
+    are not installed.
+
+    MORI is intentionally *not* included here: it requires the expert (ETPxEP)
+    communicator to span whole nodes, which forces a full-node re-initialization that is
+    incompatible with the sub-node EP=4 layout these parametrized tests share. Mixing that
+    re-init into the interleaved parametrization corrupts the process-group state for the
+    following (non-MORI) cases and desyncs collectives. MORI is covered by dedicated tests
+    that own their topology instead (e.g. ``test_1f1b_schedule_model_chunk_mori``).
+    """
+    configs = [("alltoall", None)]
+    if is_deepep_available():
+        configs.append(("flex", "deepep"))
+    return configs
+
+
+def apply_dispatcher_extra_kwargs(extra_kwargs, dispatcher_type, flex_backend):
+    """Populate ``extra_kwargs`` with the config needed for the given dispatcher backend."""
+    extra_kwargs["moe_token_dispatcher_type"] = dispatcher_type
+    if dispatcher_type == "flex":
+        extra_kwargs["moe_flex_dispatcher_backend"] = flex_backend
+        # DeepEP and MORI fused EP backends require fp32 router probabilities.
+        extra_kwargs["moe_router_dtype"] = "fp32"
+        if flex_backend == "mori":
+            # Sender-side row capacity for MORI's symmetric-memory buffers. The test
+            # sequences are tiny (seq_len=32, batch=1), so 4096 is comfortably large.
+            extra_kwargs["moe_mori_max_tokens_per_rank"] = 4096
+    return extra_kwargs
 
 
 def get_valid_fp8_flags():
