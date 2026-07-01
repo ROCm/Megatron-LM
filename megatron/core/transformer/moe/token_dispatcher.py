@@ -1529,6 +1529,24 @@ class _MoriManager(_DispatchManager):
         async_finish: bool = False,
         allocate_on_comm_stream: bool = False,
     ) -> torch.Tensor:
+        # Mirror HybridEP: fuse the expert unpermute into the combine node. Running
+        # it here -- inside the combine node, which the fine-grained schedule places
+        # on the comm stream -- keeps it serialized with op.combine/op.dispatch on
+        # that one stream. In backward, the unpermute gather then consumes MORI's
+        # symmetric-memory dispatch grad view on the SAME comm stream, right after
+        # MoriCombine.backward's op.dispatch and before any sibling op overwrites
+        # the process-wide dispatch buffer, so MoriCombine.backward needs no clone.
+        # (If the unpermute stayed in the mlp node it would run on the compute
+        # stream, and the un-cloned grad view would be read there while the comm
+        # stream overwrites the buffer -- a cross-stream race, since
+        # _run_mori_op_on_stream only waits on the producing node's own stream.)
+        hidden_states = unpermute(
+            hidden_states,
+            self.reversed_mapping_for_combine,
+            restore_shape=self.hidden_shape_before_permute,
+            routing_map=self.dispatched_routing_map,
+            fused=self.permute_fusion,
+        )
         assert self._routing_handle is not None, (
             "Mori combine() called without a matching dispatch(); "
             "the per-call routing handle from MoriDispatch is missing."
@@ -1646,13 +1664,9 @@ class _MoriManager(_DispatchManager):
         return hidden_states, self.dispatched_probs
 
     def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states = unpermute(
-            hidden_states,
-            self.reversed_mapping_for_combine,
-            restore_shape=self.hidden_shape_before_permute,
-            routing_map=self.dispatched_routing_map,
-            fused=self.permute_fusion,
-        )
+        # No-op: the unpermute is fused into combine() (mirrors HybridEP) so it runs
+        # on the combine node's comm stream. The expert output passes through
+        # unchanged here (in the mlp node) and is unpermuted at combine time.
         return hidden_states
 
 

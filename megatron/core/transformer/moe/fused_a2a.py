@@ -1117,12 +1117,17 @@ class MoriCombine(torch.autograd.Function):
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # Reuse the total_recv saved in forward. .clone(): dispatch_out is a view into
-        # MORI's reusable symmetric-memory dispatch output buffer and is returned as the
-        # input gradient; clone so a later MORI op in the overlap schedule cannot
-        # overwrite this layer's gradient before it is consumed.
+        # Reuse the total_recv saved in forward. NO clone: dispatch_out is a raw view
+        # into MORI's reusable symmetric-memory dispatch output buffer, returned as the
+        # input gradient. Mirroring the forward permute-in-dispatch fusion, the consumer
+        # of this grad -- the fused unpermute's backward gather (see _MoriManager.combine)
+        # -- runs inside the combine node, on the SAME comm stream, immediately after this
+        # op.dispatch and before any sibling MORI op overwrites the shared buffer. So the
+        # view is consumed while still valid; no defensive copy is needed. (Cloning would
+        # only be required if the consumer ran on a different stream/node, as it did when
+        # the unpermute lived in the mlp node.)
         return (
-            dispatch_out[: ctx.total_recv].clone(),
+            dispatch_out[: ctx.total_recv],
             None,
             None,
             None,
