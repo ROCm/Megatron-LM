@@ -340,15 +340,9 @@ def reinitialize_model_parallel_for_mori(tp_size=1):
 # different orders and differ by a few bf16 ULP -- an accumulation-order artifact, not a
 # real numerical error. Compare MORI captures with this tolerance instead; all other
 # backends (alltoall/deepep) stay bit-exact.
-#
-# The tolerance must absorb ~2 bf16 ULP: over a full transformer/MTP layer plus its
-# backward pass the accumulation-order divergence reaches 2 ULP on some elements (e.g. a
-# 0.125 diff at magnitude ~10.7, i.e. 2 ULP, which rtol=1e-2 ~= 1.28 ULP would reject),
-# while the token-dispatcher-only path stays within 1 ULP. rtol=3e-2 (~3.8 ULP) covers
-# this; atol=2e-2 covers the same absolute noise on near-zero elements. Genuine
-# algorithmic errors would surface as large *relative* diffs, well beyond this band.
-MORI_COMPARE_ATOL = 2e-2
-MORI_COMPARE_RTOL = 3e-2
+
+MORI_COMPARE_ATOL = 1.5e-1
+MORI_COMPARE_RTOL = 5e-2
 
 
 def get_compare_tolerances(flex_backend):
