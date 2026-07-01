@@ -885,10 +885,7 @@ class MoriDispatch(torch.autograd.Function):
         # Stashed so backward can replay this layer's exact routing layout.
         ctx.routing_handle = routing_handle
         # token_indices: sender-layout topk indices (same tensor as dispatch()'s
-        # input) required by backward's op.combine(). It is not a symmetric-memory
-        # buffer, so it is safe to save directly. (The recv-layout dispatch_weights
-        # is NOT saved: backward derives the probs gradient from the incoming
-        # grad_probs, not from the forward weights -- see MoriDispatch.backward.)
+        # input) required by backward's op.combine().
         ctx.save_for_backward(token_indices)
 
         # NOTE: recv_x, recv_token_probs and dispatch_weights are the FULL [max_recv, ...] buffers
@@ -900,38 +897,20 @@ class MoriDispatch(torch.autograd.Function):
         #     This is the autograd-carrying copy.
         #   - slot 4 (raw dispatch_weights): kept RAW as the recv-layout weights buffer that
         #     op.combine() needs in the combine forward (MoriCombine.forward's recv_token_probs).
-        #     It is exposed as a SEPARATE tensor object and marked non-differentiable below:
+        #     It is exposed as a separate tensor object and marked non-differentiable below:
         #     op.combine() only reads its values and MoriCombine.backward returns None for it,
-        #     so it must not
-        #     carry a grad_fn. Otherwise the combine node (which consumes this buffer) and the
+        #     so it must not carry a grad_fn. Otherwise the combine node (which consumes this buffer) and the
         #     dispatch node would each backward through this same MoriDispatch, tripping a
         #     double-backward error in the fine-grained 1f1b overlap schedule where the two
         #     nodes are backwarded as separate autograd subgraphs.
         #
-        # .clone(): like dispatch_out, dispatch_weights is a view into MORI's reusable
-        # per-handle dispatch output buffer (the outW sub-buffer). combine() consumes
-        # these raw weights only at combine time -- by which point a sibling layer /
-        # microbatch dispatch() in the 1f1b overlap schedule may have overwritten the
-        # buffer. Clone to give combine a stable private copy of this layer's weights.
+        # .clone(): dispatch_weights views MORI's reusable dispatch buffer, but combine()
+        # reads it much later (a sibling dispatch may overwrite it); clone a private copy.
+        # dispatch_out needs no such clone: _MoriManager.dispatch permutes it right away in
+        # the dispatch node, so its only reader runs before any sibling dispatch overwrites.
         raw_dispatch_weights = dispatch_weights.detach().clone()
         ctx.mark_non_differentiable(recv_token_indices, tokens_per_expert, raw_dispatch_weights)
-        # dispatch_out is returned as a raw zero-copy view into MORI's reusable
-        # symmetric-memory dispatch output buffer -- NO defensive clone here.
-        #
-        # Mirroring HybridEP, the caller (_MoriManager.dispatch) fuses the copy-out
-        # of this buffer into the expert permute and runs that permute *inside the
-        # dispatch node*, on the compute stream, before returning. Two facts make
-        # this safe without a clone:
-        #   1) The permute output is a freshly allocated private tensor, so the
-        #      expert GEMM's saved-for-backward activation is never aliased to the
-        #      symmetric buffer, and backward (permute scatter + MoriDispatch via
-        #      combine) never re-reads this buffer.
-        #   2) _run_mori_op_on_stream brackets every dispatch() with
-        #      comm_stream.wait_stream(compute_stream). Because the permute is
-        #      enqueued on the compute stream within the dispatch node (i.e. before
-        #      any sibling microbatch's dispatch is issued), the next dispatch's
-        #      a2a is ordered after this permute and cannot overwrite the buffer
-        #      while it is still being read.
+        
         return (
             dispatch_out,
             recv_token_indices,
@@ -963,15 +942,7 @@ class MoriDispatch(torch.autograd.Function):
             fp8_dispatch=ctx.fp8_dispatch,
         )
         num_tokens = ctx.local_num_tokens
-        # grad_probs is d(loss)/d(dispatch_weights) in recv layout (output slot 2).
-        # In forward, op.dispatch() fans each sender token's probs out to one recv
-        # copy per destination PE, so the sender-side probs gradient is the SUM of
-        # those recv copies. MORI's op.combine() accumulates whatever is passed in
-        # its `weights` slot exactly that way and returns it as the second output,
-        # so feeding grad_probs through the weight slot yields grad_token_probs in
-        # sender layout -- the same single-combine trick DeepEP uses
-        # (buffer.combine(..., topk_weights=grad_token_probs)). The hidden output
-        # is independent of `weights`, so combined_x is unaffected by this.
+        
         combined_x, combined_weights = _run_mori_op_on_stream(
             lambda: op.combine(
                 grad_output.contiguous(),
@@ -982,21 +953,11 @@ class MoriDispatch(torch.autograd.Function):
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # See MoriCombine.forward: op.combine() returns the full
-        # [max_num_inp_token_per_rank, hidden_dim] buffer; slice to the
-        # sender-side row count so the gradient matches `x`'s shape.
-        #
-        # .clone(): combined_x is a view into MORI's reusable symmetric-memory combine
-        # output buffer. It is returned as the input gradient and outlives this call, so
-        # a later MORI op (a sibling layer / microbatch in the 1f1b overlap schedule)
-        # would overwrite it before it is consumed. Clone to snapshot this layer's grad.
+        # Slice the full combine buffer to the sender row count so the grad matches `x`. .clone():
+        # it views MORI's reusable buffer and is consumed later, so a sibling op would overwrite it.
         combined_x = combined_x[:num_tokens].clone()
-        # Sender-layout router-probs gradient from combine's weight output. token_probs
-        # is always float32 (MORI's probs contract, enforced by the dispatcher), so this
-        # matches the input dtype with no cast. Slice to the live sender rows and clone
-        # off MORI's reusable symmetric-memory weight buffer (overwritten by later
-        # overlap ops). combine() always returns a weight output since grad_probs (a
-        # non-empty `weights` input) is always present.
+        # Sender-layout router-probs grad from combine's fp32 weight output. Slice to the live
+        # sender rows and clone off MORI's reusable weight buffer (a later overlap op overwrites it).
         grad_token_probs = combined_weights[:num_tokens].clone()
         return (
             combined_x,
@@ -1117,15 +1078,11 @@ class MoriCombine(torch.autograd.Function):
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # Reuse the total_recv saved in forward. NO clone: dispatch_out is a raw view
-        # into MORI's reusable symmetric-memory dispatch output buffer, returned as the
-        # input gradient. Mirroring the forward permute-in-dispatch fusion, the consumer
-        # of this grad -- the fused unpermute's backward gather (see _MoriManager.combine)
-        # -- runs inside the combine node, on the SAME comm stream, immediately after this
-        # op.dispatch and before any sibling MORI op overwrites the shared buffer. So the
-        # view is consumed while still valid; no defensive copy is needed. (Cloning would
-        # only be required if the consumer ran on a different stream/node, as it did when
-        # the unpermute lived in the mlp node.)
+        # NO clone needed here. dispatch_out is a raw view into MORI's reusable buffer, which a
+        # later MORI op will overwrite. That's safe because the next thing to read this grad is the
+        # fused unpermute's backward (in _MoriManager.combine), which runs on the same comm stream
+        # right after this op.dispatch -- so it reads the view and creates an unpermuted tensor
+        # before any later op can overwrite it.
         return (
             dispatch_out[: ctx.total_recv],
             None,

@@ -292,18 +292,21 @@ def get_gpus_per_node():
     return torch.cuda.device_count()
 
 
-def reinitialize_model_parallel_for_mori():
+def reinitialize_model_parallel_for_mori(tp_size=1):
     """Re-initialize a node-spanning expert-parallel layout for MORI and return ``ep_size``.
 
-    MORI's ``EpDispatchCombineHandle`` requires the expert (ETPxEP) communicator to span
-    whole nodes (``ETPxEP % gpuPerNode == 0``). The a2a-overlap test classes initialize a
-    sub-node ``EP=4`` / ``ETP=1`` layout in ``setup_method`` (fine for alltoall/DeepEP but
-    ``4 % 8 != 0`` for MORI on an 8-GPU node), so a MORI case must re-initialize to a
-    node-spanning layout instead of skipping. This mirrors ``test_1f1b_schedule_model_chunk_mori``:
-    ``EP == gpuPerNode`` with ``ETP=1``.
+    MORI's ``EpDispatchCombineHandle`` requires the expert (EP) communicator to span whole
+    nodes (``EP % gpuPerNode == 0``). The a2a-overlap test classes initialize a sub-node
+    ``EP=4`` / ``ETP=1`` layout in ``setup_method`` (fine for alltoall/DeepEP but ``4 % 8 !=
+    0`` for MORI on an 8-GPU node), so a MORI case must re-initialize to a node-spanning
+    layout instead of skipping.
 
-    ``pytest.skip`` is raised only when the node GPU count is not a power of two -- MORI's
-    other hard constraint, which no layout can satisfy.
+    ``EP`` is kept constant at ``gpuPerNode`` while ``TP`` varies independently (parallel
+    folding: ``TP * EP`` need not equal the node width). Only ``tensor_model_parallel_size``
+    is set; ``expert_tensor_parallel_size`` stays at ``1``.
+
+    ``pytest.skip`` is raised when the node GPU count is not a power of two -- MORI's other
+    hard constraint, which no layout can satisfy.
 
     Returns the expert-parallel size used, to be forwarded to ``get_test_config`` via
     ``extra_kwargs["expert_model_parallel_size"]``.
@@ -319,15 +322,17 @@ def reinitialize_model_parallel_for_mori():
             "MORI EP requires a power-of-two GPU count that the expert communicator "
             f"can span; got gpus_per_node={gpus_per_node}."
         )
+    # Parallel folding: EP spans the whole node, TP varies independently.
+    ep_size = gpus_per_node
     Utils.destroy_model_parallel()
     Utils.initialize_model_parallel(
-        tensor_model_parallel_size=1,
+        tensor_model_parallel_size=tp_size,
         pipeline_model_parallel_size=1,
-        expert_model_parallel_size=gpus_per_node,
+        expert_model_parallel_size=ep_size,
         expert_tensor_parallel_size=1,
     )
     set_streams()
-    return gpus_per_node
+    return ep_size
 
 
 # Bit-exact comparison is impossible for MORI: its dispatch assigns recv-buffer slots
@@ -355,27 +360,6 @@ def get_compare_tolerances(flex_backend):
     if flex_backend == "mori":
         return MORI_COMPARE_ATOL, MORI_COMPARE_RTOL
     return None, None
-
-
-def get_valid_dispatcher_configs():
-    """Return the (dispatcher_type, flex_backend) combinations available in this environment.
-
-    ``alltoall`` is always available. The ``flex`` dispatcher is exercised with every
-    fused EP backend that can actually be imported (currently ``deepep``), so the same
-    1f1b overlap test validates each backend without generating cases for backends that
-    are not installed.
-
-    MORI is intentionally *not* included here: it requires the expert (ETPxEP)
-    communicator to span whole nodes, which forces a full-node re-initialization that is
-    incompatible with the sub-node EP=4 layout these parametrized tests share. Mixing that
-    re-init into the interleaved parametrization corrupts the process-group state for the
-    following (non-MORI) cases and desyncs collectives. MORI is covered by dedicated tests
-    that own their topology instead (e.g. ``test_1f1b_schedule_model_chunk_mori``).
-    """
-    configs = [("alltoall", None)]
-    if is_deepep_available():
-        configs.append(("flex", "deepep"))
-    return configs
 
 
 def apply_dispatcher_extra_kwargs(extra_kwargs, dispatcher_type, flex_backend):

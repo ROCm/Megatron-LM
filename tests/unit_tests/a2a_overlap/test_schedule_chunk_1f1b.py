@@ -20,8 +20,8 @@ from tests.unit_tests.a2a_overlap.utils import (
     deterministic_mode,
     get_compare_tolerances,
     get_test_config,
-    get_valid_dispatcher_configs,
     get_valid_fp8_flags,
+    get_valid_token_dispatcher_types,
     is_mori_available,
     reinitialize_model_parallel_for_mori,
 )
@@ -96,12 +96,10 @@ class TestA2AOverlap:
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("mtp_layers", [0, 1])
-    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
+    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
     @pytest.mark.parametrize("layers", [[2, 1], [1, 2], [1, 1]])
-    def test_1f1b_schedule_model_chunk(
-        self, mtp_layers, dispatcher_type, flex_backend, fp8_flag, layers
-    ):
+    def test_1f1b_schedule_model_chunk(self, mtp_layers, dispatcher_type, fp8_flag, layers):
         """
         Verifies all-to-all overlap optimization in transformer layer produces
         the same results as the reference implementation.
@@ -114,8 +112,11 @@ class TestA2AOverlap:
         datas = []
 
         # create TransformerConfig
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, dispatcher_type, flex_backend)
+        extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
 
+        if dispatcher_type == "flex":
+            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
+            extra_kwargs["moe_router_dtype"] = "fp32"
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
@@ -178,11 +179,8 @@ class TestA2AOverlap:
                     a2a_captures[i][name] = param.grad
 
             # compare results
-            atol, rtol = get_compare_tolerances(flex_backend)
             for i in range(len(ref_captures)):
-                comp_res = compare_captures(
-                    ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
-                )
+                comp_res = compare_captures(ref_captures[i], a2a_captures[i], True, True)
                 assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
             # release resources is necessary, otherwise later testcases will oom
@@ -199,12 +197,10 @@ class TestA2AOverlap:
             torch.cuda.empty_cache()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
+    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
     @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
     @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-    def test_1f1b_schedule_model_chunk_with_padding_mask(
-        self, dispatcher_type, flex_backend, layers, tp_size
-    ):
+    def test_1f1b_schedule_model_chunk_with_padding_mask(self, dispatcher_type, layers, tp_size):
         """
         Verifies all-to-all overlap optimization with padding_mask produces
         the same results as the reference implementation with various TP/EP/CP combinations.
@@ -227,9 +223,14 @@ class TestA2AOverlap:
         datas = []
 
         # create TransformerConfig
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, dispatcher_type, flex_backend)
-        extra_kwargs["tensor_model_parallel_size"] = tp_size
-        extra_kwargs["sequence_parallel"] = tp_size > 1
+        extra_kwargs = {
+            "moe_token_dispatcher_type": dispatcher_type,
+            "tensor_model_parallel_size": tp_size,
+            "sequence_parallel": tp_size > 1,
+        }
+        if dispatcher_type == "flex":
+            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
+            extra_kwargs["moe_router_dtype"] = "fp32"
         with deterministic_mode():
             for layer_num in layers:
                 output_tensors = []
@@ -284,11 +285,8 @@ class TestA2AOverlap:
                     a2a_captures[i][name] = param.grad
 
             # compare results
-            atol, rtol = get_compare_tolerances(flex_backend)
             for i in range(len(ref_captures)):
-                comp_res = compare_captures(
-                    ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
-                )
+                comp_res = compare_captures(ref_captures[i], a2a_captures[i], True, True)
                 assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
             # release resources is necessary, otherwise later testcases will oom
@@ -308,22 +306,25 @@ class TestA2AOverlap:
     @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
     @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
     @pytest.mark.parametrize("use_padding_mask", [False, True])
-    def test_1f1b_schedule_model_chunk_mori(self, layers, use_padding_mask):
+    @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
+    def test_1f1b_schedule_model_chunk_mori(self, layers, use_padding_mask, tp_size):
         """
         Verifies all-to-all overlap optimization with the MORI EP backend produces the
         same results as the reference implementation.
 
         MORI is kept in a dedicated test (rather than the shared parametrization) because
-        its ``EpDispatchCombineHandle`` requires the expert (ETPxEP) communicator to span
-        whole nodes. This test re-initializes a full-node expert-parallel layout
-        (ETP=1, EP=gpus_per_node) that it fully owns; interleaving that re-init with the
-        sub-node cases in the parametrized tests corrupts the shared process-group state
-        and desyncs collectives. Skipped when the node's GPU count is not a power of two.
+        its ``EpDispatchCombineHandle`` requires the expert (EP) communicator to span whole
+        nodes. This test re-initializes a node-spanning expert-parallel layout
+        (EP=gpus_per_node, ETP=1) with ``TP`` folded in independently (parallel folding, so
+        ``TP * EP`` need not equal the node width); it fully owns this layout because
+        interleaving the re-init with the sub-node cases in the parametrized tests corrupts
+        the shared process-group state and desyncs collectives. Skipped when the node's GPU
+        count is not a power of two.
         """
-        # Re-initialize with a full-node expert-parallel layout so the MORI expert
-        # communicator aligns to the node (ETPxEP == gpus_per_node). Skips when the node
-        # GPU count is not a power of two.
-        ep_size = reinitialize_model_parallel_for_mori()
+        # Re-initialize with a node-spanning expert-parallel layout so the MORI expert
+        # communicator aligns to the node (EP == gpus_per_node). TP folds in independently.
+        # Skips when the node GPU count is not a power of two.
+        ep_size = reinitialize_model_parallel_for_mori(tp_size)
 
         microbatches = 1
 
@@ -336,6 +337,8 @@ class TestA2AOverlap:
         flex_backend = "mori"
         extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", flex_backend)
         extra_kwargs["expert_model_parallel_size"] = ep_size
+        extra_kwargs["tensor_model_parallel_size"] = tp_size
+        extra_kwargs["sequence_parallel"] = tp_size > 1
         with deterministic_mode():
             for layer_num in layers:
                 output_tensors = []
