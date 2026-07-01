@@ -126,11 +126,13 @@ jobs:
       - name: Run unit tests in container
         run: |
           set -euxo pipefail
+          DEVICE_FLAGS="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
+          test -n "$DEVICE_FLAGS"
           docker run --rm \
             --network=host \
             -u root \
-            --device=/dev/kfd \
-            --device=/dev/dri \
+            --device=/dev/kfd $DEVICE_FLAGS \
+            --group-add "$(getent group render | cut -d: -f3)" \
             --group-add "$(getent group video | cut -d: -f3)" \
             --cap-add=SYS_PTRACE \
             --security-opt seccomp=unconfined \
