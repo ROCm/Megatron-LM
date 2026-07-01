@@ -1457,10 +1457,16 @@ class _MoriManager(_DispatchManager):
 
         # Deferred-sync prefetch: async DtoH of the device per-expert counts into
         # the pinned buffer + event. No host sync here -- the read is deferred to
-        # get_permuted_hidden_states_by_experts / get_number_of_tokens_per_expert.
+        # _permute_by_experts (fused path) / get_number_of_tokens_per_expert.
         self._prefetch_tokens_per_expert(num_tokens_per_expert)
 
-        return hidden_states
+        # Mirror HybridEP: fuse the copy-out of MORI's reusable symmetric-memory
+        # dispatch buffer into the expert permute, and run that permute here inside
+        # the dispatch node (see MoriDispatch.forward for why this removes the
+        # defensive clone). The freshly permuted, per-expert-grouped tensor becomes
+        # the dispatch node's output; get_permuted_hidden_states_by_experts is then
+        # a no-op that returns it.
+        return self._permute_by_experts(hidden_states)
 
     def _prefetch_tokens_per_expert(self, tokens_per_expert: torch.Tensor) -> None:
         """Async-copy device per-expert counts into the pinned CPU buffer.
@@ -1575,7 +1581,17 @@ class _MoriManager(_DispatchManager):
             tokens_per_expert = target_tokens_per_expert
         return routing_map, tokens_per_expert
 
-    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+    def _permute_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Convert dispatched indices to multihot and permute tokens by expert.
+
+        Mirrors HybridEP by running the expert permute inside dispatch() (the
+        fine-grained dispatch node). The permute reads MORI's raw symmetric-memory
+        dispatch view and writes a fresh, private per-expert tensor -- this is the
+        fused copy-out that replaces the former defensive dispatch_out.clone().
+        The permuted probs are stashed in self.dispatched_probs so token_dispatch
+        returns them alongside the permuted tokens; get_permuted_hidden_states_by_experts
+        then just hands them back.
+        """
         if is_experimental_enabled() and self.permute_fusion:
             self.dispatched_routing_map, self.dispatched_probs = fused_indices_to_multihot(
                 self.dispatched_indices, self.dispatched_probs, self.num_local_experts
@@ -1618,7 +1634,16 @@ class _MoriManager(_DispatchManager):
         if self.router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
 
-        return hidden_states, permuted_probs
+        # Stash permuted probs so token_dispatch returns them and the (detached)
+        # copy flows back in via submodule_moe_forward, mirroring HybridEP.
+        self.dispatched_probs = permuted_probs
+        return hidden_states
+
+    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # No-op: the permute is fused into dispatch() (see _permute_by_experts),
+        # so the tokens are already grouped by expert. dispatched_probs holds the
+        # permuted probs (its detached copy is re-installed by submodule_moe_forward).
+        return hidden_states, self.dispatched_probs
 
     def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         hidden_states = unpermute(

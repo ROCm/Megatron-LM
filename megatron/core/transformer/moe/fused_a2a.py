@@ -915,14 +915,23 @@ class MoriDispatch(torch.autograd.Function):
         # buffer. Clone to give combine a stable private copy of this layer's weights.
         raw_dispatch_weights = dispatch_weights.detach().clone()
         ctx.mark_non_differentiable(recv_token_indices, tokens_per_expert, raw_dispatch_weights)
-        # dispatch_out is a view into MORI's reusable symmetric-memory dispatch output
-        # buffer. It is the expert GEMM's input activation, which the GEMM saves for its
-        # weight-gradient pass. The next dispatch() on the same cached op overwrites this
-        # buffer, so by wgrad time (after later layers/microbatches dispatch in the 1f1b
-        # overlap schedule) the saved activation would be corrupted -- the forward output
-        # is already computed (so loss matches) but wgrad would read stale tokens. Clone
-        # to give the experts a stable private copy of this layer's dispatched tokens.
-        dispatch_out = dispatch_out.clone()
+        # dispatch_out is returned as a raw zero-copy view into MORI's reusable
+        # symmetric-memory dispatch output buffer -- NO defensive clone here.
+        #
+        # Mirroring HybridEP, the caller (_MoriManager.dispatch) fuses the copy-out
+        # of this buffer into the expert permute and runs that permute *inside the
+        # dispatch node*, on the compute stream, before returning. Two facts make
+        # this safe without a clone:
+        #   1) The permute output is a freshly allocated private tensor, so the
+        #      expert GEMM's saved-for-backward activation is never aliased to the
+        #      symmetric buffer, and backward (permute scatter + MoriDispatch via
+        #      combine) never re-reads this buffer.
+        #   2) _run_mori_op_on_stream brackets every dispatch() with
+        #      comm_stream.wait_stream(compute_stream). Because the permute is
+        #      enqueued on the compute stream within the dispatch node (i.e. before
+        #      any sibling microbatch's dispatch is issued), the next dispatch's
+        #      a2a is ordered after this permute and cannot overwrite the buffer
+        #      while it is still being read.
         return (
             dispatch_out,
             recv_token_indices,
