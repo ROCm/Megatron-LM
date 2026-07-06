@@ -1147,14 +1147,15 @@ def validate_args(args, defaults={}):
     # With sequence parallelism the sequence dimension is sharded across TP ranks;
     # with context parallelism it's sharded across CP ranks.
     if getattr(args, 'moe_flex_dispatcher_backend', None) == 'mori' and args.moe_mori_max_tokens_per_rank is None:
+        # Use ceiling division: when the token dimension isn't evenly divisible by CP or SP
         per_rank_tokens = args.micro_batch_size * args.seq_length
         if args.context_parallel_size > 1:
-            per_rank_tokens //= args.context_parallel_size
+            per_rank_tokens = -(-per_rank_tokens // args.context_parallel_size)
         if (
             getattr(args, 'sequence_parallel', False)
             and args.tensor_model_parallel_size > 1
         ):
-            per_rank_tokens //= args.tensor_model_parallel_size
+            per_rank_tokens = -(-per_rank_tokens // args.tensor_model_parallel_size)
         args.moe_mori_max_tokens_per_rank = per_rank_tokens
         if args.rank == 0:
             print(

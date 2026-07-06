@@ -1417,8 +1417,8 @@ class _MoriManager(_DispatchManager):
     def dispatch(
         self,
         hidden_states: torch.Tensor,
-        async_finish: bool = False,
-        allocate_on_comm_stream: bool = False,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> torch.Tensor:
         # MORI EP only supports float32 probs (matches DeepEP path)
         if self.token_probs.dtype != torch.float32:
@@ -1522,8 +1522,8 @@ class _MoriManager(_DispatchManager):
     def combine(
         self,
         hidden_states: torch.Tensor,
-        async_finish: bool = False,
-        allocate_on_comm_stream: bool = False,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> torch.Tensor:
         # Mirror HybridEP: fuse the unpermute into the combine node (comm stream) so MoriCombine.backward
         # can skip its clone -- its backward gather reads the grad view before a later op overwrites it.

@@ -9,7 +9,7 @@ import torch
 from megatron.core import config, parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
 from megatron.core.transformer.moe.moe_utils import get_capacity
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -487,7 +487,6 @@ class TestFlexDispatcher:
         # Full MORI teardown so the next parametrized case (different tp/ep →
         # num_local_experts, router_topk) cannot inherit shmem staging or a
         # stale EpDispatchCombineOp handle from the previous test.
-        reset_mori_op()
         finalize_mori_shmem()
         Utils.destroy_model_parallel()
 
@@ -616,7 +615,6 @@ class TestMoriSharedOp:
         pass
 
     def teardown_method(self, method):
-        reset_mori_op()
         finalize_mori_shmem()
         Utils.destroy_model_parallel()
 
