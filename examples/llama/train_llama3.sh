@@ -79,9 +79,37 @@ TE_FP8_RECIPE="${TE_FP8_RECIPE:-delayed}" # Options: delayed, tensorwise, mxfp8
 TE_FP4="${TE_FP4:-0}"  # 0: disable FP4, 1: enable FP4
 TE_FP4_RECIPE="${TE_FP4_RECIPE:-nvfp4}" # Options: nvfp4, mxfp4
 FP4_PARAM_GATHER="${FP4_PARAM_GATHER:-0}"
-FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-1}"  # 1: keep first/last layers in BF16 (NVFP4 paper recipe)
+# nvfp4 keeps first/last layers in BF16 (NVFP4 paper recipe); mxfp4 uses all layers in FP4 (MLPerf recipe).
+if [ "$TE_FP4_RECIPE" == "mxfp4" ]; then
+    FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-0}"  # mxfp4: all layers in FP4 (set 1 to keep first/last in BF16)
+else
+    FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-1}"  # nvfp4: keep first/last layers in BF16 (NVFP4 paper recipe)
+fi
 FP4_BF16_START="${FP4_BF16_START:-2}"    # Number of layers at start in BF16 (paper: 2)
 FP4_BF16_END="${FP4_BF16_END:-8}"        # Number of layers at end in BF16 (paper: 8)
+
+# --- Fusion / data-parallel-comm perf toggles (ON by default; ~+3.5-7% across bf16/fp8/fp4). Set 0 to disable. ---
+GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-1}"  # fuse wgrad accumulation into the GEMM
+DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradient averaging into the DP collective
+CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
+CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
+FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
+# NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP-reduce
+# bandwidth at the cost of some gradient-comm precision. Convergence-neutral: a controlled 2x2 on C4
+# (LLaMA3-8B, BS=32, lr 8e-4) showed bf16 converges with this ON or OFF — convergence was gated by adam-eps,
+# NOT this toggle. The Megatron default adam-eps=1e-8 plateaus at lr 8e-4; use 1e-5 (the MLPerf llama3.1-8B
+# config primus/.../MI355X/llama3.1_8B-pretrain-FP8.yaml sets adam_eps: 1.0e-5). Kept ON as a perf win.
+# mxfp4 REQUIRES it ON (a4w4 asm wgrad emits BF16 only) — auto-forced by the guard below.
+GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
+# mxfp4 needs a BF16 gradient buffer: the aiter a4w4 asm wgrad GEMM only emits BF16 output, so when wgrad is
+# fused into the grad buffer (gradient_accumulation_fusion=1) that buffer must be BF16. If you set
+# GRAD_REDUCE_IN_BF16=0 (FP32 buffer) the run crashes ("gemm_a4w4_asm only support BFloat16 output now!").
+# Re-force it on for mxfp4; set gradient_accumulation_fusion=0 instead if you must keep an FP32 grad buffer.
+if [ "$TE_FP4" -eq 1 ] && [ "$TE_FP4_RECIPE" == "mxfp4" ] && [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ] && [ "$GRAD_REDUCE_IN_BF16" -ne 1 ]; then
+    echo "mxfp4 + gradient_accumulation_fusion requires GRAD_REDUCE_IN_BF16=1 (a4w4 asm wgrad emits BF16 only); forcing it on."
+    GRAD_REDUCE_IN_BF16=1
+fi
+
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
@@ -130,7 +158,20 @@ fi
 
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
-DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/TE_FP8_${TE_FP8}/${TIME_STAMP}"
+# Precision tag for the log directory: bf16 | fp8 | fp8_tensorwise | mxfp8 | mxfp4 | nvfp4
+if [ "$TE_FP4" -eq 1 ]; then
+    PREC_TAG="$TE_FP4_RECIPE"            # mxfp4 | nvfp4
+elif [ "$TE_FP8" -eq 1 ]; then
+    case "$TE_FP8_RECIPE" in
+        delayed)    PREC_TAG="fp8" ;;
+        tensorwise) PREC_TAG="fp8_tensorwise" ;;
+        mxfp8)      PREC_TAG="mxfp8" ;;
+        *)          PREC_TAG="fp8_${TE_FP8_RECIPE}" ;;
+    esac
+else
+    PREC_TAG="bf16"
+fi
+DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/${PREC_TAG}/${TIME_STAMP}"
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
 TRAIN_LOG="${LOG_DIR}/output_${EXP_NAME}.log"
 mkdir -p $LOG_DIR
@@ -207,6 +248,21 @@ if [ "$RECOMPUTE" -eq 1 ]; then
 fi
 if [ "$ROPE_FUSION" -eq 0 ]; then
     GPT_ARGS="$GPT_ARGS --no-rope-fusion"
+fi
+
+# Fusion / mixed-precision toggles -> GPT_ARGS, matching their arguments.py groups (transformer
+# config, training, mixed precision) — same buckets as --no-bias-swiglu-fusion, --train-iters, --bf16.
+if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 0 ]; then
+    GPT_ARGS="$GPT_ARGS --no-gradient-accumulation-fusion"
+fi
+if [ "$CROSS_ENTROPY_LOSS_FUSION" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --cross-entropy-loss-fusion --cross-entropy-fusion-impl $CROSS_ENTROPY_FUSION_IMPL"
+fi
+if [ "$FUSED_SINGLE_QKV_ROPE" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --fused-single-qkv-rope"
+fi
+if [ "$GRAD_REDUCE_IN_BF16" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --grad-reduce-in-bf16"
 fi
 
 TRAIN_ARGS="--lr 1e-4 \
@@ -287,7 +343,6 @@ DISTRIBUTED_ARGS="
 EXTRA_ARGS="
     --group-query-attention \
     --num-query-groups $NUM_GROUPS \
-    --no-gradient-accumulation-fusion \
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
     --overlap-grad-reduce \
@@ -419,6 +474,11 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
         echo "Megatron HSDP is enabled with $HSDP_NUM_REPLICAS DP outer replicas"
         EXTRA_ARGS="$EXTRA_ARGS --num-distributed-optimizer-instances $HSDP_NUM_REPLICAS"
     fi
+fi
+
+# DP-comm toggle -> EXTRA_ARGS ('distributed' arg group in arguments.py, alongside --overlap-grad-reduce)
+if [ "$DDP_AVERAGE_IN_COLLECTIVE" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --ddp-average-in-collective"
 fi
 
 run_cmd="
