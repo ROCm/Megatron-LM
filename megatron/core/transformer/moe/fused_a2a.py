@@ -13,6 +13,8 @@ try:
 except ImportError:
     HAVE_DEEP_EP = False
 
+import os
+
 import torch
 
 _buffer = None
@@ -746,6 +748,11 @@ def get_mori_op(
     rank = torch.distributed.get_rank(group)
 
     resolved_kernel_type = _resolve_mori_kernel_type(kernel_type, world_size)
+
+    # MORI reads the launch-config mode only from this env var. Default to AUTO.
+    launch_config_mode = os.environ.setdefault("MORI_EP_LAUNCH_CONFIG_MODE", "AUTO")
+    if rank == 0:
+        print(f"[MORI EP] MORI_EP_LAUNCH_CONFIG_MODE={launch_config_mode}")
 
     dispatch_dtype = torch.float8_e4m3fnuz if fp8_dispatch else data_type
     scale_dim = hidden_dim // 128 if fp8_dispatch else 0
