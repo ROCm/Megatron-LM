@@ -754,15 +754,15 @@ def get_mori_op(
     if rank == 0:
         print(f"[MORI EP] MORI_EP_LAUNCH_CONFIG_MODE={launch_config_mode}")
 
-    dispatch_dtype = torch.float8_e4m3fnuz if fp8_dispatch else data_type
-    scale_dim = hidden_dim // 128 if fp8_dispatch else 0
+    # TODO: Look into wiring fp8 dispatch in the future.
+    assert not fp8_dispatch, "MORI EP FP8 dispatch is not integrated yet"
 
     config = mori.ops.EpDispatchCombineConfig(
-        data_type=dispatch_dtype,
+        data_type=data_type,
         rank=rank,
         world_size=world_size,
         hidden_dim=hidden_dim,
-        scale_dim=scale_dim,
+        scale_dim=0,
         scale_type_size=torch.tensor([], dtype=torch.float8_e4m3fnuz).element_size(),
         max_token_type_size=torch.tensor([], dtype=torch.float32).element_size(),
         max_num_inp_token_per_rank=max_num_tokens_per_rank,
