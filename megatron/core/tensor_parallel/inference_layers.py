@@ -118,8 +118,14 @@ class InferenceLayerNormColumnParallelLinear(TELayerNormColumnParallelLinear):
 
         # 1. check if bf16
         is_bf16 = x.dtype == torch.bfloat16
-        # 2. check if hopper or newer
-        is_hopper_or_newer = torch.cuda.get_device_properties(x.device).major >= 9
+        # 2. check if hopper or newer NVIDIA GPU.
+        #    The multimem PTX kernels under torch_symm_triton are NVIDIA-only;
+        #    AMD GPUs (e.g. gfx942) also report major>=9, so guard on cuda build.
+        is_hopper_or_newer = (
+            torch.version.hip is None
+            and torch.version.cuda is not None
+            and torch.cuda.get_device_properties(x.device).major >= 9
+        )
         # 3. check if symmetric memory buffer is available
         has_enough_symmetric_memory = symm_mem_buffer["handle"] is not None
         can_use_custom_nvls_collectives = (
@@ -218,8 +224,14 @@ class InferenceRowParallelLinear(TERowParallelLinear):
         """
         # 1. check if bf16
         is_bf16 = x.dtype == torch.bfloat16
-        # 2. check if hopper
-        is_hopper_or_newer = torch.cuda.get_device_properties(x.device).major >= 9
+        # 2. check if hopper or newer NVIDIA GPU.
+        #    The multimem PTX kernels under torch_symm_triton are NVIDIA-only;
+        #    AMD GPUs (e.g. gfx942) also report major>=9, so guard on cuda build.
+        is_hopper_or_newer = (
+            torch.version.hip is None
+            and torch.version.cuda is not None
+            and torch.cuda.get_device_properties(x.device).major >= 9
+        )
         # 3. attempt to ask for symmetric memory
         symm_mem_buffer_dims = list(x.size())
         symm_mem_buffer_dims[-1] = self.weight.size(0)

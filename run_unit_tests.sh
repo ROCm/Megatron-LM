@@ -13,7 +13,7 @@ echo "Number of GPUs: $NUM_GPUS"
 OUT_DIR=output
 mkdir -p "$OUT_DIR"
 
-PYTEST_MARKERS="(not flaky and not flaky_in_dev and not internal and not failing_on_rocm and not failing_on_upstream or test_on_rocm) and not experimental"
+PYTEST_MARKERS="(not flaky and not flaky_in_dev and not failing_on_rocm and not failing_on_upstream or test_on_rocm) and not experimental"
 
 if [[ "$HIP_ARCHITECTURES" == "gfx90a" ]]; then
     PYTEST_MARKERS="$PYTEST_MARKERS and not failing_on_rocm_mi250"
