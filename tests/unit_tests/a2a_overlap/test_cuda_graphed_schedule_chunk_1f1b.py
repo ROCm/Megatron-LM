@@ -41,6 +41,12 @@ def is_hybrid_ep_available():
     return HAVE_HYBRIDEP
 
 
+def is_mori_available():
+    from megatron.core.transformer.moe.fused_a2a import HAVE_MORI
+
+    return HAVE_MORI
+
+
 def save(fn, message):
     with open(fn, 'w') as f:
         f.write(message)
@@ -68,6 +74,12 @@ class TestPartialCudaGraphedA2AOverlap:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+        # Full MORI teardown so a cached EpDispatchCombineOp / shmem staging cannot leak
+        # into later tests. Safe no-ops when MORI is not installed.
+        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+
+        reset_mori_op()
+        finalize_mori_shmem()
         Utils.destroy_model_parallel()
         destroy_global_vars()
         destroy_num_microbatches_calculator()
@@ -339,7 +351,7 @@ class TestPartialCudaGraphedA2AOverlap:
         not (HAVE_TE and is_te_min_version("2.10.0")),
         reason="Partial CUDA graph support requires TransformerEngine version >= 2.10.0",
     )
-    @pytest.mark.parametrize("moe_dispatcher_type", ["alltoall", "deepep"])
+    @pytest.mark.parametrize("moe_dispatcher_type", ["alltoall", "deepep", "mori"])
     def test_moe_partial_cudagraph_with_ep_overlap(self, moe_dispatcher_type):
         extra_kwargs = {"moe_layer_freq": 1}
         if moe_dispatcher_type == "deepep":
@@ -353,6 +365,15 @@ class TestPartialCudaGraphedA2AOverlap:
                 pytest.skip("Hybrid EP is not available")
             extra_kwargs["moe_token_dispatcher_type"] = "flex"
             extra_kwargs["moe_flex_dispatcher_backend"] = "hybridep"
+        elif moe_dispatcher_type == "mori":
+            if not is_mori_available():
+                pytest.skip("MORI is not available")
+            extra_kwargs["moe_token_dispatcher_type"] = "flex"
+            extra_kwargs["moe_flex_dispatcher_backend"] = "mori"
+            extra_kwargs["moe_router_dtype"] = "fp32"
+            # Sender-side row capacity for MORI's symmetric-memory buffers; generously
+            # larger than micro_batch_size * seq_length for this test.
+            extra_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         else:
             extra_kwargs["moe_token_dispatcher_type"] = moe_dispatcher_type
 

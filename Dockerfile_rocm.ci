@@ -79,6 +79,9 @@ git clone ${FA_REPO} \
 && MAX_JOBS=128 GPU_ARCHS=${PYTORCH_ROCM_ARCH_OVERRIDE} python3 setup.py install; \
 fi
 
+# CMake/ninja required by TransformerEngine, grouped_gemm, MORI, etc.
+RUN pip install cmake ninja
+
 # Clone TE repo and submodules
 WORKDIR ${STAGE_DIR}
 
@@ -106,6 +109,22 @@ RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
     cd Emerging-Optimizers &&\
     git checkout v0.1.0 &&\
     pip install --no-build-isolation .
+
+# MORI EP (MoE dispatch/combine) for --moe-flex-dispatcher-backend mori
+ARG MORI_BRANCH=a14e6992ffa95478e83127fe2672afff2840856f
+ARG MORI_REPO=https://github.com/ROCm/mori.git
+RUN rm -f /etc/apt/sources.list.d/rocm.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpci-dev \
+        libibverbs-dev
+
+WORKDIR ${STAGE_DIR}
+RUN git clone ${MORI_REPO} mori &&\
+    cd mori &&\
+    git checkout ${MORI_BRANCH} &&\
+    echo "MORI at commit:" $(git rev-parse HEAD) &&\
+    BUILD_UMBP=OFF pip install .
 
 WORKDIR $WORKSPACE_DIR
 COPY . Megatron-LM
