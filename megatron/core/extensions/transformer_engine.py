@@ -1745,19 +1745,36 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 self.te_quant_params, self.training, is_context_quantized
             )
 
-        def forward(self, x, m_splits, m_splits_gpu=None):
+        def forward(self, x, m_splits, m_splits_gpu=None, permute_free_metadata=None):
             """Forward."""
             _is_first_microbatch = (
                 None if self.disable_parameter_transpose_cache else self.is_first_microbatch
             )
             quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
+            # Permute-free route-list GEMM: forward the PermuteFreeMetadata (which carries the
+            # boolean routing_map + the route_space direction) to TE. FC1 gathers per expert
+            # internally (route_space=False); FC2 reads route-ordered input and fuses the
+            # scatter back to token order (route_space=True). The metadata is built once and
+            # shared across FC1/FC2 to avoid a duplicate align build.
+            routing_kwargs = {}
+            if permute_free_metadata is not None:
+                if not class_has_method_param(
+                    te.pytorch.GroupedLinear, "forward", "permute_free_metadata"
+                ):
+                    raise RuntimeError(
+                        "moe_permute_free_grouped_gemm is enabled but the installed "
+                        "Transformer Engine's GroupedLinear.forward does not accept "
+                        "`permute_free_metadata`. Please upgrade Transformer Engine."
+                    )
+                routing_kwargs["permute_free_metadata"] = permute_free_metadata
+
             # Check if parent class forward supports m_splits_tensor parameter
             # Added in TE commit: https://github.com/ROCm/TransformerEngine/commit/2776c33
             if is_te_min_version("2.7.0", check_equality=False):
                 if class_has_method_param(te.pytorch.GroupedLinear, "forward", "m_splits_tensor"):
                     with quant_context:
-                        out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, m_splits_tensor=m_splits_gpu)
+                        out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, m_splits_tensor=m_splits_gpu, **routing_kwargs)
                 else:
                     warnings.warn(
                         "Transformer Engine is missing `m_splits_tensor` parameter in GroupedLinear.forward; "
@@ -1766,10 +1783,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                         UserWarning,
                     )
                     with quant_context:
-                        out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+                        out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, **routing_kwargs)
             else:
                 with quant_context:
-                    out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+                    out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch, **routing_kwargs)
 
             self.is_first_microbatch = False
 

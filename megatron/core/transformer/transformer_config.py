@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
 
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import Callable, List, Literal, Optional, Tuple, Union
@@ -731,6 +732,12 @@ class TransformerConfig(ModelParallelConfig):
 
     moe_permute_fusion: bool = False
     """Fuse token rearrangement ops during token dispatching."""
+
+    moe_permute_free_grouped_gemm: bool = False
+    """[Experimental][ROCm] Use TransformerEngine's permute-free gather-in-GEMM path for the
+    expert GroupedLinear layers instead of permuting/unpermuting tokens locally. Only supported
+    with the flex token dispatcher + MORI backend, bf16, no bias, and non-fp8/fp4. When enabled,
+    the training entry point auto-sets NVTE_PERMUTE_FREE_GROUPED_GEMM=1."""
 
     moe_router_fusion: bool = False
     """Enable fusion for MoE TopK routing and aux-loss computation. This is only
@@ -1896,6 +1903,45 @@ class TransformerConfig(ModelParallelConfig):
                 or fused_unpermute is None
             ):
                 raise ValueError("fused permutation is not available. Please install TE >= 2.1.0.")
+
+        if self.moe_permute_free_grouped_gemm:
+            if self.moe_token_dispatcher_type != "flex":
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm requires "
+                    "--moe-token-dispatcher-type=flex."
+                )
+            if self.moe_flex_dispatcher_backend != "mori":
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm requires "
+                    "--moe-flex-dispatcher-backend=mori."
+                )
+            if not self.bf16:
+                raise ValueError("moe_permute_free_grouped_gemm requires bf16.")
+            if self.add_bias_linear:
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm does not support bias; "
+                    "use --disable-bias-linear."
+                )
+            if self.fp8 is not None or self.fp4 is not None:
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm does not support fp8/fp4."
+                )
+            if not self.moe_grouped_gemm or self.moe_use_legacy_grouped_gemm:
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm requires TEGroupedMLP; "
+                    "enable --moe-grouped-gemm and disable --moe-use-legacy-grouped-gemm."
+                )
+            if self.gradient_accumulation_fusion:
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm is incompatible with wgrad-accumulation "
+                    "fusion (TE runs the standard grouped GEMM in that case). Pass "
+                    "--no-gradient-accumulation-fusion."
+                )
+            if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1":
+                raise ValueError(
+                    "moe_permute_free_grouped_gemm and NVTE_USE_GROUPED_GEMM_TRITON "
+                    "cannot both be enabled."
+                )
 
         if self.overlap_moe_expert_parallel_comm:
             # TODO: remove this after we fix the hang issue with torch version < 2.6.0

@@ -419,6 +419,7 @@ if [ "$IS_MOE" -eq 1 ]; then
         --moe-router-dtype fp32 \
         --moe-aux-loss-coeff ${MOE_AUX_LOSS} \
         --moe-router-load-balancing-type aux_loss \
+        --moe-permute-free-grouped-gemm \
         --expert-model-parallel-size ${EP} \
         --expert-tensor-parallel-size ${ETP} \
         ${moe_permute_fusion_options} \
@@ -560,7 +561,7 @@ elif [ "$OPTIMIZER_OFFLOAD" = auto ]; then
 else
     offload_option=""
 fi
-
+GA_FUSION=false
 if [ "$GA_FUSION" = true ]; then
     ga_fusion_opt=""
 else

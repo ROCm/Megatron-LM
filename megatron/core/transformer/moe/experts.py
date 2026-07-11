@@ -40,6 +40,11 @@ from megatron.core.transformer.moe.moe_utils import (
     ProcessGroupCollection,
     get_align_size_for_quantization,
 )
+from megatron.core.transformer.moe.permute_free_grouped_gemm import (
+    as_route_space,
+    build_padded_route_probs,
+    make_permute_free_metadata,
+)
 from megatron.core.transformer.spec_utils import build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import (
@@ -630,6 +635,7 @@ class TEGroupedMLP(MegatronModule):
         permuted_local_hidden_states: torch.Tensor,
         tokens_per_expert: torch.Tensor | Tuple[torch.Tensor, torch.Tensor],
         permuted_probs: torch.Tensor,
+        routing_map=None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward of TEGroupedMLP
 
@@ -638,24 +644,52 @@ class TEGroupedMLP(MegatronModule):
             local experts.
             tokens_per_expert (torch.Tensor): The number of tokens per expert.
             permuted_probs (torch.Tensor): The permuted probs of each token produced by the router.
+            routing_map (torch.Tensor, optional): Boolean routing map
+            ``[num_recv_tokens, num_local_experts]`` for the permute-free path. When set, FC1
+            receives the raw post-dispatch activations ``[num_recv_tokens, hidden]`` and gathers
+            per expert inside the GEMM, emitting the compact expert-sorted ``[num_routes, ffn]``
+            output (the same layout a permute would produce). FC2 stays on the default path.
 
         Return:
             output (torch.Tensor): The output of the local experts.
         """
+        perm_free = routing_map is not None
+        fc1_metadata = None
+        fc2_metadata = None
+        raw_probs = None
         tokens_per_expert_gpu = None
         if isinstance(tokens_per_expert, tuple):
             tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
-        tokens_per_expert = tokens_per_expert.tolist()
-        if self.config.fp8 or self.config.fp4:
-            actual_tokens_per_expert = tokens_per_expert
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
-                permuted_local_hidden_states, tokens_per_expert
+        if perm_free:
+            assert not (self.config.fp8 or self.config.fp4), (
+                "moe_permute_free_grouped_gemm does not support fp8/fp4."
             )
-            permuted_probs, _ = self.quantization_padding(
-                permuted_probs.unsqueeze(-1), actual_tokens_per_expert
+            assert not self.config.moe_apply_probs_on_input, (
+                "moe_permute_free_grouped_gemm does not support moe_apply_probs_on_input."
             )
+            # Perm-free needs only the static expert count (the kernels use the routing
+            # metadata); skip the tokens-per-expert host sync and the .tolist().
+            tokens_per_expert = [0] * self.num_local_experts
+            tokens_per_expert_gpu = None
+            fc1_metadata = make_permute_free_metadata(
+                routing_map, route_space=False, topk=self.config.moe_router_topk
+            )
+            # Probs are applied at the activation in the padded route layout; defer building
+            # them (sync-free) until the FC1 forward has populated the align buffers.
+            raw_probs = permuted_probs
+            permuted_probs = None
         else:
-            permuted_probs = permuted_probs.unsqueeze(-1)
+            tokens_per_expert = tokens_per_expert.tolist()
+            if self.config.fp8 or self.config.fp4:
+                actual_tokens_per_expert = tokens_per_expert
+                permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
+                permuted_probs, _ = self.quantization_padding(
+                    permuted_probs.unsqueeze(-1), actual_tokens_per_expert
+                )
+            else:
+                permuted_probs = permuted_probs.unsqueeze(-1)
 
         if self.config.moe_apply_probs_on_input:
             assert (
@@ -671,7 +705,10 @@ class TEGroupedMLP(MegatronModule):
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
             fc1_output, bias_parallel = self.linear_fc1(
-                permuted_local_hidden_states, tokens_per_expert, tokens_per_expert_gpu
+                permuted_local_hidden_states,
+                tokens_per_expert,
+                tokens_per_expert_gpu,
+                permute_free_metadata=fc1_metadata,
             )
         if self.offload_expert_fc1:
             fc1_output = off_interface.group_commit(
@@ -679,6 +716,13 @@ class TEGroupedMLP(MegatronModule):
                 name="expert_fc1",
                 forced_released_tensors=[permuted_local_hidden_states],
             )
+
+        if perm_free:
+            # FC1 has populated the route-list align buffers on fc1_metadata. Build the
+            # padded per-route probs (sync-free) for the activation multiply, and the FC2
+            # route-space metadata sharing those buffers (fused scatter-to-token forward).
+            permuted_probs = build_padded_route_probs(fc1_metadata, raw_probs).unsqueeze(-1)
+            fc2_metadata = as_route_space(fc1_metadata)
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
             if self.config.use_te_activation_func:
@@ -748,7 +792,12 @@ class TEGroupedMLP(MegatronModule):
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
 
-        output, output_bias = self.linear_fc2(bias_act_output, tokens_per_expert, tokens_per_expert_gpu)
+        output, output_bias = self.linear_fc2(
+            bias_act_output,
+            tokens_per_expert,
+            tokens_per_expert_gpu,
+            permute_free_metadata=fc2_metadata,
+        )
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 

@@ -328,7 +328,21 @@ class MoELayer(BaseMoELayer):
         dispatched_input, tokens_per_expert, permuted_probs = (
             self.token_dispatcher.dispatch_postprocess(hidden_states, probs)
         )
-        expert_output, mlp_bias = self.experts(dispatched_input, tokens_per_expert, permuted_probs)
+        # Permute-free gather-in-GEMM: pass the boolean routing map so the expert
+        # FC1 GroupedLinear gathers per expert internally (no standalone permute).
+        get_routing_map = getattr(self.token_dispatcher, "get_routing_map", None)
+        routing_map = get_routing_map() if get_routing_map is not None else None
+        if routing_map is not None:
+            expert_output, mlp_bias = self.experts(
+                dispatched_input,
+                tokens_per_expert,
+                permuted_probs,
+                routing_map=routing_map,
+            )
+        else:
+            expert_output, mlp_bias = self.experts(
+                dispatched_input, tokens_per_expert, permuted_probs
+            )
         assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
         output = self.token_dispatcher.combine_preprocess(expert_output)
 

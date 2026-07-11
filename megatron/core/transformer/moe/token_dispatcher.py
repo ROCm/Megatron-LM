@@ -37,6 +37,9 @@ from megatron.core.transformer.moe.moe_utils import (
     sort_chunks_by_idxs,
     unpermute,
 )
+from megatron.core.transformer.moe.permute_free_grouped_gemm import (
+    is_moe_permute_free_grouped_gemm_active,
+)
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -1375,6 +1378,11 @@ class _MoriManager(_DispatchManager):
         self.max_num_tokens_per_rank = config.moe_mori_max_tokens_per_rank
         self.kernel_type = config.moe_mori_kernel_type
 
+        # Permute-free gather-in-GEMM: when active we skip only the FC1 permute (the
+        # gather is fused into the FC1 GEMM) and pass the boolean routing map through.
+        # FC2 and the combine-side unpermute stay on the default path.
+        self.perm_free = is_moe_permute_free_grouped_gemm_active(config)
+
         self.token_indices: Optional[torch.Tensor] = None
         self.token_probs: Optional[torch.Tensor] = None
         # Full-capacity MORI dispatch_weights from dispatch(), for op.combine().
@@ -1382,6 +1390,9 @@ class _MoriManager(_DispatchManager):
         self._raw_dispatched_probs: Optional[torch.Tensor] = None
         # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
         self._routing_handle = None
+        # Boolean routing map exposed for the permute-free route-list GEMM (None unless the
+        # perm-free path populates it in _permute_by_experts).
+        self._routing_map = None
 
         # Deferred-sync prefetch of per-local-expert counts. mori_dispatch returns
         # a device tokens_per_expert plus full recv buffers. We async-copy the counts into a pinned CPU buffer right
@@ -1527,13 +1538,16 @@ class _MoriManager(_DispatchManager):
     ) -> torch.Tensor:
         # Mirror HybridEP: fuse the unpermute into the combine node (comm stream) so MoriCombine.backward
         # can skip its clone -- its backward gather reads the grad view before a later op overwrites it.
-        hidden_states = unpermute(
-            hidden_states,
-            self.reversed_mapping_for_combine,
-            restore_shape=self.hidden_shape_before_permute,
-            routing_map=self.dispatched_routing_map,
-            fused=self.permute_fusion,
-        )
+        if not self.perm_free:
+            hidden_states = unpermute(
+                hidden_states,
+                self.reversed_mapping_for_combine,
+                restore_shape=self.hidden_shape_before_permute,
+                routing_map=self.dispatched_routing_map,
+                fused=self.permute_fusion,
+            )
+        # Permute-free: FC2 already scattered its output back to received-token order
+        # ([Nrecv, H]) inside its GEMM (fused combine), so no unpermute is needed here.
         assert self._routing_handle is not None, (
             "Mori combine() called without a matching dispatch(); "
             "the per-call routing handle from MoriDispatch is missing."
@@ -1612,6 +1626,20 @@ class _MoriManager(_DispatchManager):
 
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
+
+        if self.perm_free:
+            # Permute-free FC1+FC2: skip the standalone permute of the activations (the
+            # FC1 GEMM gathers per expert internally from the boolean routing map) AND all
+            # of the masked_select bookkeeping. FC2 fuses the scatter back to received-token
+            # order inside its GEMM (scatter-to-token), so no combine-side unpermute index
+            # is needed; the per-route probs are rebuilt sync-free in the experts (padded
+            # route layout) directly from these multihot dispatched_probs. This leaves the
+            # perm-free dispatch path with no masked_select device-to-host sync.
+            self._routing_map = self.dispatched_routing_map.bool()
+            self.reversed_mapping_for_combine = None
+            # dispatched_probs stays [Nrecv, num_local_experts]; the experts gather per route.
+            return hidden_states
+
         # Only the fused permute path needs an exact host int for num_out_tokens;
         # the non-fused masked_select path ignores it, so we pass None there and skip host sync for now.
         if self.permute_fusion:
@@ -1653,6 +1681,10 @@ class _MoriManager(_DispatchManager):
     def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # No-op: the unpermute is fused into combine() (mirrors HybridEP).
         return hidden_states
+
+    def get_routing_map(self):
+        """Return the boolean routing map for the permute-free FC1 gather (or None)."""
+        return self._routing_map
 
 
 class MoEFlexTokenDispatcher(MoETokenDispatcher):
@@ -1820,8 +1852,20 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         global_input_tokens, permuted_probs = (
             self._comm_manager.get_permuted_hidden_states_by_experts(hidden_states)
         )
-        tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
+        if self.get_routing_map() is not None:
+            # Perm-free: the kernels use only the static expert count + routing metadata,
+            # never the per-expert token counts, so skip the tokens-per-expert host sync
+            # (its event.synchronize() is a device-to-host stall). The experts ignore the
+            # value in the perm-free branch.
+            tokens_per_expert = None
+        else:
+            tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
         return global_input_tokens, tokens_per_expert, permuted_probs
+
+    def get_routing_map(self):
+        """Permute-free boolean routing map from the comm manager, or None if unused."""
+        getter = getattr(self._comm_manager, "get_routing_map", None)
+        return getter() if getter is not None else None
 
     def combine_preprocess(self, hidden_states: torch.Tensor):
         """Pre-processes hidden states before combining them after expert processing.

@@ -1167,6 +1167,20 @@ def validate_args(args, defaults={}):
                 flush=True,
             )
 
+    # Permute-free grouped GEMM: enable the TE gather-in-GEMM kernel via env var.
+    if getattr(args, 'moe_permute_free_grouped_gemm', False):
+        if os.environ.get('NVTE_USE_GROUPED_GEMM_TRITON', '0') == '1':
+            raise RuntimeError(
+                '--moe-permute-free-grouped-gemm and NVTE_USE_GROUPED_GEMM_TRITON=1 '
+                'cannot both be enabled. Unset NVTE_USE_GROUPED_GEMM_TRITON.'
+            )
+        os.environ['NVTE_PERMUTE_FREE_GROUPED_GEMM'] = '1'
+        if args.rank == 0:
+            print(
+                '[Permute-free GroupedGEMM] Set NVTE_PERMUTE_FREE_GROUPED_GEMM=1.',
+                flush=True,
+            )
+
     # Distributed checkpointing checks
     if args.use_dist_ckpt and args.use_legacy_models:
         raise RuntimeError('--use-dist-ckpt is not supported in legacy models.')
