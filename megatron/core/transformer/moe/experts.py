@@ -66,6 +66,11 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+# Activation functions whose gated form the permute-free FC1 GEMM epilogue can fuse
+# (act(gate) * up) together with the per-route gating-prob multiply. Maps the raw
+# ``config.activation_func`` to the TE activation name.
+_PF_FUSED_ACTIVATIONS = {F.silu: "silu", F.gelu: "gelu"}
+
 
 class GroupedMLP(MegatronModule):
     """An efficient implementation of the Experts layer using GroupedGEMM.
@@ -657,6 +662,8 @@ class TEGroupedMLP(MegatronModule):
         fc1_metadata = None
         fc2_metadata = None
         raw_probs = None
+        fc1_fused_act = False
+        fc1_fused_activation = None
         tokens_per_expert_gpu = None
         if isinstance(tokens_per_expert, tuple):
             tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
@@ -678,6 +685,20 @@ class TEGroupedMLP(MegatronModule):
             # them (sync-free) until the FC1 forward has populated the align buffers.
             raw_probs = permuted_probs
             permuted_probs = None
+            # When the gated activation is TE-fusable, fold both the activation and the
+            # per-route gating-prob multiply into the FC1 GEMM epilogue (TE returns the
+            # F-wide act(gate)*up*prob), dropping the standalone silu + apply_route_probs
+            # passes. Requires the gated [gate|up] FC1 layout, no bias (perm-free excludes
+            # it), and no separate moe_act recompute/offload (which operate on the standalone
+            # activation output).
+            fc1_fused_activation = _PF_FUSED_ACTIVATIONS.get(self.config.activation_func)
+            fc1_fused_act = (
+                self.config.gated_linear_unit
+                and fc1_fused_activation is not None
+                and not self.config.add_bias_linear
+                and not self.activation_recompute
+                and not self.offload_moe_act
+            )
         else:
             tokens_per_expert = tokens_per_expert.tolist()
             if self.config.fp8 or self.config.fp4:
@@ -709,6 +730,8 @@ class TEGroupedMLP(MegatronModule):
                 tokens_per_expert,
                 tokens_per_expert_gpu,
                 permute_free_metadata=fc1_metadata,
+                activation=fc1_fused_activation if fc1_fused_act else None,
+                dispatched_probs=raw_probs if fc1_fused_act else None,
             )
         if self.offload_expert_fc1:
             fc1_output = off_interface.group_commit(
@@ -804,7 +827,11 @@ class TEGroupedMLP(MegatronModule):
                 )
             return intermediate_parallel
 
-        if self.activation_recompute:
+        if fc1_fused_act:
+            # Activation + per-route gating prob were fused into the FC1 GEMM epilogue, so
+            # fc1_output is already the F-wide act(gate)*up*prob; feed FC2 directly.
+            bias_act_output = fc1_output
+        elif self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = self.activation_checkpoint.checkpoint(

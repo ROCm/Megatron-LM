@@ -1745,7 +1745,15 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 self.te_quant_params, self.training, is_context_quantized
             )
 
-        def forward(self, x, m_splits, m_splits_gpu=None, permute_free_metadata=None):
+        def forward(
+            self,
+            x,
+            m_splits,
+            m_splits_gpu=None,
+            permute_free_metadata=None,
+            activation=None,
+            dispatched_probs=None,
+        ):
             """Forward."""
             _is_first_microbatch = (
                 None if self.disable_parameter_transpose_cache else self.is_first_microbatch
@@ -1757,6 +1765,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             # internally (route_space=False); FC2 reads route-ordered input and fuses the
             # scatter back to token order (route_space=True). The metadata is built once and
             # shared across FC1/FC2 to avoid a duplicate align build.
+            #
+            # ``activation`` / ``dispatched_probs`` (FC1 only) fuse the gated activation and the
+            # per-route gating-prob multiply into the GEMM epilogue, so Megatron can drop the
+            # separate silu + apply_route_probs steps (TE returns the F-wide act(gate)*up*prob).
             routing_kwargs = {}
             if permute_free_metadata is not None:
                 if not class_has_method_param(
@@ -1768,6 +1780,20 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                         "`permute_free_metadata`. Please upgrade Transformer Engine."
                     )
                 routing_kwargs["permute_free_metadata"] = permute_free_metadata
+                if activation is not None or dispatched_probs is not None:
+                    if not class_has_method_param(
+                        te.pytorch.GroupedLinear, "forward", "activation"
+                    ):
+                        raise RuntimeError(
+                            "Fused permute-free activation/route-prob is enabled but the "
+                            "installed Transformer Engine's GroupedLinear.forward does not "
+                            "accept `activation`/`dispatched_probs`. Please upgrade "
+                            "Transformer Engine."
+                        )
+                    if activation is not None:
+                        routing_kwargs["activation"] = activation
+                    if dispatched_probs is not None:
+                        routing_kwargs["dispatched_probs"] = dispatched_probs
 
             # Check if parent class forward supports m_splits_tensor parameter
             # Added in TE commit: https://github.com/ROCm/TransformerEngine/commit/2776c33

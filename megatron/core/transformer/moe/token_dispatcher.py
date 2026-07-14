@@ -1469,7 +1469,11 @@ class _MoriManager(_DispatchManager):
         # Deferred-sync prefetch: async DtoH of the device per-expert counts into
         # the pinned buffer + event. No host sync here -- the read is deferred to
         # _permute_by_experts (fused path) / get_number_of_tokens_per_expert.
-        self._prefetch_tokens_per_expert(num_tokens_per_expert)
+        # Skip entirely on the perm-free path: it never reads the counts on the host
+        # (dispatch returns early, experts use a static count list + on-device routing
+        # metadata), so the DtoH copy is dead work and only pollutes CUDA-graph capture.
+        if not self.perm_free:
+            self._prefetch_tokens_per_expert(num_tokens_per_expert)
 
         # Mirror HybridEP: fuse the copy-out of MORI's reusable symmetric-memory
         # dispatch buffer into the expert permute to remove a DtoD.
