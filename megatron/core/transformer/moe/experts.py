@@ -22,7 +22,7 @@ from megatron.core.dist_checkpointing.mapping import (
 )
 from megatron.core.dist_checkpointing.utils import replace_prefix_for_sharding
 from megatron.core.fusions.fused_bias_geglu import quick_gelu, weighted_bias_quick_geglu_impl
-from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl
+from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl
 from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_relu_impl
 from megatron.core.jit import jit_fuser
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
@@ -41,8 +41,8 @@ from megatron.core.transformer.moe.moe_utils import (
     get_align_size_for_quantization,
 )
 from megatron.core.transformer.moe.permute_free_grouped_gemm import (
+    apply_route_probs,
     as_route_space,
-    build_padded_route_probs,
     make_permute_free_metadata,
 )
 from megatron.core.transformer.spec_utils import build_module
@@ -718,10 +718,11 @@ class TEGroupedMLP(MegatronModule):
             )
 
         if perm_free:
-            # FC1 has populated the route-list align buffers on fc1_metadata. Build the
-            # padded per-route probs (sync-free) for the activation multiply, and the FC2
-            # route-space metadata sharing those buffers (fused scatter-to-token forward).
-            permuted_probs = build_padded_route_probs(fc1_metadata, raw_probs).unsqueeze(-1)
+            # FC1 has populated the route-list align buffers on fc1_metadata. The per-route
+            # gating probs are folded into the activation below via apply_route_probs (a fused
+            # TE gather+multiply with a fast masked-scatter backward), so no padded probs
+            # tensor is built and the fp32 index_put backward is avoided. Build the FC2
+            # route-space metadata sharing the same align buffers (fused scatter-to-token).
             fc2_metadata = as_route_space(fc1_metadata)
 
         def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
@@ -735,13 +736,22 @@ class TEGroupedMLP(MegatronModule):
                     intermediate_parallel = intermediate_parallel.to(original_dtype)
             elif self.config.bias_activation_fusion:
                 if self.activation_func == F.silu and self.config.gated_linear_unit:
-                    # dtype is handled inside the fused kernel
-                    intermediate_parallel = weighted_bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        permuted_probs,
-                        self.config.activation_func_fp8_input_store,
-                    )
+                    # dtype is handled inside the fused kernel. For perm-free, permuted_probs
+                    # is None here (probs are folded in after the activation via
+                    # apply_route_probs), so use the unweighted fused swiglu.
+                    if permuted_probs is None:
+                        intermediate_parallel = bias_swiglu_impl(
+                            intermediate_parallel,
+                            bias_parallel,
+                            self.config.activation_func_fp8_input_store,
+                        )
+                    else:
+                        intermediate_parallel = weighted_bias_swiglu_impl(
+                            intermediate_parallel,
+                            bias_parallel,
+                            permuted_probs,
+                            self.config.activation_func_fp8_input_store,
+                        )
                 elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
                     intermediate_parallel = weighted_bias_quick_geglu_impl(
                         intermediate_parallel,
@@ -759,9 +769,13 @@ class TEGroupedMLP(MegatronModule):
                 self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
             ):
                 assert bias_parallel is None
-                intermediate_parallel = weighted_squared_relu_impl(
-                    intermediate_parallel, permuted_probs
-                )
+                # perm-free defers the prob multiply to apply_route_probs (permuted_probs None).
+                if permuted_probs is None:
+                    intermediate_parallel = self.activation_func(intermediate_parallel)
+                else:
+                    intermediate_parallel = weighted_squared_relu_impl(
+                        intermediate_parallel, permuted_probs
+                    )
             else:
                 if self.config.gated_linear_unit:
 
@@ -777,9 +791,17 @@ class TEGroupedMLP(MegatronModule):
                     intermediate_parallel = glu(intermediate_parallel)
                 else:
                     intermediate_parallel = self.activation_func(intermediate_parallel)
-                original_dtype = intermediate_parallel.dtype
-                intermediate_parallel = intermediate_parallel * permuted_probs
-                intermediate_parallel = intermediate_parallel.to(original_dtype)
+                if permuted_probs is not None:
+                    original_dtype = intermediate_parallel.dtype
+                    intermediate_parallel = intermediate_parallel * permuted_probs
+                    intermediate_parallel = intermediate_parallel.to(original_dtype)
+            # perm-free: fold each route's gating prob into the activation here (fused TE
+            # gather+multiply, fast masked-scatter backward -- no padded probs tensor / no
+            # fp32 index_put). Kept inside bias_act_func so it is recompute-safe.
+            if perm_free:
+                intermediate_parallel = apply_route_probs(
+                    fc1_metadata, intermediate_parallel, raw_probs
+                )
             return intermediate_parallel
 
         if self.activation_recompute:

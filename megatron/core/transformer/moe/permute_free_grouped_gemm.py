@@ -112,6 +112,26 @@ def build_padded_route_probs(metadata, dispatched_probs: "torch.Tensor") -> "tor
     return probs_compact[:em_max]
 
 
+def apply_route_probs(metadata, activation: "torch.Tensor", dispatched_probs: "torch.Tensor"):
+    """Fold the per-route gating prob into the FC1 activation via TE (sync-free, fast bwd).
+
+    Replaces ``build_padded_route_probs`` + a separate multiply: TE gathers each route's prob
+    ``dispatched_probs[token(r), expert(r)]`` inside a Triton kernel (reusing the FC1 align
+    buffers) and scales ``activation[r]`` by it. The backward scatters the prob gradient with
+    a bounded, masked atomic add -- avoiding the fp32 ``aten::_index_put_impl_`` whose backward
+    dominates the naive advanced-index approach.
+
+    ``metadata`` must have its FC1 align buffers built (i.e. after the FC1 forward).
+    ``activation`` is ``[em_max, H]`` (route layout); ``dispatched_probs`` is
+    ``[num_recv_tokens, num_local_experts]``.
+    """
+    from transformer_engine.pytorch.triton_kernels.route_prob import (
+        apply_route_probs as _te_apply_route_probs,
+    )
+
+    return _te_apply_route_probs(activation, dispatched_probs, metadata)
+
+
 def is_moe_permute_free_grouped_gemm_active(config: TransformerConfig) -> bool:
     """Return True when Megatron and TE permute-free gather-GEMM are both enabled.
 
