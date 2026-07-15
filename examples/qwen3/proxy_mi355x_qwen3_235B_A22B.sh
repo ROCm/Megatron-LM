@@ -48,8 +48,15 @@ export EVAL_ITERS=0
 export SAVE_INTERVAL=20000
 export CKPT_FORMAT=torch
 
-# --- activation checkpointing (recompute_granularity full, num_layers 3) ---
-export AC=full
+# --- activation checkpointing ---
+# Selective recompute across all applicable modules. Excluded on purpose:
+#   * moe          -> covers the graphed MoE scope (would trigger moe_layer_recompute over the
+#                     graphed region). Recompute must not *cover* the CUDA graph scope.
+#   * mla_up_proj  -> Qwen3 has no MLA, config raises ValueError.
+#   * moe_act      -> recomputing it disables the fused FC1 activation + router-prob epilogue
+#                     (fc1_fused_act requires not activation_recompute).
+export AC=sel
+export RECOMPUTE_MODULES="core_attn layernorm mlp shared_experts"
 export RECOMPUTE_METHOD=block
 export RECOMPUTE_NUM_LAYERS=3
 
@@ -69,6 +76,16 @@ export MOE_USE_LEGACY_GROUPED_GEMM=false
 export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true
 
+# --- CUDA graph ---
+# Selective TE-scoped graph for the WHOLE MoE layer: captures MoRI dispatch + expert
+# GroupedGEMM + MoRI combine. The permute-free + MoRI path provides static shapes
+# (fixed max_num_tokens_per_rank symmetric buffers + static per-expert count list, no host
+# DtoH sync), so drop-padding is not required (see transformer_config.py pf_mori_static).
+# NOTE: scope "moe" cannot be combined with "moe_router"/"moe_preprocess" (config assert).
+# Requires GPT_LAYER_IN_TE=true (default).
+export ENABLE_CUDA_GRAPH=true
+export CUDA_GRAPH_IMPL=transformer_engine
+export CUDA_GRAPH_SCOPE="moe"
 # --- cross-entropy fusion ---
 export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
 

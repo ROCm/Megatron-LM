@@ -135,6 +135,20 @@ GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 
 ENABLE_DEEP_EP="${ENABLE_DEEP_EP:-false}"
 ENABLE_MORI="${ENABLE_MORI:-false}"
+
+# --- CUDA graph (optional) ---
+# ENABLE_CUDA_GRAPH=true captures the selected regions with CUDA graphs.
+# The fine-grained MoE scopes require the TransformerEngine impl (GPT_LAYER_IN_TE=true).
+#   CUDA_GRAPH_SCOPE examples (space-separated, see moe/README.md):
+#     "attn moe_router moe_preprocess"  -> safe default: graphs attention + MoE
+#                                          router/preprocess, leaves expert GEMMs eager.
+#     "attn moe"                        -> also graphs the whole MoE layer (expert compute
+#                                          + dispatch/combine). Needs static shapes, which the
+#                                          permute-free + MoRI path provides (sync-free).
+# te_rng_tracker is auto-enabled by validate_args when using the TE cuda-graph impl.
+ENABLE_CUDA_GRAPH="${ENABLE_CUDA_GRAPH:-false}"
+CUDA_GRAPH_IMPL="${CUDA_GRAPH_IMPL:-transformer_engine}"
+CUDA_GRAPH_SCOPE="${CUDA_GRAPH_SCOPE:-attn moe_router moe_preprocess}"
 PROFILE=${PROFILE:-false}
 PROFILE_SYNC=${PROFILE_SYNC:-false}
 PROFILE_START=${PROFILE_START:-3}
@@ -159,6 +173,11 @@ CE_FUSION_ARGS=""
 AC=${AC:-none}
 export RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-block}
 export RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-1}
+# For AC=sel: space-separated modules for --recompute-modules (selective recompute).
+# Leave empty to fall back to --recompute-activations (core_attn only). Choose modules
+# that do NOT overlap the CUDA graph scope, e.g. "core_attn shared_experts" while graphing
+# the MoE (see megatron/core/transformer/transformer_config.py recompute/cuda-graph rules).
+export RECOMPUTE_MODULES=${RECOMPUTE_MODULES:-}
 
 # Architecture + size-specific defaults
 case $MODEL_SIZE in
@@ -373,6 +392,41 @@ else
     TRANSFORMER_IMPL=local
 fi
 
+# --- CUDA graph options ---
+cuda_graph_options=""
+if [ "$ENABLE_CUDA_GRAPH" = true ]; then
+    # full_iteration captures the whole fwd+bwd iteration in a single graph and is the
+    # only scope compatible with full activation recompute (AC=full). It is supported
+    # exclusively by the MCore "local" impl, so force it here.
+    cg_full_iteration=false
+    if [[ " ${CUDA_GRAPH_SCOPE} " == *" full_iteration "* ]]; then
+        cg_full_iteration=true
+        if [ "$CUDA_GRAPH_IMPL" != local ]; then
+            echo "[INFO] full_iteration scope requires --cuda-graph-impl=local; overriding CUDA_GRAPH_IMPL."
+            CUDA_GRAPH_IMPL=local
+        fi
+    fi
+
+    if [ "$CUDA_GRAPH_IMPL" = transformer_engine ] && [ "$TRANSFORMER_IMPL" != transformer_engine ]; then
+        echo "[ERROR] ENABLE_CUDA_GRAPH with CUDA_GRAPH_IMPL=transformer_engine requires GPT_LAYER_IN_TE=true."
+        exit 1
+    fi
+
+    cuda_graph_options=" \
+        --cuda-graph-impl ${CUDA_GRAPH_IMPL} \
+        --cuda-graph-scope ${CUDA_GRAPH_SCOPE}"
+
+    if [ "$cg_full_iteration" = true ]; then
+        # NaN/grad checks add a host sync that breaks whole-iteration capture.
+        cuda_graph_options="${cuda_graph_options} --no-check-for-nan-in-loss-and-grad"
+        # local-impl CUDA graphs with expert parallelism require static expert shapes.
+        if [ "${EP}" -gt 1 ]; then
+            cuda_graph_options="${cuda_graph_options} --moe-pad-experts-for-cuda-graph-inference"
+        fi
+    fi
+    echo "[INFO] CUDA graph: impl=${CUDA_GRAPH_IMPL} scope='${CUDA_GRAPH_SCOPE}'"
+fi
+
 if [ -n "${PP_LAYOUT:-}" ] && [ -n "${MP_VP:-}" ]; then
     echo "Error: PP_LAYOUT and MP_VP are mutually exclusive (see megatron --pipeline-model-parallel-layout)."
     exit 1
@@ -478,7 +532,15 @@ if [ "$AC" = full ]; then
         --recompute-granularity full \
         --recompute-num-layers ${RECOMPUTE_NUM_LAYERS}"
 elif [ "$AC" = sel ]; then
-    activation_checkpoint_options=" --recompute-activations"
+    if [ -n "${RECOMPUTE_MODULES}" ]; then
+        # Selective recompute on specific modules; keep them disjoint from the graph scope.
+        activation_checkpoint_options=" \
+            --recompute-granularity selective \
+            --recompute-modules ${RECOMPUTE_MODULES}"
+        echo "[INFO] Selective recompute modules: ${RECOMPUTE_MODULES}"
+    else
+        activation_checkpoint_options=" --recompute-activations"
+    fi
 else
     activation_checkpoint_options=""
 fi
@@ -706,7 +768,7 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 run_cmd="torchrun $DISTRIBUTED_ARGS ${MEGATRON_PATH}/pretrain_gpt.py \
     ${megatron_options} ${pr_options} ${load_options} ${activation_checkpoint_options} \
     ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} \
-    ${sft_option} ${vp_options} ${profile_options} ${LOGGING_ARGS}"
+    ${cuda_graph_options} ${sft_option} ${vp_options} ${profile_options} ${LOGGING_ARGS}"
 
 run_cmd="$run_cmd | tee $TRAIN_LOG"
 echo "${run_cmd}"

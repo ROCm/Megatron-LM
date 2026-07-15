@@ -1820,9 +1820,19 @@ class TransformerConfig(ModelParallelConfig):
                     self.moe_expert_capacity_factor is None
                     or not self.moe_pad_expert_input_to_capacity
                 ):
+                    # The permute-free + MoRI (flex) path yields static shapes without
+                    # drop-padding.
+                    pf_mori_static = (
+                        self.moe_permute_free_grouped_gemm
+                        and self.moe_token_dispatcher_type == 'flex'
+                        and self.moe_flex_dispatcher_backend == 'mori'
+                    )
                     assert (
-                        CudaGraphScope.moe not in self.cuda_graph_scope
-                    ), 'moe cuda graph is only supported with drop-padding MoE.'
+                        CudaGraphScope.moe not in self.cuda_graph_scope or pf_mori_static
+                    ), (
+                        'moe cuda graph is only supported with drop-padding MoE or the '
+                        'permute-free MoRI path.'
+                    )
                     if self.moe_token_dispatcher_type == 'alltoall' and (
                         self.moe_expert_capacity_factor is not None
                         or self.moe_router_padding_for_fp8
