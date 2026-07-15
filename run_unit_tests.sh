@@ -19,6 +19,10 @@ if [[ "$HIP_ARCHITECTURES" == "gfx90a" ]]; then
     PYTEST_MARKERS="$PYTEST_MARKERS and not failing_on_rocm_mi250"
 fi
 
+# Per-test-file timeout in seconds (30 minutes).
+# Prevents a single hung torchrun from consuming the entire CI time budget.
+TEST_TIMEOUT=${TEST_TIMEOUT:-1800}
+
 # Find all test files recursively
 TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
 
@@ -28,19 +32,23 @@ for file in $TEST_FILES; do
     # Create unique filename by replacing slashes with underscores and removing tests/unit_tests/ prefix
     # E.g., tests/unit_tests/dist_checkpointing/test_optimizer.py -> dist_checkpointing_test_optimizer
     test_name=$(echo "$file" | sed 's|tests/unit_tests/||' | sed 's|/|_|g' | sed 's|\.py$||')
-    
+
     csv_file="$OUT_DIR/test_report_${test_name}.csv"
     xml_file="$OUT_DIR/junit_report_${test_name}.xml"
 
     echo "Running test file: $file"
-    torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
-        --showlocals --tb=long -v -s -m "$PYTEST_MARKERS" \
-        --csv "$csv_file" \
-        --junitxml "$xml_file" \
-        $file
+    timeout "$TEST_TIMEOUT" \
+        torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
+            --showlocals --tb=long -v -s -m "$PYTEST_MARKERS" \
+            --csv "$csv_file" \
+            --junitxml "$xml_file" \
+            $file
     rc=$?
 
-    if [[ $rc -ne 0 ]]; then
+    if [[ $rc -eq 124 ]]; then
+        echo "TIMEOUT: $file exceeded ${TEST_TIMEOUT}s — marking as failed."
+        ANY_FAIL=1
+    elif [[ $rc -ne 0 ]]; then
         echo "Test failed in $file."
         ANY_FAIL=1
     fi
