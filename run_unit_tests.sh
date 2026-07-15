@@ -21,7 +21,9 @@ fi
 
 # Per-test-file timeout in seconds (30 minutes).
 # Prevents a single hung torchrun from consuming the entire CI time budget.
+# --kill-after=300: if SIGTERM is ignored, SIGKILL after 5 more minutes.
 TEST_TIMEOUT=${TEST_TIMEOUT:-1800}
+KILL_AFTER=${KILL_AFTER:-300}
 
 # Find all test files recursively
 TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
@@ -37,7 +39,7 @@ for file in $TEST_FILES; do
     xml_file="$OUT_DIR/junit_report_${test_name}.xml"
 
     echo "Running test file: $file"
-    timeout "$TEST_TIMEOUT" \
+    timeout --kill-after="$KILL_AFTER" "$TEST_TIMEOUT" \
         torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
             --showlocals --tb=long -v -s -m "$PYTEST_MARKERS" \
             --csv "$csv_file" \
@@ -45,8 +47,9 @@ for file in $TEST_FILES; do
             $file
     rc=$?
 
-    if [[ $rc -eq 124 ]]; then
-        echo "TIMEOUT: $file exceeded ${TEST_TIMEOUT}s — marking as failed."
+    # exit code 124 = SIGTERM timeout; 137 = SIGKILL (--kill-after triggered)
+    if [[ $rc -eq 124 ]] || [[ $rc -eq 137 ]]; then
+        echo "TIMEOUT: $file exceeded ${TEST_TIMEOUT}s (kill-after=${KILL_AFTER}s) — marking as failed."
         ANY_FAIL=1
     elif [[ $rc -ne 0 ]]; then
         echo "Test failed in $file."
