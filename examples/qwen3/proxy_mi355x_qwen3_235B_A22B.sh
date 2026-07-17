@@ -95,3 +95,4 @@ export DO=true
 export PROFILE_START=12
 export PROFILE_END=13
 export PROFILE=true
+export AITER_USE_SYSTEM_TRITON=1
