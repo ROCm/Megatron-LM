@@ -23,6 +23,7 @@ fi
 # Prevents a single hung torchrun from consuming the entire CI time budget.
 # --kill-after=300: if SIGTERM is ignored, SIGKILL after 5 more minutes.
 TEST_TIMEOUT=${TEST_TIMEOUT:-1800}
+LONG_TEST_TIMEOUT=${LONG_TEST_TIMEOUT:-3600}
 KILL_AFTER=${KILL_AFTER:-300}
 
 # Find all test files recursively
@@ -38,8 +39,17 @@ for file in $TEST_FILES; do
     csv_file="$OUT_DIR/test_report_${test_name}.csv"
     xml_file="$OUT_DIR/junit_report_${test_name}.xml"
 
+    file_timeout=$TEST_TIMEOUT
+    case "$file" in
+        tests/unit_tests/dist_checkpointing/models/test_moe_experts.py | \
+        tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py)
+            # These heavily parametrized files exceed 30 minutes on MI325X.
+            file_timeout=$LONG_TEST_TIMEOUT
+            ;;
+    esac
+
     echo "Running test file: $file"
-    timeout --kill-after="$KILL_AFTER" "$TEST_TIMEOUT" \
+    timeout --kill-after="$KILL_AFTER" "$file_timeout" \
         torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \
             --showlocals --tb=long -v -s -m "$PYTEST_MARKERS" \
             --csv "$csv_file" \
@@ -49,7 +59,7 @@ for file in $TEST_FILES; do
 
     # exit code 124 = SIGTERM timeout; 137 = SIGKILL (--kill-after triggered)
     if [[ $rc -eq 124 ]] || [[ $rc -eq 137 ]]; then
-        echo "TIMEOUT: $file exceeded ${TEST_TIMEOUT}s (kill-after=${KILL_AFTER}s) — marking as failed."
+        echo "TIMEOUT: $file exceeded ${file_timeout}s (kill-after=${KILL_AFTER}s) — marking as failed."
         ANY_FAIL=1
     elif [[ $rc -ne 0 ]]; then
         echo "Test failed in $file."

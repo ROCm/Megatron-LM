@@ -62,7 +62,8 @@ class Utils:
             Utils.store = store
 
             torch.distributed.init_process_group(
-                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
+                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store,
+                device_id=torch.device(f'cuda:{Utils.rank % torch.cuda.device_count()}'),
             )
 
             torch.distributed.barrier()
@@ -85,6 +86,28 @@ class Utils:
             Utils.rank = rank
 
     @staticmethod
+    def _destroy_model_parallel_process_groups():
+        process_groups = ps._global_process_group_list
+        if process_groups is None:
+            return
+
+        # Tests with communication overlap can return while the final subgroup
+        # collective is still queued. Do not abort it by tearing down the group.
+        torch.cuda.synchronize()
+        try:
+            from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+        except ImportError:
+            pass
+        else:
+            # TE caches the amax-reduction group across autocast contexts.
+            FP8GlobalStateManager.reset()
+
+        pg_map = torch.distributed.distributed_c10d._world.pg_map
+        for group in reversed(process_groups):
+            if group is not None and group in pg_map:
+                torch.distributed.destroy_process_group(group)
+
+    @staticmethod
     def destroy_model_parallel():
         os.environ.pop('NVTE_FLASH_ATTN', None)
         os.environ.pop('NVTE_FUSED_ATTN', None)
@@ -92,6 +115,7 @@ class Utils:
         if not Utils.inited:
             return
         torch.distributed.barrier()
+        Utils._destroy_model_parallel_process_groups()
         ps.destroy_model_parallel()
         Utils.inited = False
 
@@ -108,14 +132,27 @@ class Utils:
         os.environ.pop('NVTE_FUSED_ATTN', None)
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
 
+        reuse_process_group = torch.distributed.is_initialized()
+        if ps._global_process_group_list is not None:
+            torch.distributed.barrier()
+            Utils._destroy_model_parallel_process_groups()
         ps.destroy_model_parallel()
         Utils.initialize_distributed()
-        ps.initialize_model_parallel(
-            tensor_model_parallel_size,
-            pipeline_model_parallel_size,
-            virtual_pipeline_model_parallel_size,
-            **kwargs,
-        )
+        if reuse_process_group:
+            # Avoid eagerly allocating every subgroup when tests repeatedly
+            # rebuild model parallelism on the same default process group.
+            torch.distributed.group.WORLD.bound_device_id = None
+        try:
+            ps.initialize_model_parallel(
+                tensor_model_parallel_size,
+                pipeline_model_parallel_size,
+                virtual_pipeline_model_parallel_size,
+                **kwargs,
+            )
+        finally:
+            torch.distributed.group.WORLD.bound_device_id = torch.device(
+                f'cuda:{Utils.rank % torch.cuda.device_count()}'
+            )
         Utils.inited = True
 
     @staticmethod

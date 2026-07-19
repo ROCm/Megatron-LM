@@ -552,13 +552,12 @@ def init_mori_shmem(group: torch.distributed.ProcessGroup):
     """Initialize MORI shared memory using the given process group.
 
     Registers ``group`` under :data:`MORI_EP_PROCESS_GROUP_NAME` and runs
-    ``shmem_torch_process_group_init`` once per process (until
-    :func:`finalize_mori_shmem`). MORI consumes the named PG only during
+    ``shmem_torch_process_group_init`` once per process. MORI consumes the named PG only during
     bootstrap (to broadcast the shmem UID); after that the registration is
-    unused, so later calls with a rebuilt EP group are no-ops until finalize.
+    unused, so later calls with a rebuilt but equivalent EP group are no-ops.
 
-    After :func:`finalize_mori_shmem`, the next call re-registers the group and
-    re-initializes shmem (used between pytest parametrized cases).
+    Current MORI releases do not support finalizing and reinitializing shmem in
+    the same process. Call :func:`finalize_mori_shmem` only during process teardown.
     """
     global _mori_shmem_initialized
     if _mori_shmem_initialized:
@@ -593,8 +592,8 @@ def reset_mori_op():
 
     Drains the comm stream and synchronizes the device, then calls
     :meth:`~mori.ops.EpDispatchCombineOp.reset` when present and drops the
-    reference and comm stream cache. Use between pytest parametrized cases or
-    when EP layout changes so the next :func:`get_mori_op` builds a fresh op.
+    reference and comm stream cache. Use between pytest parametrized cases with
+    the same node-spanning EP layout so the next :func:`get_mori_op` builds a fresh op.
     Does not finalize symmetric memory or clear shmem staging buffers; call
     :func:`finalize_mori_shmem` at session teardown.
 
@@ -609,13 +608,12 @@ def reset_mori_op():
 
 
 def finalize_mori_shmem():
-    """Finalize MORI symmetric memory so the next test can re-bootstrap cleanly.
+    """Finalize MORI symmetric memory during process teardown.
 
     Inverse of :func:`init_mori_shmem`. Resets the cached op first, then calls
     ``mori.shmem.shmem_finalize()`` and unregisters
-    :data:`MORI_EP_PROCESS_GROUP_NAME` so :func:`init_mori_shmem` can register
-    a fresh EP process group on the next parametrized case. Safe when shmem was
-    never initialized.
+    :data:`MORI_EP_PROCESS_GROUP_NAME`. Safe when shmem was never initialized.
+    Reinitialization after this call is unsupported by current MORI releases.
     """
     reset_mori_op()
     global _mori_shmem_initialized
@@ -669,6 +667,11 @@ def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool
     # downstream op consumes it (slicing, .item(), bincount, ...).
     current_stream.wait_stream(comm_stream)
     return result
+
+
+def _clone_mori_tensor(value):
+    """Copy a tensor out of MORI's reusable symmetric-memory buffers."""
+    return value.clone() if isinstance(value, torch.Tensor) else value
 
 
 def _resolve_mori_kernel_type(kernel_type, world_size: int):
@@ -821,6 +824,27 @@ class MoriDispatch(torch.autograd.Function):
         # stream so it can overlap with non-dependent compute.
         # `return_routing=True` makes MORI return a per-call routing handle
         # so this layer's combine/backward stay isolated from sibling layers.
+        def dispatch_with_private_outputs():
+            result = op.dispatch(
+                x,
+                token_probs.float(),
+                None,
+                token_indices.to(torch.int32),
+                return_routing=True,
+            )
+            # Materialize every tensor returned by MORI on the launch stream.
+            # The scale output is unused on the BF16 path, but its copy still
+            # establishes the internal producer dependency before MORI reuses
+            # the symmetric buffers in a later launch.
+            return (
+                _clone_mori_tensor(result[0]),
+                _clone_mori_tensor(result[1]),
+                _clone_mori_tensor(result[2]),
+                _clone_mori_tensor(result[3]),
+                _clone_mori_tensor(result[4]),
+                result[5],
+            )
+
         (
             dispatch_out,
             dispatch_weights,
@@ -829,13 +853,7 @@ class MoriDispatch(torch.autograd.Function):
             recv_num_token,
             routing_handle,
         ) = _run_mori_op_on_stream(
-            lambda: op.dispatch(
-                x,
-                token_probs.float(),
-                None,
-                token_indices.to(torch.int32),
-                return_routing=True,
-            ),
+            dispatch_with_private_outputs,
             async_finish,
             allocate_on_comm_stream,
         )
@@ -911,10 +929,9 @@ class MoriDispatch(torch.autograd.Function):
         #     double-backward error in the fine-grained 1f1b overlap schedule where the two
         #     nodes are backwarded as separate autograd subgraphs.
         #
-        # .clone(): dispatch_weights views MORI's reusable dispatch buffer, but combine()
-        # reads it much later (a sibling dispatch may overwrite it); clone a private copy.
-        # dispatch_out needs no such clone: _MoriManager.dispatch permutes it right away in
-        # the dispatch node, so its only reader runs before any sibling dispatch overwrites.
+        # dispatch_with_private_outputs() copied the returned views before another MORI
+        # launch can reuse its symmetric-memory buffers. Keep a second weights copy for
+        # the delayed combine while the first copy flows through the dispatch path.
         raw_dispatch_weights = dispatch_weights.detach().clone()
         ctx.mark_non_differentiable(recv_token_indices, tokens_per_expert, raw_dispatch_weights)
         
@@ -950,22 +967,25 @@ class MoriDispatch(torch.autograd.Function):
         )
         num_tokens = ctx.local_num_tokens
         
-        combined_x, combined_weights = _run_mori_op_on_stream(
-            lambda: op.combine(
+        def combine_with_private_outputs():
+            combined_x, combined_weights = op.combine(
                 grad_output.contiguous(),
                 grad_probs.contiguous().float(),
                 token_indices.to(torch.int32),
                 routing=ctx.routing_handle,
-            ),
+            )
+            return (
+                combined_x[:num_tokens].clone(),
+                combined_weights[:num_tokens].clone(),
+            )
+
+        combined_x, combined_weights = _run_mori_op_on_stream(
+            combine_with_private_outputs,
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # Slice the full combine buffer to the sender row count so the grad matches `x`. .clone():
-        # it views MORI's reusable buffer and is consumed later, so a sibling op would overwrite it.
-        combined_x = combined_x[:num_tokens].clone()
-        # Sender-layout router-probs grad from combine's fp32 weight output. Slice to the live
-        # sender rows and clone off MORI's reusable weight buffer (a later overlap op overwrites it).
-        grad_token_probs = combined_weights[:num_tokens].clone()
+        # Sender-layout router-probs grad from combine's fp32 weight output.
+        grad_token_probs = combined_weights
         return (
             combined_x,
             None,
@@ -1028,20 +1048,20 @@ class MoriCombine(torch.autograd.Function):
         )
         num_tokens = sender_token_indices.shape[0]
 
-        combined_x, _ = _run_mori_op_on_stream(
-            lambda: op.combine(
+        def combine_with_private_output():
+            combined_x, _ = op.combine(
                 x.contiguous(),
                 recv_token_probs,
                 sender_token_indices.to(torch.int32),
                 routing=routing_handle,
-            ),
+            )
+            return combined_x[:num_tokens].clone()
+
+        combined_x = _run_mori_op_on_stream(
+            combine_with_private_output,
             async_finish,
             allocate_on_comm_stream,
         )
-        # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim]
-        # buffer view. Slice down to the actual sender-side row count.
-        combined_x = combined_x[:num_tokens]
-
         ctx.group = group
         ctx.num_local_experts = num_local_experts
         ctx.router_topk = router_topk
@@ -1074,24 +1094,23 @@ class MoriCombine(torch.autograd.Function):
             fp8_dispatch=ctx.fp8_dispatch,
         )
         # Mode-2 replay: dispatch along the matching forward's cached layout.
-        dispatch_out, _, _, _, _ = _run_mori_op_on_stream(
-            lambda: op.dispatch(
+        def dispatch_with_private_output():
+            dispatch_out, _, _, _, _ = op.dispatch(
                 grad_output.contiguous(),
                 sender_token_probs.float(),
                 None,
                 sender_token_indices.to(torch.int32),
                 routing=ctx.routing_handle,
-            ),
+            )
+            return dispatch_out[: ctx.total_recv].clone()
+
+        dispatch_out = _run_mori_op_on_stream(
+            dispatch_with_private_output,
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # NO clone needed here. dispatch_out is a raw view into MORI's reusable buffer, which a
-        # later MORI op will overwrite. That's safe because the next thing to read this grad is the
-        # fused unpermute's backward (in _MoriManager.combine), which runs on the same comm stream
-        # right after this op.dispatch -- so it reads the view and creates an unpermuted tensor
-        # before any later op can overwrite it.
         return (
-            dispatch_out[: ctx.total_recv],
+            dispatch_out,
             None,
             None,
             None,

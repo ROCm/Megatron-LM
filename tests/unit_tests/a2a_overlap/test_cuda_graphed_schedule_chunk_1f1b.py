@@ -74,18 +74,23 @@ class TestPartialCudaGraphedA2AOverlap:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        # Full MORI teardown so a cached EpDispatchCombineOp / shmem staging cannot leak
-        # into later tests. Safe no-ops when MORI is not installed.
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+        # Keep process-scoped MORI shmem alive between cases; only the operator
+        # may be safely reset here.
+        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 
         reset_mori_op()
-        finalize_mori_shmem()
         Utils.destroy_model_parallel()
         destroy_global_vars()
         destroy_num_microbatches_calculator()
         self.delete_cuda_graphs()
 
         gc.collect()
+
+    @classmethod
+    def teardown_class(cls):
+        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
+
+        finalize_mori_shmem()
 
     def delete_cuda_graphs(self):
         if self.cuda_graph_helper is not None and self.cuda_graph_helper.graphs_created():

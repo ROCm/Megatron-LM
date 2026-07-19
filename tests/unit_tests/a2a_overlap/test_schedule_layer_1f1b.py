@@ -260,14 +260,18 @@ class TestA2AOverlap:
         )
 
     def teardown_method(self, method):
-        # Full MORI teardown so the next parametrized case (different tp/ep layout)
-        # cannot inherit shmem staging or a stale EpDispatchCombineOp handle. These
-        # are safe no-ops when MORI is not installed.
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+        # MORI symmetric memory cannot be finalized and reinitialized safely in the
+        # same process. Drop the per-case op, but keep shmem alive until the class ends.
+        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 
         reset_mori_op()
-        finalize_mori_shmem()
         Utils.destroy_model_parallel()
+
+    @classmethod
+    def teardown_class(cls):
+        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
+
+        finalize_mori_shmem()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     def test_transformer_layer_overlap_dense(self):
