@@ -82,6 +82,29 @@ def _build_pg_collection(
     )
 
 
+def _destroy_pg_collections(*collections: ProcessGroupCollection) -> None:
+    """Destroy custom groups that are not tracked by model-parallel state."""
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+    pg_map = dist.distributed_c10d._world.pg_map
+    groups = []
+    seen = set()
+    for collection in collections:
+        for group in vars(collection).values():
+            if not isinstance(group, dist.ProcessGroup) or group in seen:
+                continue
+            seen.add(group)
+            groups.append(group)
+
+    for group in reversed(groups):
+        if group in pg_map:
+            dist.destroy_process_group(group)
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def _build_gpt(
     config: TransformerConfig,
     vocab_size: int,
@@ -160,6 +183,7 @@ def _set_pg_collection(module, tp_group, dp_group):
     ],
 )
 def test_swap_gpt_parametrized(
+    request: pytest.FixtureRequest,
     refit_backend: str,
     src_tp: int,
     src_pp: int,
@@ -203,8 +227,12 @@ def test_swap_gpt_parametrized(
     )
 
     # Build PGs and models (always use unified PG builder so we can set EP)
+    custom_pg_collections = []
+    request.addfinalizer(lambda: _destroy_pg_collections(*custom_pg_collections))
     src_pgs = _build_pg_collection(tp_size=src_tp, pp_size=src_pp, ep_size=src_ep)
+    custom_pg_collections.append(src_pgs)
     dst_pgs = _build_pg_collection(tp_size=dst_tp, pp_size=dst_pp, ep_size=dst_ep)
+    custom_pg_collections.append(dst_pgs)
     # Apply EP configuration to TransformerConfigs when MoE is requested
     src_cfg = copy.deepcopy(cfg)
     dst_cfg = copy.deepcopy(cfg)
