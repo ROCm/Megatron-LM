@@ -1593,6 +1593,23 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                         "Only TE with version >=2.3.0 supports delay_wgrad_compute now."
                     )
 
+            # Permute-free grouped GEMM stores the expert weights as one contiguous grouped
+            # tensor (``single_grouped_weight``) instead of ``num_gemms`` separate ``weight{i}``
+            # params, eliminating the per-launch ``torch.cat`` of the expert weight views.
+            self.single_grouped_weight = getattr(
+                self.config, "moe_permute_free_grouped_gemm", False
+            )
+            if self.single_grouped_weight:
+                if not class_has_method_param(
+                    te.pytorch.GroupedLinear, "__init__", "single_grouped_weight"
+                ):
+                    raise RuntimeError(
+                        "moe_permute_free_grouped_gemm is enabled but the installed Transformer "
+                        "Engine's GroupedLinear does not support single_grouped_weight. "
+                        "Please upgrade Transformer Engine."
+                    )
+                extra_kwargs["single_grouped_weight"] = True
+
             extra_kwargs["ub_name"] = tp_comm_buffer_name
 
             self.expert_parallel = self.config.expert_model_parallel_size > 1
@@ -1902,10 +1919,24 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             local_expert_indices_offset = get_pg_rank(self._pg_collection.ep) * self.num_gemms
             ep_axis = len(sharded_offsets)
             extra_states = self._split_extra_state(full_state_dict["_extra_state"])
+            # With single_grouped_weight the expert weights live in one contiguous
+            # ``[num_gemms, out, in]`` grouped tensor rather than per-gemm ``weight{i}`` params.
+            # Slice it back per gemm so the sharded checkpoint keys stay identical to the
+            # sequential per-expert layout (each slice is a contiguous ``[out, in]`` view).
+            grouped_weight = (
+                full_state_dict["weight"]
+                if getattr(self, "single_grouped_weight", False)
+                else None
+            )
             for gemm_idx in range(self.num_gemms):
                 global_expert_idx = local_expert_indices_offset + gemm_idx
+                weight_gemm = (
+                    grouped_weight[gemm_idx]
+                    if grouped_weight is not None
+                    else full_state_dict[f"weight{gemm_idx}"]
+                )
                 state_dict = {
-                    f"{gemm_idx}.weight": full_state_dict[f"weight{gemm_idx}"],
+                    f"{gemm_idx}.weight": weight_gemm,
                     f"{gemm_idx}._extra_state": extra_states[gemm_idx],
                 }
                 if self.use_bias:

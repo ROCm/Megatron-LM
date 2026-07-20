@@ -623,7 +623,6 @@ elif [ "$OPTIMIZER_OFFLOAD" = auto ]; then
 else
     offload_option=""
 fi
-GA_FUSION=false
 if [ "$GA_FUSION" = true ]; then
     ga_fusion_opt=""
 else

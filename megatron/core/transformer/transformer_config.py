@@ -1941,12 +1941,9 @@ class TransformerConfig(ModelParallelConfig):
                     "moe_permute_free_grouped_gemm requires TEGroupedMLP; "
                     "enable --moe-grouped-gemm and disable --moe-use-legacy-grouped-gemm."
                 )
-            if self.gradient_accumulation_fusion:
-                raise ValueError(
-                    "moe_permute_free_grouped_gemm is incompatible with wgrad-accumulation "
-                    "fusion (TE runs the standard grouped GEMM in that case). Pass "
-                    "--no-gradient-accumulation-fusion."
-                )
+            # wgrad-accumulation fusion is supported on the permute-free path because we always
+            # store the expert weights as a single grouped param (single_grouped_weight=True):
+            # TE accumulates the permute-free wgrad directly into the grouped param's main_grad.
             if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1":
                 raise ValueError(
                     "moe_permute_free_grouped_gemm and NVTE_USE_GROUPED_GEMM_TRITON "
