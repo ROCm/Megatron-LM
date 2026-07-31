@@ -123,6 +123,13 @@ fi
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
+    # Gradient accumulation fusion is incompatible with FSDP: torch-FSDP2 hard-asserts against it
+    # in arguments.py, and Megatron-FSDP crashes at runtime with an fsdp_grads "No buffer found for
+    # bucket_id" assertion. Force it off so the default-on toggle does not break the FSDP suites.
+    if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ]; then
+        echo "FSDP is incompatible with gradient accumulation fusion; disabling fusion (GRADIENT_ACCUMULATION_FUSION=0)."
+        GRADIENT_ACCUMULATION_FUSION=0
+    fi
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
@@ -466,8 +473,18 @@ else
     run_cmd="$run_cmd |& tee $TRAIN_LOG"
 fi
 
-if [ "$NO_TRAINING" -eq 0 ]; then 
+TRAIN_RC=0
+if [ "$NO_TRAINING" -eq 0 ]; then
+    # pipefail so the run's `... |& tee $TRAIN_LOG` (TEE_OUTPUT=1) returns torchrun's status, not tee's
+    # (~always 0). Without it a training crash is masked and the script would exit 0. ($? after `eval`
+    # of the pipeline, since `eval` collapses PIPESTATUS to a single element = tee's status.)
+    set -o pipefail
     eval $run_cmd
+    TRAIN_RC=$?
+    set +o pipefail
+    if [ "$TRAIN_RC" -ne 0 ]; then
+        echo "ERROR: training (torchrun pretrain_gpt.py) failed with exit code $TRAIN_RC" |& tee -a $TRAIN_LOG
+    fi
 fi
 
 
@@ -508,4 +525,7 @@ grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*
 MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
 echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt
+
+# Propagate the training exit status (the perf-parse above must not mask a torchrun failure).
+exit $TRAIN_RC
 

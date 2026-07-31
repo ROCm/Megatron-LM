@@ -134,6 +134,7 @@ NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 
 ENABLE_DEEP_EP="${ENABLE_DEEP_EP:-false}"
+ENABLE_MORI="${ENABLE_MORI:-false}"
 PROFILE=${PROFILE:-false}
 PROFILE_SYNC=${PROFILE_SYNC:-false}
 PROFILE_START=${PROFILE_START:-3}
@@ -435,6 +436,15 @@ if [ "$IS_MOE" -eq 1 ]; then
 
     if [ "$ENABLE_DEEP_EP" = true ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-deepep"
+    elif [ "$ENABLE_MORI" = true ]; then
+        export MORI_SHMEM_LOG_LEVEL="${MORI_SHMEM_LOG_LEVEL:-INFO}"
+        echo "[INFO] MORI EP: MORI_SHMEM_MODE=${MORI_SHMEM_MODE}"
+        echo "[INFO] MORI EP: MORI_SHMEM_LOG_LEVEL=${MORI_SHMEM_LOG_LEVEL}"
+        # --moe-mori-max-tokens-per-rank is auto-derived in
+        # `megatron/training/arguments.py:validate_args` from MICRO_BATCH_SIZE,
+        # SEQ_LEN, TP, SP, and CP. Pass an explicit value here only to
+        # over-provision the symmetric SHMEM heap (e.g. for variable batch).
+        moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-flex-dispatcher-backend mori"
     else
         moe_options="${moe_options} --moe-token-dispatcher-type alltoall"
     fi

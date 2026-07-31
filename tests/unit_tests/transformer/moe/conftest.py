@@ -10,6 +10,11 @@ import pytest
 import torch
 import torch.distributed
 
+from megatron.core.transformer.moe.fused_a2a import (
+    HAVE_MORI,
+    finalize_mori_shmem,
+    reset_mori_op,
+)
 import megatron.core.parallel_state as parallel_state
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.dist_checkpointing import TempNamedDir
@@ -66,10 +71,22 @@ def moe_model_parallel_teardown(monkeypatch):
         staticmethod(_destroy_model_parallel_with_subgroups),
     )
     yield
+    if HAVE_MORI:
+        # MORI shmem is process-scoped and cannot be finalized then initialized
+        # again safely. Only reset the per-test dispatch/combine operator here.
+        reset_mori_op()
     # Safety net: a test that errors before its own teardown would otherwise
     # leak NCCL/RCCL subgroups into the next test.
     if Utils.inited:
         _destroy_model_parallel_with_subgroups()
+
+
+@pytest.fixture(scope="session", autouse=True)
+def mori_session_teardown(cleanup):
+    """Finalize MORI once, before the parent session fixture destroys the default group."""
+    yield
+    if HAVE_MORI:
+        finalize_mori_shmem()
 
 
 def pytest_sessionfinish(session, exitstatus):

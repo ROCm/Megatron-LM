@@ -1142,6 +1142,31 @@ def validate_args(args, defaults={}):
     if isinstance(args.moe_aux_loss_coeff, list) and len(args.moe_aux_loss_coeff) == 1:
         args.moe_aux_loss_coeff = args.moe_aux_loss_coeff[0]
 
+    # MORI EP: auto-derive max tokens per rank if user didn't pass one. This is
+    # the sender-side row count of the tensor MORI's `op.dispatch` will see.
+    # With sequence parallelism the sequence dimension is sharded across TP ranks;
+    # with context parallelism it's sharded across CP ranks.
+    if getattr(args, 'moe_flex_dispatcher_backend', None) == 'mori' and args.moe_mori_max_tokens_per_rank is None:
+        # Use ceiling division: when the token dimension isn't evenly divisible by CP or SP
+        per_rank_tokens = args.micro_batch_size * args.seq_length
+        if args.context_parallel_size > 1:
+            per_rank_tokens = -(-per_rank_tokens // args.context_parallel_size)
+        if (
+            getattr(args, 'sequence_parallel', False)
+            and args.tensor_model_parallel_size > 1
+        ):
+            per_rank_tokens = -(-per_rank_tokens // args.tensor_model_parallel_size)
+        args.moe_mori_max_tokens_per_rank = per_rank_tokens
+        if args.rank == 0:
+            print(
+                f'[MORI EP] Auto-derived --moe-mori-max-tokens-per-rank='
+                f'{per_rank_tokens} from MBS={args.micro_batch_size}, '
+                f'SEQ_LEN={args.seq_length}, TP={args.tensor_model_parallel_size}, '
+                f'CP={args.context_parallel_size}, '
+                f'SP={getattr(args, "sequence_parallel", False)}.',
+                flush=True,
+            )
+
     # Distributed checkpointing checks
     if args.use_dist_ckpt and args.use_legacy_models:
         raise RuntimeError('--use-dist-ckpt is not supported in legacy models.')

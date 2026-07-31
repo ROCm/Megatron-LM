@@ -119,6 +119,7 @@ DO=true
 FL=true
 SFT=false
 ENABLE_DEEP_EP="${ENABLE_DEEP_EP:-false}"
+ENABLE_MORI="${ENABLE_MORI:-false}"
 FUSED_PADDED_MLA_ATTENTION=${FUSED_PADDED_MLA_ATTENTION:-false}
 ATTENTION_SINK_K=${ATTENTION_SINK_K:-0}
 WINDOW_SIZE=${WINDOW_SIZE:-none}
@@ -365,6 +366,15 @@ if [ $ENABLE_DEEP_EP = true ]; then
             ${moe_options} \
             --moe-token-dispatcher-type flex \
             --moe-enable-deepep \
+        "
+elif [ $ENABLE_MORI = true ]; then
+    export MORI_SHMEM_LOG_LEVEL="${MORI_SHMEM_LOG_LEVEL:-INFO}"
+    echo "[INFO] MORI EP: MORI_SHMEM_MODE=${MORI_SHMEM_MODE}"
+    echo "[INFO] MORI EP: MORI_SHMEM_LOG_LEVEL=${MORI_SHMEM_LOG_LEVEL}"
+    moe_options=" \
+            ${moe_options} \
+            --moe-token-dispatcher-type flex \
+            --moe-flex-dispatcher-backend mori \
         "
 else 
     moe_options=" \

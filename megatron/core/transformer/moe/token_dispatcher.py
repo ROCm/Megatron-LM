@@ -23,6 +23,8 @@ from megatron.core.transformer.moe.fused_a2a import (
     fused_dispatch,
     hybrid_ep_combine,
     hybrid_ep_dispatch,
+    mori_combine,
+    mori_dispatch,
     set_deepep_num_sms,
 )
 from megatron.core.transformer.moe.moe_utils import (
@@ -1324,6 +1326,335 @@ class _DeepepManager(_DispatchManager):
         return hidden_states
 
 
+class _MoriManager(_DispatchManager):
+    """
+    A manager class to handle fused all-to-all communication processes for MoE models using
+    MORI EP backend. See https://github.com/ROCm/mori for more details.
+
+    The workflow mirrors DeepEP:
+    (1) setup_metadata(): Process routing map and probabilities to prepare dispatch metadata
+    (2) dispatch():
+        - Use MORI dispatch to perform all-to-all communication
+    (3) get_permuted_hidden_states_by_experts():
+        - Convert indices to multihot format (supports permute_fusion)
+        - Permute tokens to group by expert
+    (4) get_restored_hidden_states_by_experts():
+        - Reverse permutation
+    (5) combine():
+        - Use MORI combine to perform all-to-all back to original ranks
+    """
+
+    def __init__(
+        self,
+        group: torch.distributed.ProcessGroup,
+        num_local_experts: int,
+        router_topk: int,
+        num_experts: int,
+        config: TransformerConfig,
+    ):
+        """
+        Initialize the MORI EP dispatcher.
+
+        Args:
+            group (torch.distributed.ProcessGroup): The process group to use for communication.
+                This should be the ETPxEP group.
+            num_local_experts (int): The number of local experts.
+            router_topk (int): The number of experts for each token to select.
+            num_experts (int): The total number of experts in the group.
+            config (TransformerConfig): The configuration for the transformer model.
+        """
+        self.group = group
+        self.num_local_experts = num_local_experts
+        self.config = config
+
+        self.router_topk = router_topk
+        self.num_experts = num_experts
+        self.router_dtype = config.moe_router_dtype
+        self.capacity_factor = config.moe_expert_capacity_factor
+        self.permute_fusion = config.moe_permute_fusion
+        self.max_num_tokens_per_rank = config.moe_mori_max_tokens_per_rank
+        self.kernel_type = config.moe_mori_kernel_type
+
+        self.token_indices: Optional[torch.Tensor] = None
+        self.token_probs: Optional[torch.Tensor] = None
+        # Full-capacity MORI dispatch_weights from dispatch(), for op.combine().
+        # Shape [world_size * max_num_tokens_per_rank, topk].
+        self._raw_dispatched_probs: Optional[torch.Tensor] = None
+        # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
+        self._routing_handle = None
+
+        # Deferred-sync prefetch of per-local-expert counts. mori_dispatch returns
+        # a device tokens_per_expert plus full recv buffers. We async-copy the counts into a pinned CPU buffer right
+        # after dispatch and record an event; the host read (permute's
+        # num_out_tokens and the GroupedGEMM .tolist()) is then deferred until
+        # after the multihot/permute work is enqueued, so it overlaps real GPU
+        # work instead of stalling the host on the dispatch-kernel drain.
+        self._tokens_per_expert_cpu: Optional[torch.Tensor] = None
+        self._tokens_per_expert_event: Optional[torch.cuda.Event] = None
+        if torch.cuda.is_available():
+            self._tokens_per_expert_cpu = torch.empty(
+                self.num_local_experts, dtype=torch.long, device="cpu", pin_memory=True
+            )
+            self._tokens_per_expert_event = torch.cuda.Event()
+
+        if mori_dispatch is None:
+            raise ImportError(
+                "MORI is not installed. Please install MORI package from "
+                "https://github.com/ROCm/mori."
+            )
+
+    def setup_metadata(self, routing_map: torch.Tensor, probs: torch.Tensor):
+        num_tokens = routing_map.shape[0]
+
+        routing_map = routing_map.reshape(num_tokens, self.num_experts)
+        probs = probs.reshape(num_tokens, self.num_experts)
+        # Convert the format of routing map from multihot to indices.
+        self.token_probs, self.token_indices = torch.topk(probs, self.router_topk, dim=-1)
+        # Mask any zero-weight slot with -1 so MORI skips it during dispatch.
+        mask = self.token_probs == 0
+        self.token_indices = self.token_indices.masked_fill(mask, -1)
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
+    ) -> torch.Tensor:
+        # MORI EP only supports float32 probs (matches DeepEP path)
+        if self.token_probs.dtype != torch.float32:
+            if self.token_probs.dtype in [torch.bfloat16, torch.float16]:
+                logger.warning(
+                    "MORI EP only supports float32 probs, please set --moe-router-dtype=fp32"
+                )
+            self.token_probs = self.token_probs.float()
+
+        (
+            hidden_states,
+            dispatched_indices,
+            dispatched_probs,
+            num_tokens_per_expert,
+            dispatch_weights_global,
+            routing_handle,
+        ) = mori_dispatch(
+            hidden_states,  # [num_tokens, hidden_dim]
+            self.token_indices,  # [num_tokens, topk]
+            self.token_probs,  # [num_tokens, topk]
+            self.num_experts,
+            self.group,
+            self.num_local_experts,
+            self.router_topk,
+            self.max_num_tokens_per_rank,
+            async_finish=async_finish,
+            allocate_on_comm_stream=allocate_on_comm_stream,
+            kernel_type=self.kernel_type,
+        )
+        self._routing_handle = routing_handle
+        self.tokens_per_expert = num_tokens_per_expert
+        self.dispatched_indices = dispatched_indices
+        self.dispatched_probs = dispatched_probs
+        # dispatch_weights recv buffer for op.combine(); indices use token_indices.
+        self._raw_dispatched_probs = dispatch_weights_global
+
+        # Deferred-sync prefetch: async DtoH of the device per-expert counts into
+        # the pinned buffer + event. No host sync here -- the read is deferred to
+        # _permute_by_experts (fused path) / get_number_of_tokens_per_expert.
+        self._prefetch_tokens_per_expert(num_tokens_per_expert)
+
+        # Mirror HybridEP: fuse the copy-out of MORI's reusable symmetric-memory
+        # dispatch buffer into the expert permute to remove a DtoD.
+        return self._permute_by_experts(hidden_states)
+
+    def _prefetch_tokens_per_expert(self, tokens_per_expert: torch.Tensor) -> None:
+        """Async-copy device per-expert counts into the pinned CPU buffer.
+
+        Records an event so a later consumer can synchronize exactly once. No
+        host sync is performed here. A no-op when CUDA is unavailable (the
+        buffer/event are then None and consumers fall back to the device tensor).
+        """
+        if self._tokens_per_expert_event is not None:
+            self._tokens_per_expert_cpu.copy_(tokens_per_expert, non_blocking=True)
+            self._tokens_per_expert_event.record()
+
+    def _synced_tokens_per_expert(self) -> torch.Tensor:
+        """Per-expert counts on CPU, synchronizing the prefetch event once.
+
+        Falls back to the device tensor (which forces a sync on first host use)
+        when the prefetch is unavailable (no CUDA) or stale -- the fp8
+        ``moe_router_padding_for_quantization`` path is the only thing that
+        rewrites ``tokens_per_expert`` after dispatch, so we route around the
+        prefetch in that case.
+        """
+        if (
+            self._tokens_per_expert_event is not None
+            and not self.config.moe_router_padding_for_quantization
+        ):
+            self._tokens_per_expert_event.synchronize()
+            return self._tokens_per_expert_cpu
+        return self.tokens_per_expert
+
+    def _indices_to_multihot(self, indices, probs):
+        """Converts a tensor of indices to a multihot vector."""
+        batch_size = indices.shape[0]
+        multihot_routing_map = torch.zeros(
+            (batch_size, self.num_local_experts), dtype=torch.long, device=indices.device
+        )
+        multihot_probs = torch.zeros(
+            (batch_size, self.num_local_experts), dtype=torch.float, device=indices.device
+        )
+
+        mask = indices != -1
+        valid_indices = indices[mask]
+        row_indices = torch.arange(batch_size, device=indices.device).repeat_interleave(
+            mask.sum(dim=1)
+        )
+        multihot_routing_map[row_indices, valid_indices] = 1
+        multihot_probs[row_indices, valid_indices] = probs[mask]
+        return multihot_routing_map.bool(), multihot_probs
+
+    def get_dispatched_metadata(self) -> torch.Tensor:
+        return self.dispatched_indices, self.dispatched_probs
+
+    def get_number_of_tokens_per_expert(self) -> torch.Tensor:
+        # CPU tensor (from the deferred-sync prefetch) so the downstream
+        # GroupedMLP `.tolist()` is a pure-host op rather than a GPU sync.
+        return self._synced_tokens_per_expert()
+
+    def combine(
+        self,
+        hidden_states: torch.Tensor,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
+    ) -> torch.Tensor:
+        # Mirror HybridEP: fuse the unpermute into the combine node (comm stream) so MoriCombine.backward
+        # can skip its clone -- its backward gather reads the grad view before a later op overwrites it.
+        hidden_states = unpermute(
+            hidden_states,
+            self.reversed_mapping_for_combine,
+            restore_shape=self.hidden_shape_before_permute,
+            routing_map=self.dispatched_routing_map,
+            fused=self.permute_fusion,
+        )
+        assert self._routing_handle is not None, (
+            "Mori combine() called without a matching dispatch(); "
+            "the per-call routing handle from MoriDispatch is missing."
+        )
+        hidden_states = mori_combine(
+            hidden_states,
+            self.group,
+            self.token_indices,
+            self._raw_dispatched_probs,
+            self.token_probs,
+            self._routing_handle,
+            self.num_local_experts,
+            self.router_topk,
+            self.max_num_tokens_per_rank,
+            async_finish=async_finish,
+            allocate_on_comm_stream=allocate_on_comm_stream,
+        )
+        # Combine Function keeps its own ctx-side ref for backward.
+        self._routing_handle = None
+        return hidden_states
+
+    def _pad_routing_map(
+        self, routing_map: torch.Tensor, tokens_per_expert: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """
+        Pad the routing map to the nearest multiple of the pad_multiple.
+        """
+        pad_multiple = get_align_size_for_quantization(self.config)
+
+        num_input_tokens = routing_map.shape[0]
+        target_tokens_per_expert = (
+            torch.ceil(tokens_per_expert / pad_multiple) * pad_multiple
+        ).long()
+
+        # Check if there are enough tokens to pad
+        enough_tokens_to_pad = torch.all(target_tokens_per_expert <= num_input_tokens)
+        if not enough_tokens_to_pad:
+            logger.warning(
+                "Not enough tokens to pad. The total number of tokens received in this rank "
+                "is smaller than the target number of tokens for each expert. "
+                "Falling back to explicit padding within GroupedMLP"
+            )
+        else:
+            if is_experimental_enabled() and self.permute_fusion:
+                from megatron.core.fusions.fused_pad_routing_map import fused_pad_routing_map
+
+                routing_map = fused_pad_routing_map(routing_map, pad_multiple)
+            else:
+                routing_map = pad_routing_map(routing_map, pad_multiple)
+            tokens_per_expert = target_tokens_per_expert
+        return routing_map, tokens_per_expert
+
+    def _permute_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Convert dispatched indices to multihot and permute tokens by expert.
+
+        Mirrors HybridEP by running the expert permute inside dispatch() (the
+        fine-grained dispatch node). The permute reads MORI's raw symmetric-memory
+        dispatch view and writes a fresh, private per-expert tensor -- this is the
+        fused copy-out that replaces the former defensive dispatch_out.clone().
+        The permuted probs are stashed in self.dispatched_probs so token_dispatch
+        returns them alongside the permuted tokens; get_permuted_hidden_states_by_experts
+        then just hands them back.
+        """
+        if is_experimental_enabled() and self.permute_fusion:
+            self.dispatched_routing_map, self.dispatched_probs = fused_indices_to_multihot(
+                self.dispatched_indices, self.dispatched_probs, self.num_local_experts
+            )
+        else:
+            self.dispatched_routing_map, self.dispatched_probs = self._indices_to_multihot(
+                self.dispatched_indices, self.dispatched_probs
+            )
+        if self.config.moe_router_padding_for_quantization:
+            self.dispatched_routing_map, self.tokens_per_expert = self._pad_routing_map(
+                self.dispatched_routing_map, self.tokens_per_expert
+            )
+
+        self.hidden_shape_before_permute = hidden_states.shape
+        assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
+        # Only the fused permute path needs an exact host int for num_out_tokens;
+        # the non-fused masked_select path ignores it, so we pass None there and skip host sync for now.
+        if self.permute_fusion:
+            num_out_tokens = int(self._synced_tokens_per_expert().sum())
+            # Clamp to >= 1 so the fused permute never emits a [0, H] tensor.
+            # On a cold rank (zero tokens received under skewed routing)
+            # num_out_tokens is 0; the empty permute output makes TE's fused
+            # unpermute short-circuit (`if not inp.numel(): return inp`) and
+            # return that [0, H] tensor instead of scattering into
+            # restore_shape=[max_recv, H]. That collapsed shape then flows into
+            # op.combine (x=[0, H], ctx.total_recv=0), corrupting the combine
+            # forward and zeroing the combine backward grad. The dummy row's
+            # routing_map has no 1s, so unpermute never reads it and the
+            # restored output stays all-zero on the cold rank.
+            num_out_tokens = max(num_out_tokens, 1)
+        else:
+            num_out_tokens = None
+        hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
+            hidden_states,
+            self.dispatched_routing_map,
+            probs=self.dispatched_probs,
+            num_out_tokens=num_out_tokens,
+            fused=self.permute_fusion,
+        )
+        if self.router_dtype == "fp64":
+            permuted_probs = permuted_probs.to(torch.float64)
+
+        # Stash permuted probs so token_dispatch returns them and the (detached)
+        # copy flows back in via submodule_moe_forward, mirroring HybridEP.
+        self.dispatched_probs = permuted_probs
+        return hidden_states
+
+    def get_permuted_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # No-op: the permute is fused into dispatch() (see _permute_by_experts),
+        # so the tokens are already grouped by expert. dispatched_probs holds the
+        # permuted probs (its detached copy is re-installed by submodule_moe_forward).
+        return hidden_states, self.dispatched_probs
+
+    def get_restored_hidden_states_by_experts(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # No-op: the unpermute is fused into combine() (mirrors HybridEP).
+        return hidden_states
+
+
 class MoEFlexTokenDispatcher(MoETokenDispatcher):
     """A flexible token dispatcher that abstracts the underlying tensor and expert
     parallelism. It uses a single communication group over all TP and EP ranks,
@@ -1368,11 +1699,21 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
                 config=self.config,
             )
             self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.routing_map']
+        elif self.config.moe_flex_dispatcher_backend == "mori":
+            self._comm_manager = _MoriManager(
+                group=self.tp_ep_group,
+                num_local_experts=self.num_local_experts,
+                router_topk=self.tp_size * self.config.moe_router_topk,
+                num_experts=self.tp_size * self.config.num_moe_experts,
+                config=self.config,
+            )
+            self.cudagraph_attrs = ['_comm_manager.token_probs', '_comm_manager.token_indices']
         else:
             raise ValueError(
                 f"Invalid backend: {self.config.moe_flex_dispatcher_backend}"
                 "Please set --moe-flex-dispatcher-backend=deepep or "
-                "--moe-flex-dispatcher-backend=hybridep"
+                "--moe-flex-dispatcher-backend=hybridep or "
+                "--moe-flex-dispatcher-backend=mori"
             )
 
     def set_shared_experts(self, shared_experts):
