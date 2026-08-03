@@ -22,8 +22,6 @@ from tests.unit_tests.a2a_overlap.utils import (
     get_test_config,
     get_valid_fp8_flags,
     get_valid_token_dispatcher_types,
-    is_mori_available,
-    reinitialize_model_parallel_for_mori,
 )
 from tests.unit_tests.test_utilities import Utils
 
@@ -85,13 +83,6 @@ class TestA2AOverlap:
         set_streams()
 
     def teardown_method(self, method):
-        # Full MORI teardown so the next parametrized case (different tp/ep layout)
-        # cannot inherit shmem staging or a stale EpDispatchCombineOp handle. These
-        # are safe no-ops when MORI is not installed.
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
-
-        reset_mori_op()
-        finalize_mori_shmem()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
@@ -302,30 +293,21 @@ class TestA2AOverlap:
             gc.collect()
             torch.cuda.empty_cache()
 
-    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
-    @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
-    @pytest.mark.parametrize("use_padding_mask", [False, True])
-    @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-    def test_1f1b_schedule_model_chunk_mori(self, layers, use_padding_mask, tp_size):
+    @staticmethod
+    def run_1f1b_schedule_model_chunk_mori(layers, use_padding_mask, tp_size, ep_size):
         """
         Verifies all-to-all overlap optimization with the MORI EP backend produces the
         same results as the reference implementation.
 
-        MORI is kept in a dedicated test (rather than the shared parametrization) because
+        MORI is kept in a dedicated test file (rather than the shared parametrization) because
         its ``EpDispatchCombineHandle`` requires the expert (EP) communicator to span whole
-        nodes. This test re-initializes a node-spanning expert-parallel layout
+        nodes. The dedicated test initializes a node-spanning expert-parallel layout
         (EP=gpus_per_node, ETP=1) with ``TP`` folded in independently (parallel folding, so
         ``TP * EP`` need not equal the node width); it fully owns this layout because
         interleaving the re-init with the sub-node cases in the parametrized tests corrupts
         the shared process-group state and desyncs collectives. Skipped when the node's GPU
         count is not a power of two.
         """
-        # Re-initialize with a node-spanning expert-parallel layout so the MORI expert
-        # communicator aligns to the node (EP == gpus_per_node). TP folds in independently.
-        # Skips when the node GPU count is not a power of two.
-        ep_size = reinitialize_model_parallel_for_mori(tp_size)
-
         microbatches = 1
 
         gpt_models = []
@@ -387,11 +369,25 @@ class TestA2AOverlap:
 
             # compare results
             atol, rtol = get_compare_tolerances(flex_backend)
+            compare_failures = []
             for i in range(len(ref_captures)):
                 comp_res = compare_captures(
                     ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
                 )
-                assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
+                if not comp_res[0]:
+                    compare_failures.append(f"model {i}: {comp_res[1]}")
+
+            # A rank-local assertion strands the remaining ranks in a later collective
+            # and turns a numerical failure into a long hang.
+            any_failure = torch.tensor(
+                [bool(compare_failures)], dtype=torch.int32, device="cuda"
+            )
+            torch.distributed.all_reduce(any_failure, op=torch.distributed.ReduceOp.MAX)
+            assert not any_failure.item(), (
+                f"[rank {torch.distributed.get_rank()}] layers={layers}, "
+                f"padding={use_padding_mask}: "
+                + ("; ".join(compare_failures) or "capture mismatch on another rank")
+            )
 
             # release resources is necessary, otherwise later testcases will oom
             for i in range(len(schedule_plans)):
