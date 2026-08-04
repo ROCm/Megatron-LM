@@ -89,7 +89,7 @@ def should_free_input(name, is_moe, config, num_local_experts):
 
     free_input_nodes = {
         "mlp": free_mlp,
-        # MORI's combine() reads this input via a standalone comm-stream unpermute after
+        # MORI's combine() reads this input using a standalone comm-stream unpermute after
         # the node returns; freeing it here would race that async read.
         "moe_combine": not enable_mori,
         # For non-DeepEP and non-HybridEP dispatcher mode, the input is the un-dispatched tokens

@@ -19,8 +19,14 @@ except ImportError:
 
 def is_device_nvls_capable(device: torch.device) -> bool:
     """Check if the device supports NVLS (multicast) collectives.
-    Requires CUDA Hopper+ (SM >= 9)."""
-    return device.type == "cuda" and torch.cuda.get_device_properties(device).major >= 9
+    Requires CUDA Hopper+ (SM >= 9). NVLS is NVIDIA NVLink-SHARP multicast and is not
+    available on ROCm/HIP, where device.type is still reported as "cuda" and MI300
+    reports major >= 9, so guard against HIP explicitly to avoid running NVLS paths."""
+    return (
+        device.type == "cuda"
+        and torch.version.hip is None
+        and torch.cuda.get_device_properties(device).major >= 9
+    )
 
 
 def are_tensors_nvls_eligible(*tensors: torch.Tensor) -> bool:
