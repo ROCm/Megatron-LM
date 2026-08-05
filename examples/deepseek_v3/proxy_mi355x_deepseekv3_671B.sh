@@ -33,8 +33,16 @@ export MOCK_DATA=1
 
 export APPLY_ROPE_FUSION=true
 
-# recompute: full AC + block method (Megatron has no recompute_layer_ids CLI in this tree)
-export AC="${AC:-full}"
+# --- activation checkpointing ---
+# Selective recompute across all applicable modules. Excluded on purpose:
+#   * moe          -> covers the graphed MoE scope (would trigger moe_layer_recompute over the
+#                     graphed region). Recompute must not *cover* the CUDA graph scope.
+#   * moe_act      -> recomputing it disables the fused FC1 activation + router-prob epilogue
+#                     (fc1_fused_act requires not activation_recompute).
+export AC=sel
+export RECOMPUTE_MODULES="core_attn layernorm mlp mla_up_proj shared_experts"
+export RECOMPUTE_METHOD=block
+export RECOMPUTE_NUM_LAYERS=3
 
 # --- optimizer (use_precision_aware_optimizer + bf16 states) ---
 export USE_PRECISION_AWARE_OPTIMIZER=true
@@ -53,9 +61,23 @@ export MOE_USE_LEGACY_GROUPED_GEMM=false
 export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true
 
+# --- CUDA graph ---
+# Selective TE-scoped graph for the WHOLE MoE layer: captures MoRI dispatch + expert
+# GroupedGEMM + MoRI combine. The permute-free + MoRI path provides static shapes
+# (fixed max_num_tokens_per_rank symmetric buffers + static per-expert count list, no host
+# DtoH sync), so drop-padding is not required (see transformer_config.py pf_mori_static).
+# NOTE: scope "moe" cannot be combined with "moe_router"/"moe_preprocess" (config assert).
+# Requires GPT_LAYER_IN_TE=true (default).
+export ENABLE_CUDA_GRAPH=true
+export CUDA_GRAPH_IMPL=transformer_engine
+export CUDA_GRAPH_SCOPE="moe"
+
 export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
 export GA_FUSION=true
 
 export PROFILE_START=12
 export PROFILE_END=13
 export PROFILE=true
+export AITER_USE_SYSTEM_TRITON=1
+export NVTE_PERMUTE_FREE_MOE_AUTOTUNE=1
+export AITER_MOE_FLYDSL_V3=1

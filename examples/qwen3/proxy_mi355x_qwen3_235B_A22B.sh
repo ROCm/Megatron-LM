@@ -83,7 +83,7 @@ export FORCE_BALANCE=true
 # DtoH sync), so drop-padding is not required (see transformer_config.py pf_mori_static).
 # NOTE: scope "moe" cannot be combined with "moe_router"/"moe_preprocess" (config assert).
 # Requires GPT_LAYER_IN_TE=true (default).
-export ENABLE_CUDA_GRAPH=false
+export ENABLE_CUDA_GRAPH=true
 export CUDA_GRAPH_IMPL=transformer_engine
 export CUDA_GRAPH_SCOPE="moe"
 # --- cross-entropy fusion ---
@@ -97,3 +97,4 @@ export PROFILE_END=13
 export PROFILE=true
 export AITER_USE_SYSTEM_TRITON=1
 export NVTE_PERMUTE_FREE_MOE_AUTOTUNE=1
+export AITER_MOE_FLYDSL_V3=1

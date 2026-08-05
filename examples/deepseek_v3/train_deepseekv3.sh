@@ -120,6 +120,20 @@ FL=true
 SFT=false
 ENABLE_DEEP_EP="${ENABLE_DEEP_EP:-false}"
 ENABLE_MORI="${ENABLE_MORI:-false}"
+
+# --- CUDA graph (optional) ---
+# ENABLE_CUDA_GRAPH=true captures the selected regions with CUDA graphs.
+# The fine-grained MoE scopes require the TransformerEngine impl (GPT_LAYER_IN_TE=true).
+#   CUDA_GRAPH_SCOPE examples (space-separated, see moe/README.md):
+#     "attn moe_router moe_preprocess"  -> safe default: graphs attention + MoE
+#                                          router/preprocess, leaves expert GEMMs eager.
+#     "moe"                             -> also graphs the whole MoE layer (expert compute
+#                                          + dispatch/combine). Needs static shapes, which the
+#                                          permute-free + MoRI path provides (sync-free).
+# te_rng_tracker is auto-enabled by validate_args when using the TE cuda-graph impl.
+ENABLE_CUDA_GRAPH="${ENABLE_CUDA_GRAPH:-false}"
+CUDA_GRAPH_IMPL="${CUDA_GRAPH_IMPL:-transformer_engine}"
+CUDA_GRAPH_SCOPE="${CUDA_GRAPH_SCOPE:-attn moe_router moe_preprocess}"
 FUSED_PADDED_MLA_ATTENTION=${FUSED_PADDED_MLA_ATTENTION:-false}
 ATTENTION_SINK_K=${ATTENTION_SINK_K:-0}
 WINDOW_SIZE=${WINDOW_SIZE:-none}
@@ -167,6 +181,11 @@ echo ""
 AC="${AC:-none}" #none #sel #full
 export RECOMPUTE_METHOD=${RECOMPUTE_METHOD:-block} # block uniform
 export RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-1}
+# For AC=sel: space-separated modules for --recompute-modules (selective recompute).
+# Leave empty to fall back to --recompute-activations (core_attn only). Choose modules
+# that do NOT overlap the CUDA graph scope, e.g. "core_attn mla_up_proj shared_experts"
+# while graphing the MoE (see megatron/core/transformer/transformer_config.py recompute/cuda-graph rules).
+export RECOMPUTE_MODULES=${RECOMPUTE_MODULES:-}
 echo "AC: $AC"
 echo "RECOMPUTE_METHOD: $RECOMPUTE_METHOD"
 echo "RECOMPUTE_NUM_LAYERS: $RECOMPUTE_NUM_LAYERS"
@@ -345,6 +364,7 @@ moe_options=" \
     --moe-shared-expert-intermediate-size  $((${NUM_SHARED_EXPERTS} * ${MOE_INTERMEDIATE_SIZE})) \
     --moe-router-load-balancing-type seq_aux_loss\
     --moe-router-topk ${ROUTER_TOPK} \
+    --moe-permute-free-grouped-gemm \
     ${moe_permute_fustion_options} \
     --num-experts ${NUM_EXPERTS} \
     --moe-router-pre-softmax \
@@ -431,8 +451,15 @@ if [ $AC = full ]; then
 		    --recompute-granularity full \
             --recompute-num-layers ${RECOMPUTE_NUM_LAYERS}"
 elif [ $AC = sel ]; then
-    activation_checkpoint_options=" \
-        --recompute-activations"
+    if [ -n "${RECOMPUTE_MODULES}" ]; then
+        activation_checkpoint_options=" \
+            --recompute-granularity selective \
+            --recompute-modules ${RECOMPUTE_MODULES}"
+        echo "[INFO] Selective recompute modules: ${RECOMPUTE_MODULES}"
+    else
+        activation_checkpoint_options=" \
+            --recompute-activations"
+    fi
 elif [ $AC = none ]; then
     activation_checkpoint_options=" \
     "
@@ -466,6 +493,36 @@ if [ $GPT_LAYER_IN_TE = true ]; then
     TRANSFORMER_IMPL=transformer_engine
 else
     TRANSFORMER_IMPL=local
+fi
+
+# --- CUDA graph options ---
+cuda_graph_options=""
+if [ "$ENABLE_CUDA_GRAPH" = true ]; then
+    cg_full_iteration=false
+    if [[ " ${CUDA_GRAPH_SCOPE} " == *" full_iteration "* ]]; then
+        cg_full_iteration=true
+        if [ "$CUDA_GRAPH_IMPL" != local ]; then
+            echo "[INFO] full_iteration scope requires --cuda-graph-impl=local; overriding CUDA_GRAPH_IMPL."
+            CUDA_GRAPH_IMPL=local
+        fi
+    fi
+
+    if [ "$CUDA_GRAPH_IMPL" = transformer_engine ] && [ "$TRANSFORMER_IMPL" != transformer_engine ]; then
+        echo "[ERROR] ENABLE_CUDA_GRAPH with CUDA_GRAPH_IMPL=transformer_engine requires GPT_LAYER_IN_TE=true."
+        exit 1
+    fi
+
+    cuda_graph_options=" \
+        --cuda-graph-impl ${CUDA_GRAPH_IMPL} \
+        --cuda-graph-scope ${CUDA_GRAPH_SCOPE}"
+
+    if [ "$cg_full_iteration" = true ]; then
+        cuda_graph_options="${cuda_graph_options} --no-check-for-nan-in-loss-and-grad"
+        if [ "${EP}" -gt 1 ]; then
+            cuda_graph_options="${cuda_graph_options} --moe-pad-experts-for-cuda-graph-inference"
+        fi
+    fi
+    echo "[INFO] CUDA graph: impl=${CUDA_GRAPH_IMPL} scope='${CUDA_GRAPH_SCOPE}'"
 fi
 
 if [ $PR = fp16 ]; then
@@ -684,7 +741,8 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 
 run_cmd="torchrun $DISTRIBUTED_ARGS pretrain_gpt.py
  ${megatron_options} ${pr_options} ${load_options} ${activation_checkpoint_options} \
- ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} ${sft_option} ${vp_options} ${flash_options} ${profile_options} ${LOGGING_ARGS}"
+ ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} \
+ ${cuda_graph_options} ${sft_option} ${vp_options} ${flash_options} ${profile_options} ${LOGGING_ARGS}"
 
 run_cmd="$run_cmd | tee $TRAIN_LOG"
 echo ${run_cmd}
