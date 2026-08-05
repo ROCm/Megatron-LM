@@ -17,6 +17,35 @@ from tests.unit_tests.paths import unit_test_data_dir
 from tests.unit_tests.test_utilities import Utils
 
 
+def _insert_rank_suffix(path: str, rank: str) -> str:
+    """Insert a ``.rank<N>`` suffix before the file extension."""
+    root, ext = os.path.splitext(path)
+    return f"{root}.rank{rank}{ext}"
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    """Give each distributed rank its own report file.
+
+    Under ``torchrun`` every rank runs pytest and, by default, writes to the
+    same ``--junitxml``/``--csv`` path. The ranks race and the last writer wins,
+    so a failure on a non-zero rank can be silently overwritten by a passing
+    rank and the CI reporter shows green. Suffixing the path with the rank keeps
+    each rank's result; ``run_unit_tests.sh`` then merges them so a test is
+    reported as failed if it failed on ANY rank. This runs ``tryfirst`` so the
+    paths are rewritten before the junit/csv plugins capture them.
+    """
+    rank = os.environ.get("RANK", os.environ.get("LOCAL_RANK"))
+    if rank is None:
+        return
+    xmlpath = getattr(config.option, "xmlpath", None)
+    if xmlpath:
+        config.option.xmlpath = _insert_rank_suffix(xmlpath, rank)
+    csvpath = getattr(config.option, "csvpath", None)
+    if csvpath:
+        config.option.csvpath = _insert_rank_suffix(csvpath, rank)
+
+
 def pytest_addoption(parser):
     """
     Additional command-line arguments passed to pytest.
