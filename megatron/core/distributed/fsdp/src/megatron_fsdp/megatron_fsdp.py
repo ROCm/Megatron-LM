@@ -371,6 +371,11 @@ class MegatronFSDP(torch.nn.Module):
             self.param_and_grad_buffer, ag_stream=self.side_stream_for_param_gather
         )
 
+        # Also expose the reduce-scatter pipeline on the buffer so the lazy main_grad_getter can
+        # apply double-buffer back-pressure: it drains the oldest pending reduce-scatter before
+        # allocating a new grad bucket, preventing the fixed double-buffer pool from overflowing.
+        self.param_and_grad_buffer.grad_reduce_pipeline = self.grad_reduce_pipeline
+
         # Set the suggested communication unit size for reduce-scatter and all-gather pipelines.
         suggested_communication_unit_size = self.ddp_config.suggested_communication_unit_size
         if suggested_communication_unit_size is None:
