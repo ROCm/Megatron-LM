@@ -27,13 +27,15 @@ import torch
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 try:
-    import transformer_engine.pytorch as te
-    from transformer_engine.pytorch.moe_routing import PermuteFreeMetadata
+    from transformer_engine.pytorch.moe import (
+        PermuteFreeMetadata,
+        is_permute_free_grouped_gemm_enabled as _te_pf_grouped_gemm_enabled,
+    )
 
-    HAVE_TE_ROUTING = hasattr(te, "MoERoutingMetadata")
+    HAVE_TE_ROUTING = True
 except ImportError:
-    te = None
     PermuteFreeMetadata = None
+    _te_pf_grouped_gemm_enabled = None
     HAVE_TE_ROUTING = False
 
 

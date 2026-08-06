@@ -1609,6 +1609,9 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                         "Please upgrade Transformer Engine."
                     )
                 extra_kwargs["single_grouped_weight"] = True
+                # Ensure the TE kernels also treat the grouped weight as a single
+                # contiguous parameter so the permute-free path is fully engaged.
+                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
 
             extra_kwargs["ub_name"] = tp_comm_buffer_name
 
