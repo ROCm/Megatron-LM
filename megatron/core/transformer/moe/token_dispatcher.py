@@ -1642,7 +1642,16 @@ class _MoriManager(_DispatchManager):
             self._routing_map = self.dispatched_routing_map.bool()
             self.reversed_mapping_for_combine = None
             # dispatched_probs stays [Nrecv, num_local_experts]; the experts gather per route.
-            return hidden_states
+            #
+            # .clone() -- manual copy-out of MORI's reusable symmetric-memory dispatch buffer.
+            # The non-perm-free path gets this copy-out for free: its permute reads the raw
+            # symm view and writes a fresh private tensor. The perm-free FC1 gathers directly
+            # from the routing map and never permutes, so `hidden_states` here is still the raw
+            # symm view. Without an explicit copy, a sibling microbatch's dispatch (fine-grained
+            # 1F1B overlap shares the process-wide MORI op / symm heap) overwrites this buffer
+            # before FC1 forward and -- critically -- before backward reads the saved recv_x,
+            # corrupting wgrad. Clone is differentiable, so the autograd graph is preserved.
+            return hidden_states.clone()
 
         # Only the fused permute path needs an exact host int for num_out_tokens;
         # the non-fused masked_select path ignores it, so we pass None there and skip host sync for now.

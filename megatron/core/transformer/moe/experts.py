@@ -685,12 +685,16 @@ class TEGroupedMLP(MegatronModule):
             # them (sync-free) until the FC1 forward has populated the align buffers.
             raw_probs = permuted_probs
             permuted_probs = None
-            # When the gated activation is TE-fusable, fold both the activation and the
-            # per-route gating-prob multiply into the FC1 GEMM epilogue (TE returns the
-            # F-wide act(gate)*up*prob), dropping the standalone silu + apply_route_probs
-            # passes. Requires the gated [gate|up] FC1 layout, no bias (perm-free excludes
-            # it), and no separate moe_act recompute/offload (which operate on the standalone
-            # activation output).
+            # When the gated activation is TE-fusable, let TE fold both the activation and the
+            # per-route gating-prob multiply into the GEMM epilogue (TE returns the F-wide
+            # act(gate)*up*prob), dropping the standalone silu + apply_route_probs passes.
+            # NOTE: TE applies this fused act+prob epilogue on FC2 (the route_space GEMM), not
+            # FC1 -- FC1 emits the raw 2F [gate|up]. So the activation hint rides on the shared
+            # metadata (consumed by FC2) and `dispatched_probs` is passed to `linear_fc2` below;
+            # crucially, only the FC2 backward emits the probs gradient (`grad_probs`), while the
+            # FC1 backward returns None for it. Requires the gated [gate|up] layout, no bias
+            # (perm-free excludes it), and no separate moe_act recompute/offload (which operate
+            # on the standalone activation output).
             fc1_fused_activation = _PF_FUSED_ACTIVATIONS.get(self.config.activation_func)
             fc1_fused_act = (
                 self.config.gated_linear_unit
@@ -730,8 +734,10 @@ class TEGroupedMLP(MegatronModule):
                 tokens_per_expert,
                 tokens_per_expert_gpu,
                 permute_free_metadata=fc1_metadata,
+                # activation is only a metadata tag here (shared with fc2_metadata); TE applies
+                # the gated activation + route-prob multiply on FC2, so probs go to linear_fc2.
                 activation=fc1_fused_activation if fc1_fused_act else None,
-                dispatched_probs=raw_probs if fc1_fused_act else None,
+                dispatched_probs=None,
             )
         if self.offload_expert_fc1:
             fc1_output = off_interface.group_commit(
@@ -846,6 +852,11 @@ class TEGroupedMLP(MegatronModule):
             tokens_per_expert,
             tokens_per_expert_gpu,
             permute_free_metadata=fc2_metadata,
+            # Perm-free fused epilogue: TE applies act(gate)*up*prob on FC2 and its backward
+            # emits the route-prob gradient (grad_probs), which flows to the detached
+            # dispatched_probs the fine-grained 1F1B dispatch node requires. raw_probs is the
+            # multihot [Nrecv, E_local]; only meaningful when the activation was fused (fc1_fused_act).
+            dispatched_probs=raw_probs if fc1_fused_act else None,
         )
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
