@@ -571,6 +571,29 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
                 group=mpu.get_tensor_model_parallel_group(),
             )
 
+    if mpu.get_tensor_model_parallel_world_size() == 1:
+        # Fast path: with a singleton TP group there are no peers to broadcast to, so the
+        # broadcast machinery below is a pure no-op. Skipping it also avoids the host-scalar
+        # tensor creation (``torch.tensor(n, ...)``) and intra-group collectives, which are
+        # illegal under CUDA graph capture
+        assert data_iterator is not None
+        data = next(data_iterator)
+
+        def _to_cuda(key):
+            return None if key not in data else data[key].cuda(non_blocking=True)
+
+        return {
+            'tokens': data["tokens"].cuda(non_blocking=True),
+            'labels': data["labels"].cuda(non_blocking=True),
+            'loss_mask': data["loss_mask"].cuda(non_blocking=True),
+            'attention_mask': _to_cuda("attention_mask"),
+            'position_ids': data["position_ids"].cuda(non_blocking=True),
+            'cu_seqlens': _to_cuda("cu_seqlens"),
+            'cu_seqlens_padded': _to_cuda("cu_seqlens_padded"),
+            'max_seqlen': _to_cuda("max_seqlen"),
+            'local_cp_size': _to_cuda("local_cp_size"),
+        }
+
     if mpu.get_tensor_model_parallel_rank() == 0:
 
         assert data_iterator is not None

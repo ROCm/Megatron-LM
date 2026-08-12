@@ -40,7 +40,10 @@ except ImportError:
 
 
 def make_permute_free_metadata(
-    routing_map: "torch.Tensor", route_space: bool = False, topk: "int | None" = None
+    routing_map: "torch.Tensor",
+    route_space: bool = False,
+    topk: "int | None" = None,
+    num_routes: "int | None" = None,
 ):
     """Build a TE ``PermuteFreeMetadata`` from a boolean routing map.
 
@@ -54,13 +57,21 @@ def make_permute_free_metadata(
     align over-allocation from ``num_recv_tokens * num_experts`` to
     ``num_recv_tokens * min(topk, num_experts)``, which for ``topk << num_experts`` avoids a
     huge padded ``[em_max, out]`` route buffer (and the matching activation-memory blow-up).
+
+    ``num_routes`` is the host-known EXACT route count (``routing_map.sum()``). When provided,
+    TE sizes the route-ordered buffers to it (plus per-expert block padding) instead of the
+    ``topk`` worst-case bound, cutting activation memory further -- at the cost of a
+    device-to-host sync to obtain the count and data-dependent buffer shapes (no CUDA graphs).
+    Leave ``None`` for the default sync-free, CUDA-graph-safe path.
     """
     if PermuteFreeMetadata is None:
         raise RuntimeError(
             "moe_permute_free_grouped_gemm is enabled but the installed Transformer Engine "
             "does not expose PermuteFreeMetadata. Please upgrade Transformer Engine."
         )
-    return PermuteFreeMetadata(routing_map.bool(), topk=topk, route_space=route_space)
+    return PermuteFreeMetadata(
+        routing_map.bool(), topk=topk, route_space=route_space, num_routes=num_routes
+    )
 
 
 def as_route_space(metadata):

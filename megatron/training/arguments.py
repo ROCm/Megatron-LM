@@ -1157,15 +1157,6 @@ def validate_args(args, defaults={}):
         ):
             per_rank_tokens = -(-per_rank_tokens // args.tensor_model_parallel_size)
         args.moe_mori_max_tokens_per_rank = per_rank_tokens
-        if args.rank == 0:
-            print(
-                f'[MORI EP] Auto-derived --moe-mori-max-tokens-per-rank='
-                f'{per_rank_tokens} from MBS={args.micro_batch_size}, '
-                f'SEQ_LEN={args.seq_length}, TP={args.tensor_model_parallel_size}, '
-                f'CP={args.context_parallel_size}, '
-                f'SP={getattr(args, "sequence_parallel", False)}.',
-                flush=True,
-            )
 
     # Permute-free grouped GEMM: enable the TE gather-in-GEMM kernel via env var.
     if getattr(args, 'moe_permute_free_grouped_gemm', False):
@@ -1175,11 +1166,6 @@ def validate_args(args, defaults={}):
                 'cannot both be enabled. Unset NVTE_USE_GROUPED_GEMM_TRITON.'
             )
         os.environ['NVTE_PERMUTE_FREE_GROUPED_GEMM'] = '1'
-        if args.rank == 0:
-            print(
-                '[Permute-free GroupedGEMM] Set NVTE_PERMUTE_FREE_GROUPED_GEMM=1.',
-                flush=True,
-            )
 
     # Distributed checkpointing checks
     if args.use_dist_ckpt and args.use_legacy_models:

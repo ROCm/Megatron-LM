@@ -739,6 +739,14 @@ class TransformerConfig(ModelParallelConfig):
     with the flex token dispatcher + MORI backend, bf16, no bias, and non-fp8/fp4. When enabled,
     the training entry point auto-sets NVTE_PERMUTE_FREE_GROUPED_GEMM=1."""
 
+    moe_permute_free_exact_routes: bool = False
+    """[Experimental][ROCm] Size the permute-free route-ordered activation buffers to the exact
+    number of routed tokens (``routing_map.sum()``) instead of the sync-free worst-case bound
+    (``num_recv_tokens * min(topk, num_experts)``). This can drastically reduce MoE activation
+    memory, but requires a device-to-host sync each expert layer and makes the route buffer
+    shapes data-dependent, so it is INCOMPATIBLE with CUDA graphs. Requires
+    ``moe_permute_free_grouped_gemm``."""
+
     moe_router_fusion: bool = False
     """Enable fusion for MoE TopK routing and aux-loss computation. This is only
     supported in TransformerEngine 2.7.0 and above.
@@ -1948,6 +1956,24 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     "moe_permute_free_grouped_gemm and NVTE_USE_GROUPED_GEMM_TRITON "
                     "cannot both be enabled."
+                )
+
+        if self.moe_permute_free_exact_routes:
+            if not self.moe_permute_free_grouped_gemm:
+                raise ValueError(
+                    "moe_permute_free_exact_routes requires moe_permute_free_grouped_gemm."
+                )
+            # Exact route sizing makes the route buffer shapes data-dependent (they follow
+            # routing_map.sum()), which cannot be captured by a CUDA graph.
+            if (
+                self.cuda_graph_impl != "none"
+                or self.enable_cuda_graph
+                or self.external_cuda_graph
+            ):
+                raise ValueError(
+                    "moe_permute_free_exact_routes is incompatible with CUDA graphs "
+                    "(route buffer shapes become data-dependent). Disable CUDA graphs "
+                    "(cuda_graph_impl='none')."
                 )
 
         if self.overlap_moe_expert_parallel_comm:

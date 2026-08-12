@@ -750,9 +750,7 @@ def get_mori_op(
     resolved_kernel_type = _resolve_mori_kernel_type(kernel_type, world_size)
 
     # MORI reads the launch-config mode only from this env var. Default to AUTO.
-    launch_config_mode = os.environ.setdefault("MORI_EP_LAUNCH_CONFIG_MODE", "AUTO")
-    if rank == 0:
-        print(f"[MORI EP] MORI_EP_LAUNCH_CONFIG_MODE={launch_config_mode}")
+    os.environ.setdefault("MORI_EP_LAUNCH_CONFIG_MODE", "AUTO")
 
     # TODO: Look into wiring fp8 dispatch in the future.
     assert not fp8_dispatch, "MORI EP FP8 dispatch is not integrated yet"
@@ -799,6 +797,7 @@ class MoriDispatch(torch.autograd.Function):
         async_finish=True,
         allocate_on_comm_stream=True,
         kernel_type=None,
+        perm_free=False,
     ):
         """Forward pass: dispatch tokens to correct ranks via MORI."""
         hidden_dim = x.shape[1]
@@ -821,6 +820,28 @@ class MoriDispatch(torch.autograd.Function):
         # stream so it can overlap with non-dependent compute.
         # `return_routing=True` makes MORI return a per-call routing handle
         # so this layer's combine/backward stay isolated from sibling layers.
+        # Perm-free path has no fused permute to copy dispatch_out off MORI's reusable
+        # symmetric buffer; the only copy-out is a downstream `.clone()`, which -- if left
+        # on the compute stream -- races a sibling microbatch's MORI op (the op / symm heap
+        # is process-wide under 1F1B overlap) and reads a half-overwritten buffer -> NaN in
+        # FC1's saved input. Do the copy-out HERE, inside this op's comm-stream context
+        # (before the next MORI op is enqueued on that same serial comm stream), mirroring
+        # the combine backward copy-out. dispatch_weights is likewise a symm view reused by
+        # combine forward / dispatch backward, so copy it out on the same stream too.
+        def _dispatch_and_copy_out():
+            out = op.dispatch(
+                x,
+                token_probs.float(),
+                None,
+                token_indices.to(torch.int32),
+                return_routing=True,
+            )
+            if perm_free:
+                out = list(out)
+                out[0] = out[0].clone()  # dispatch_out (recv_x)
+                out[1] = out[1].clone()  # dispatch_weights
+            return out
+
         (
             dispatch_out,
             dispatch_weights,
@@ -829,13 +850,7 @@ class MoriDispatch(torch.autograd.Function):
             recv_num_token,
             routing_handle,
         ) = _run_mori_op_on_stream(
-            lambda: op.dispatch(
-                x,
-                token_probs.float(),
-                None,
-                token_indices.to(torch.int32),
-                return_routing=True,
-            ),
+            _dispatch_and_copy_out,
             async_finish,
             allocate_on_comm_stream,
         )
@@ -979,6 +994,7 @@ class MoriDispatch(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
@@ -1004,6 +1020,7 @@ class MoriCombine(torch.autograd.Function):
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        perm_free=False,
     ):
         """Forward pass: combine expert outputs back to original ranks via MORI.
 
@@ -1028,19 +1045,27 @@ class MoriCombine(torch.autograd.Function):
         )
         num_tokens = sender_token_indices.shape[0]
 
-        combined_x, _ = _run_mori_op_on_stream(
-            lambda: op.combine(
+        # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim] symmetric
+        # buffer view; slice to the sender-side row count. Perm-free skips the fused unpermute
+        # that would otherwise copy this into a fresh tensor, so under 1F1B overlap a sibling
+        # microbatch's MORI op (process-wide op / symm heap) can overwrite it before the MoE
+        # layer's downstream forward (on the compute stream) reads it -> corruption. Copy it out
+        # HERE, on the comm stream (before the next MORI op is enqueued), mirroring the dispatch
+        # forward / combine backward copy-outs.
+        def _combine_and_copy_out():
+            out = op.combine(
                 x.contiguous(),
                 recv_token_probs,
                 sender_token_indices.to(torch.int32),
                 routing=routing_handle,
-            ),
+            )[0][:num_tokens]
+            return out.clone() if perm_free else out
+
+        combined_x = _run_mori_op_on_stream(
+            _combine_and_copy_out,
             async_finish,
             allocate_on_comm_stream,
         )
-        # op.combine() returns the full [max_num_inp_token_per_rank, hidden_dim]
-        # buffer view. Slice down to the actual sender-side row count.
-        combined_x = combined_x[:num_tokens]
 
         ctx.group = group
         ctx.num_local_experts = num_local_experts
@@ -1055,6 +1080,12 @@ class MoriCombine(torch.autograd.Function):
         ctx.routing_handle = routing_handle
         # Stash the receiver-side row count for backward.
         ctx.total_recv = x.shape[0]
+        # Permute-free path skips the fused unpermute in _MoriManager.combine, so
+        # backward has no unpermute-backward reader to copy the dispatch grad out of
+        # MORI's reusable symmetric buffer before a sibling microbatch's op overwrites
+        # it (1F1B overlap shares the process-wide MORI op / symm heap). Flag it so
+        # backward clones the grad view (mirrors MoriDispatch.backward's clone).
+        ctx.perm_free = perm_free
         # Save the SENDER-side probs and indices for backward.
         ctx.save_for_backward(sender_token_indices, sender_token_probs)
         return combined_x
@@ -1074,24 +1105,41 @@ class MoriCombine(torch.autograd.Function):
             fp8_dispatch=ctx.fp8_dispatch,
         )
         # Mode-2 replay: dispatch along the matching forward's cached layout.
-        dispatch_out, _, _, _, _ = _run_mori_op_on_stream(
-            lambda: op.dispatch(
+        #
+        # Non-perm-free: return the raw view into MORI's reusable buffer (a later MORI op
+        # overwrites it). Safe because the next reader is the fused unpermute's backward (in
+        # _MoriManager.combine), which runs on this same comm stream right after this op.dispatch
+        # -- it consumes the view into a fresh unpermuted tensor before any later op overwrites it.
+        #
+        # Perm-free: there is NO fused unpermute, so this grad flows directly into FC2's
+        # grouped-GEMM backward. Under 1F1B overlap a sibling microbatch's dispatch/combine (the
+        # MORI op / symm heap is process-wide) overwrites the buffer before FC2 backward reads it
+        # -> corrupted grad -> NaN wgrad. So copy it out. CRUCIALLY the clone must run *on the comm
+        # stream, inside this op's stream context* (before the next MORI op is enqueued on that
+        # same serial comm stream) -- a clone issued after _run_mori_op_on_stream returns lands on
+        # the compute stream and races the sibling op, which is exactly the bug that made the
+        # earlier compute-stream clone fail. This mirrors the non-PF unpermute copy-out's timing.
+        def _dispatch_and_copy_out():
+            dispatch_out = op.dispatch(
                 grad_output.contiguous(),
                 sender_token_probs.float(),
                 None,
                 sender_token_indices.to(torch.int32),
                 routing=ctx.routing_handle,
-            ),
+            )[0]
+            grad = dispatch_out[: ctx.total_recv]
+            # On the comm stream when async overlap is active; clone here so the copy precedes
+            # any sibling MORI op on this stream. No-op cost on the non-overlap path.
+            return grad.clone() if ctx.perm_free else grad
+
+        grad_x = _run_mori_op_on_stream(
+            _dispatch_and_copy_out,
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # NO clone needed here. dispatch_out is a raw view into MORI's reusable buffer, which a
-        # later MORI op will overwrite. That's safe because the next thing to read this grad is the
-        # fused unpermute's backward (in _MoriManager.combine), which runs on the same comm stream
-        # right after this op.dispatch -- so it reads the view and creates an unpermuted tensor
-        # before any later op can overwrite it.
         return (
-            dispatch_out[: ctx.total_recv],
+            grad_x,
+            None,
             None,
             None,
             None,
@@ -1121,6 +1169,7 @@ if HAVE_MORI:
         async_finish=True,
         allocate_on_comm_stream=True,
         kernel_type=None,
+        perm_free=False,
     ):
         """Perform fused dispatch using MORI EP backend.
 
@@ -1179,6 +1228,7 @@ if HAVE_MORI:
             async_finish,
             allocate_on_comm_stream,
             kernel_type,
+            perm_free,
         )
 
     def mori_combine(
@@ -1194,6 +1244,7 @@ if HAVE_MORI:
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        perm_free=False,
     ):
         """Perform fused combine using MORI EP backend.
 
@@ -1228,6 +1279,10 @@ if HAVE_MORI:
                 stream so it can overlap with non-dependent compute on the
                 default stream. Mirrors DeepEP's flag of the same name.
             allocate_on_comm_stream: See `async_finish`.
+            perm_free: When True (permute-free path, no fused unpermute), backward clones its
+                dispatch grad out of MORI's reusable symmetric buffer so a sibling microbatch's
+                op can't overwrite it before FC2 backward reads it (1F1B overlap). Leave False on
+                the standard path, whose immediate unpermute-backward already copies the grad out.
 
         Returns:
             Combined output tensor
@@ -1245,6 +1300,7 @@ if HAVE_MORI:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
+            perm_free,
         )
 
 else:

@@ -678,8 +678,18 @@ class TEGroupedMLP(MegatronModule):
             # metadata); skip the tokens-per-expert host sync and the .tolist().
             tokens_per_expert = [0] * self.num_local_experts
             tokens_per_expert_gpu = None
+            # Sync permute-free: size the route-ordered buffers to the exact routed-token
+            # count instead of the worst-case topk bound. This is a deliberate device->host
+            # sync (and disables CUDA graphs, validated in the config), traded for a large
+            # cut in MoE activation memory. Both FC1 and FC2 share this count via as_route_space.
+            exact_num_routes = None
+            if self.config.moe_permute_free_exact_routes:
+                exact_num_routes = int(routing_map.bool().sum().item())
             fc1_metadata = make_permute_free_metadata(
-                routing_map, route_space=False, topk=self.config.moe_router_topk
+                routing_map,
+                route_space=False,
+                topk=self.config.moe_router_topk,
+                num_routes=exact_num_routes,
             )
             # Probs are applied at the activation in the padded route layout; defer building
             # them (sync-free) until the FC1 forward has populated the align buffers.

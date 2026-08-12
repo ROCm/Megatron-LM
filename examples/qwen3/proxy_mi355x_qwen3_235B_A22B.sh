@@ -16,6 +16,12 @@
 
 export MODEL_SIZE=235B_A22B
 
+# Force HF offline: the Qwen3-235B-A22B tokenizer (tokenizer.json/vocab/merges/config) is
+# already in HF_HOME. Without offline mode, from_pretrained blocks on an HF Hub network call
+# and hangs at "building HuggingFaceTokenizer tokenizer" when the network is unreachable.
+export HF_HUB_OFFLINE=1
+export TRANSFORMERS_OFFLINE=1
+
 export NUM_LAYERS="${NUM_LAYERS:-24}"
 export NUM_EXPERTS="${NUM_EXPERTS:-128}"
 # Must satisfy ROUTER_TOPK <= NUM_EXPERTS (lower TOPK if you shrink experts below 8).
@@ -24,7 +30,10 @@ export ROUTER_TOPK="${ROUTER_TOPK:-8}"
 # --- hyperparameters (Primus overrides) ---
 export TRAIN_ITERS=20
 export MICRO_BATCH_SIZE=2
-export GLOBAL_BATCH_SIZE=16
+# 1F1B EP overlap needs >=2 microbatches: num_micro = GBS/(MBS*DP), DP=world/(TP*PP)=8,
+# MBS=2 -> GBS=64 gives 4 microbatches (matches train_qwen_ck_overlap_og2.log).
+# GBS=16 collapses to 1 microbatch (16/(2*8)) -> NO 1F1B overlap possible. Use >=32 for 2.
+export GLOBAL_BATCH_SIZE=32
 export SEQ_LENGTH=4096
 export MAX_POSITION_EMBEDDINGS=4096
 export LR=1.0e-4
@@ -49,14 +58,8 @@ export SAVE_INTERVAL=20000
 export CKPT_FORMAT=torch
 
 # --- activation checkpointing ---
-# Selective recompute across all applicable modules. Excluded on purpose:
-#   * moe          -> covers the graphed MoE scope (would trigger moe_layer_recompute over the
-#                     graphed region). Recompute must not *cover* the CUDA graph scope.
-#   * mla_up_proj  -> Qwen3 has no MLA, config raises ValueError.
-#   * moe_act      -> recomputing it disables the fused FC1 activation + router-prob epilogue
-#                     (fc1_fused_act requires not activation_recompute).
+# og2 used --recompute-activations (AC=sel, no RECOMPUTE_MODULES).
 export AC=sel
-export RECOMPUTE_MODULES="core_attn layernorm mlp shared_experts"
 export RECOMPUTE_METHOD=block
 export RECOMPUTE_NUM_LAYERS=3
 
@@ -75,17 +78,29 @@ export ENABLE_MORI=true
 export MOE_USE_LEGACY_GROUPED_GEMM=false
 export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true
+# CK grouped GEMM (TE CUTLASS path). Inert for the permute-free FC1/FC2 (they take the
+# route-list gather GEMM once permute_free_metadata is passed); affects only any non-PF GEMM.
+export NVTE_USE_CUTLASS_GROUPED_GEMM=0
 
-# --- CUDA graph ---
-# Selective TE-scoped graph for the WHOLE MoE layer: captures MoRI dispatch + expert
-# GroupedGEMM + MoRI combine. The permute-free + MoRI path provides static shapes
-# (fixed max_num_tokens_per_rank symmetric buffers + static per-expert count list, no host
-# DtoH sync), so drop-padding is not required (see transformer_config.py pf_mori_static).
-# NOTE: scope "moe" cannot be combined with "moe_router"/"moe_preprocess" (config assert).
-# Requires GPT_LAYER_IN_TE=true (default).
-export ENABLE_CUDA_GRAPH=true
-export CUDA_GRAPH_IMPL=transformer_engine
-export CUDA_GRAPH_SCOPE="moe"
+# --- Permute-free grouped GEMM ---
+# Enables --moe-permute-free-grouped-gemm (train_qwen3.sh). arguments.py auto-sets
+# NVTE_PERMUTE_FREE_GROUPED_GEMM=1. Keeps flex+mori, bf16, no-bias (all satisfied above).
+export MOE_PERMUTE_FREE_GG=true
+# Sync permute-free (opt-in): size the route-ordered activation buffers to the EXACT routed-
+# token count (routing_map.sum()) instead of the sync-free worst-case num_recv*min(topk,E)
+# bound. Drastically cuts MoE activation memory (the win scales with how sparse each rank's
+# local routing_map is), at the cost of one device->host sync per expert layer and
+# data-dependent buffer shapes -> INCOMPATIBLE with CUDA graphs (none used here). Sets
+# --moe-permute-free-exact-routes; the config hard-errors if CUDA graphs are enabled.
+export MOE_PERMUTE_FREE_EXACT_ROUTES=false
+
+# --- EP all-to-all 1F1B overlap (matches og2) ---
+# Overlap ON: validates the MoriCombine.backward perm-free clone fix. Root cause was combine's
+# backward returning a raw view into MORI's reusable symm buffer (no fused-unpermute reader on
+# the PF path); a sibling microbatch's op overwrote it under 1F1B -> NaN wgrad. PF alone (overlap
+# off) already trains clean for 20 iters, so a finite grad norm here confirms the fix.
+export EP_A2A_OVERLAP=true
+export DELAY_WGRAD_COMPUTE=true
 # --- cross-entropy fusion ---
 export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
 
@@ -96,5 +111,9 @@ export PROFILE_START=12
 export PROFILE_END=13
 export PROFILE=true
 export AITER_USE_SYSTEM_TRITON=1
-export NVTE_PERMUTE_FREE_MOE_AUTOTUNE=1
-export AITER_MOE_FLYDSL_V3=1
+# NOTE: the var name is GPU_MAX_HW_QUEUES (plural). The old `GPU_MAX_HW_QUEUE=4`
+# was a typo that set nothing, so train_qwen3.sh fell back to its default of 2 ->
+# comm and compute HIP streams round-robined onto the same physical HW queue and
+# serialized (trace showed ~4% comm/compute overlap). 8 gives each critical stream
+# its own queue and restores 1F1B a2a overlap.
+export GPU_MAX_HW_QUEUES=4

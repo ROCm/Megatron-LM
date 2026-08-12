@@ -1,9 +1,11 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 import gc
+import os
 
 from megatron.core.enums import Fp8Recipe
 import pytest
 import torch
+import torch.nn.functional as F
 
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerModelChunkSchedulePlan
 from megatron.core.models.gpt.gpt_layer_specs import (
@@ -405,3 +407,136 @@ class TestA2AOverlap:
                 gpt_models[i] = None
             gc.collect()
             torch.cuda.empty_cache()
+
+    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
+    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+    @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
+    @pytest.mark.parametrize("use_padding_mask", [False])
+    @pytest.mark.parametrize("tp_size", [1])
+    @pytest.mark.parametrize("exact_routes", [False, True])
+    def test_1f1b_schedule_model_chunk_mori_perm_free(
+        self, layers, use_padding_mask, tp_size, exact_routes
+    ):
+        """Permute-free (PF) grouped-GEMM variant of :meth:`test_1f1b_schedule_model_chunk_mori`.
+
+        Reproduces the NaN / gradient-corruption seen with PF + MORI under fine-grained 1F1B
+        overlap. The PF path skips the explicit (un)permute, so dispatch/combine outputs are raw
+        views into MORI's reusable symmetric-memory buffer; a sibling microbatch's MORI op can
+        overwrite them before the saved activation / gradient is consumed unless we copy out.
+        This enables PF (``moe_permute_free_grouped_gemm`` + ``NVTE_PERMUTE_FREE_GROUPED_GEMM``)
+        with a fused gated (SwiGLU) activation so it exercises the same FC2 fused act+prob
+        epilogue as training, then compares 1F1B-overlap grads against the serial reference.
+        """
+        from megatron.core.transformer.moe.permute_free_grouped_gemm import HAVE_TE_ROUTING
+
+        if not HAVE_TE_ROUTING:
+            pytest.skip("Installed TransformerEngine does not expose the permute-free route API.")
+
+        ep_size = reinitialize_model_parallel_for_mori(tp_size)
+
+        microbatches = 1
+
+        gpt_models = []
+        schedule_plans = []
+        ref_captures = []
+        datas = []
+
+        flex_backend = "mori"
+        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", flex_backend)
+        extra_kwargs["expert_model_parallel_size"] = ep_size
+        extra_kwargs["tensor_model_parallel_size"] = tp_size
+        extra_kwargs["sequence_parallel"] = tp_size > 1
+        # Enable permute-free grouped GEMM with a fused gated (SwiGLU) activation so the FC2
+        # epilogue fuses act + route-prob, matching the training config under debug.
+        extra_kwargs["moe_permute_free_grouped_gemm"] = True
+        extra_kwargs["gated_linear_unit"] = True
+        extra_kwargs["activation_func"] = F.silu
+        # exact_routes: size route buffers to the exact routed-token count (a device sync,
+        # no CUDA graphs) instead of the worst-case topk bound -- correctness must be
+        # identical to the default sync-free path.
+        extra_kwargs["moe_permute_free_exact_routes"] = exact_routes
+
+        prev_pf_env = os.environ.get("NVTE_PERMUTE_FREE_GROUPED_GEMM")
+        os.environ["NVTE_PERMUTE_FREE_GROUPED_GEMM"] = "1"
+        try:
+            with deterministic_mode():
+                for layer_num in layers:
+                    output_tensors = []
+                    config = get_test_config(num_layers=layer_num, extra_kwargs=extra_kwargs)
+                    gpt_model, schedule_plan, data = build_model(
+                        config, use_padding_mask=use_padding_mask
+                    )
+                    gpt_model.cuda()
+                    gpt_models.append(gpt_model)
+                    datas.append(data)
+                    schedule_plans.append(schedule_plan)
+
+                    # run reference (serial, no overlap)
+                    for _ in range(microbatches):
+                        loss = gpt_model.forward(**data)
+                        loss = float16_to_fp32(loss)
+                        loss.backward(torch.ones_like(loss))
+                        output_tensors.append(loss)
+
+                    capture = {"outputs": output_tensors}
+                    for name, param in gpt_model.named_parameters():
+                        capture[name] = param.grad
+                    ref_captures.append(capture)
+                    gpt_model.zero_grad()
+                assert gpt_models[0].embedding is not None
+                assert gpt_models[1].embedding is not None
+                # run a2a overlap (1F1B)
+                capture_0 = {"outputs": []}
+                capture_1 = {"outputs": []}
+                a2a_captures = [capture_0, capture_1]
+                for i in range(microbatches):
+                    f_input_0 = TransformerModelChunkSchedulePlan.run(schedule_plans[0], None)
+                    capture_0["outputs"].append(f_input_0)
+                    # overlap
+                    f_input_1 = TransformerModelChunkSchedulePlan.run(
+                        schedule_plans[1], schedule_plans[0], b_grad=torch.ones_like(f_input_0)
+                    )
+                    capture_1["outputs"].append(f_input_1)
+                    # last backward
+                    TransformerModelChunkSchedulePlan.run(
+                        None, schedule_plans[1], b_grad=torch.ones_like(f_input_1)
+                    )
+                for i in range(len(gpt_models)):
+                    for name, param in gpt_models[i].named_parameters():
+                        a2a_captures[i][name] = param.grad
+
+                # guard: overlap grads must be finite (the PF buffer-corruption bug NaNs here)
+                for i in range(len(a2a_captures)):
+                    for name, grad in a2a_captures[i].items():
+                        if name == "outputs" or grad is None:
+                            continue
+                        assert torch.isfinite(grad).all(), (
+                            f"[rank {torch.distributed.get_rank()}] non-finite grad in overlap "
+                            f"capture for model {i} param '{name}'"
+                        )
+
+                # compare results
+                atol, rtol = get_compare_tolerances(flex_backend)
+                for i in range(len(ref_captures)):
+                    comp_res = compare_captures(
+                        ref_captures[i], a2a_captures[i], True, True, atol=atol, rtol=rtol
+                    )
+                    assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
+
+                # release resources is necessary, otherwise later testcases will oom
+                for i in range(len(schedule_plans)):
+                    schedule_plans[i] = None
+                    ref_captures[i] = None
+                    a2a_captures[i] = None
+                    for k in datas[i]:
+                        datas[i][k] = None
+                    datas[i] = None
+                    gpt_models[i].zero_grad()
+                    gpt_models[i] = None
+                gc.collect()
+                torch.cuda.empty_cache()
+        finally:
+            if prev_pf_env is None:
+                os.environ.pop("NVTE_PERMUTE_FREE_GROUPED_GEMM", None)
+            else:
+                os.environ["NVTE_PERMUTE_FREE_GROUPED_GEMM"] = prev_pf_env

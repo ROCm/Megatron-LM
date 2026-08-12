@@ -1458,6 +1458,7 @@ class _MoriManager(_DispatchManager):
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
             kernel_type=self.kernel_type,
+            perm_free=self.perm_free,
         )
         self._routing_handle = routing_handle
         self.tokens_per_expert = num_tokens_per_expert
@@ -1568,6 +1569,10 @@ class _MoriManager(_DispatchManager):
             self.max_num_tokens_per_rank,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            # Perm-free skips the fused unpermute above, so combine's backward has no
+            # unpermute-backward to copy its grad out of MORI's reusable symm buffer;
+            # tell it to clone (else a sibling microbatch's op corrupts it under 1F1B overlap).
+            perm_free=self.perm_free,
         )
         # Combine Function keeps its own ctx-side ref for backward.
         self._routing_handle = None
@@ -1643,15 +1648,14 @@ class _MoriManager(_DispatchManager):
             self.reversed_mapping_for_combine = None
             # dispatched_probs stays [Nrecv, num_local_experts]; the experts gather per route.
             #
-            # .clone() -- manual copy-out of MORI's reusable symmetric-memory dispatch buffer.
-            # The non-perm-free path gets this copy-out for free: its permute reads the raw
-            # symm view and writes a fresh private tensor. The perm-free FC1 gathers directly
-            # from the routing map and never permutes, so `hidden_states` here is still the raw
-            # symm view. Without an explicit copy, a sibling microbatch's dispatch (fine-grained
-            # 1F1B overlap shares the process-wide MORI op / symm heap) overwrites this buffer
-            # before FC1 forward and -- critically -- before backward reads the saved recv_x,
-            # corrupting wgrad. Clone is differentiable, so the autograd graph is preserved.
-            return hidden_states.clone()
+            # NOTE: the copy-out of MORI's reusable symmetric-memory dispatch buffer that the
+            # perm-free path needs (the non-perm-free path gets it for free via its permute)
+            # is done inside MoriDispatch.forward, ON THE COMM STREAM, when perm_free=True.
+            # It cannot be done here: this runs on the compute stream, so a sibling microbatch's
+            # MORI op (the op / symm heap is process-wide under 1F1B overlap) can overwrite the
+            # buffer before this compute-stream clone reads it -> corrupted FC1 input / wgrad ->
+            # NaN. `hidden_states` is therefore already a private tensor here.
+            return hidden_states
 
         # Only the fused permute path needs an exact host int for num_out_tokens;
         # the non-fused masked_select path ignores it, so we pass None there and skip host sync for now.
