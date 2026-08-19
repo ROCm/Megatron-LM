@@ -3,6 +3,7 @@
 import functools
 import logging
 import math
+import os
 import warnings
 from contextlib import nullcontext
 from enum import Enum
@@ -20,6 +21,8 @@ from megatron.core.utils import log_single_rank
 
 from ..fp8_utils import (
     is_float8tensor,
+    is_grouped_tensor,
+    modify_grouped_tensor_storage,
     is_mxfp8tensor,
     modify_underlying_storage,
     post_all_gather_processing,
@@ -27,6 +30,11 @@ from ..fp8_utils import (
 from ..utils import is_torch_min_version, log_on_each_pipeline_stage
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accumulation
+
+# Alias a permute-free single grouped weight (TE ``GroupedTensor``) into the DDP param buffer
+# instead of double-storing it as a standalone tensor (saves one full replica of the expert
+# weights). On by default; set MOE_PF_DEDUP_WEIGHT=0 to restore the old double-stored behavior.
+_DEDUP_GROUPED_WEIGHT = os.environ.get("MOE_PF_DEDUP_WEIGHT", "1") == "1"
 
 logger = logging.getLogger(__name__)
 
@@ -826,6 +834,12 @@ class _ParamAndGradBuffer:
                     )
                     if is_float8tensor(param):
                         modify_underlying_storage(param, new_param_data)
+                    elif _DEDUP_GROUPED_WEIGHT and is_grouped_tensor(param):
+                        # Permute-free single grouped weight: alias the GroupedTensor's
+                        # contiguous storage into the param buffer instead of leaving it as a
+                        # standalone tensor (which double-stores the expert weights). See
+                        # modify_grouped_tensor_storage.
+                        modify_grouped_tensor_storage(param, new_param_data)
                     else:
                         old_param_data = param.data
                         param.data = new_param_data

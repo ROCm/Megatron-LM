@@ -110,6 +110,40 @@ def is_mxfp8tensor(tensor: torch.Tensor) -> bool:
     return HAVE_TE_MXFP8TENSOR and isinstance(tensor, MXFP8Tensor)
 
 
+def is_grouped_tensor(tensor: torch.Tensor) -> bool:
+    """Check if a tensor is a Transformer Engine (bf16) ``GroupedTensor``.
+
+    Used by the permute-free ``single_grouped_weight`` path: the expert weights live in one
+    contiguous ``GroupedTensor`` whose bytes are held in ``rowwise_data`` (with per-expert
+    ``quantized_tensors`` views). Detected by duck-typing so we don't hard-depend on the TE
+    class across versions.
+    """
+    return (
+        hasattr(tensor, "rowwise_data")
+        and hasattr(tensor, "quantized_tensors")
+        and hasattr(tensor, "split_into_quantized_tensors")
+    )
+
+
+def modify_grouped_tensor_storage(tensor, new_raw_data: torch.Tensor) -> None:
+    """Repoint a bf16 ``GroupedTensor``'s contiguous storage to ``new_raw_data`` in place.
+
+    Copies the existing weight bytes into ``new_raw_data`` (a view into the distributed
+    optimizer's param buffer), swaps ``rowwise_data`` to it, and rebuilds the per-expert
+    ``quantized_tensors`` views so they alias the new storage. This lets the grouped weight
+    live inside the DDP param buffer instead of being double-stored as a standalone tensor.
+    """
+    old = tensor.rowwise_data
+    new_flat = new_raw_data.view(-1)
+    assert old.dtype == new_flat.dtype, (old.dtype, new_flat.dtype)
+    assert old.numel() == new_flat.numel(), (old.numel(), new_flat.numel())
+    new_flat.detach().copy_(old.view(-1))
+    tensor.rowwise_data = new_flat
+    # Rebuild per-expert views (they slice rowwise_data), so the GEMM reads the buffer copy.
+    tensor.quantized_tensors = tensor.split_into_quantized_tensors()
+    del old
+
+
 def dequantize_fp8_tensor(fp8_tensor: torch.Tensor) -> torch.Tensor:
     """Dequantize a fp8 tensor to a higher precision tensor."""
     if is_te_min_version("2.0"):
