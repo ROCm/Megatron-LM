@@ -584,7 +584,6 @@ fi
 megatron_options="  \
 	--log-throughput \
 	${ga_fusion_opt} \
-	--no-async-tensor-model-parallel-allreduce \
 	${data_args} \
         --lr ${LR} \
         --min-lr ${MIN_LR} \

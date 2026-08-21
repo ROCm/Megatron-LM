@@ -344,7 +344,6 @@ SAVED_PRETRAIN_CHECKPOINT_PATH="${OUTPUT_BASEPATH}/checkpoint/${NAME}"
 megatron_options="  \
 	--log-throughput \
 	--no-gradient-accumulation-fusion \
-	--no-async-tensor-model-parallel-allreduce \
         --lr ${LR} \
         --min-lr ${MIN_LR} \
         --lr-decay-style cosine \

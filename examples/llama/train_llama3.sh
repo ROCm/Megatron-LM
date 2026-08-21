@@ -242,7 +242,6 @@ GPT_ARGS="
     --micro-batch-size $MBS \
     --global-batch-size $BS \
     --train-iters $TOTAL_ITERS \
-    --no-async-tensor-model-parallel-allreduce \
     --bf16 \
     --no-masked-softmax-fusion \
 "

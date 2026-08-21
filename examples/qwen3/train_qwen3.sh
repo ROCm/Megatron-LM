@@ -623,7 +623,6 @@ qwen_base_options=" \
 
 megatron_options=" \
     --log-throughput \
-    --no-async-tensor-model-parallel-allreduce \
     ${ga_fusion_opt} \
     ${data_args} \
     --lr ${LR} \
