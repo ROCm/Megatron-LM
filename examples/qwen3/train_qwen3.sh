@@ -128,7 +128,6 @@ EVAL_ITERS=${EVAL_ITERS:--1}
 
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
 MOE_PERMUTE_FUSION="${MOE_PERMUTE_FUSION:-true}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
@@ -397,14 +396,6 @@ if [ "${USE_PRECISION_AWARE_OPTIMIZER:-false}" = true ] || [ "${USE_PRECISION_AW
     pao_options=" --use-precision-aware-optimizer --main-grads-dtype ${MAIN_GRADS_DTYPE} --exp-avg-dtype ${EXP_AVG_DTYPE} --exp-avg-sq-dtype ${EXP_AVG_SQ_DTYPE}"
 fi
 
-# FP8 MoE requires TE grouped GEMM; legacy grouped_gemm does not implement FP8 expert matmuls.
-if [ "$PR" = fp8 ]; then
-    if [ "${MOE_USE_LEGACY_GROUPED_GEMM:-false}" = true ]; then
-        echo "[INFO] PR=fp8: disabling legacy grouped GEMM (TE grouped GEMM required for FP8 MoE)."
-    fi
-    MOE_USE_LEGACY_GROUPED_GEMM=false
-fi
-
 # MoE options (Qwen3 MoE; DeepSeek-specific MLA flags are not used)
 if [ "$IS_MOE" -eq 1 ]; then
     if [ "$MOE_PERMUTE_FUSION" != false ]; then
@@ -425,10 +416,6 @@ if [ "$IS_MOE" -eq 1 ]; then
     "
     if [ "$USE_GROUPED_GEMM" = true ]; then
         moe_options="${moe_options} --moe-grouped-gemm"
-    fi
-    if [ $MOE_USE_LEGACY_GROUPED_GEMM = true ]; then
-        moe_options="${moe_options} --moe-use-legacy-grouped-gemm"
-    else
         # disable gemm tuning when using TE Group GEMM.
         GEMM_TUNING=0
         echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."

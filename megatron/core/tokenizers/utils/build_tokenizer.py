@@ -114,4 +114,8 @@ def vocab_size_with_padding(orig_vocab_size, args, logging_enabled=True):
 def _set_padded_vocab_size(args, tokenizer):
     """Sets padded vocab size if None."""
     if getattr(args, "padded_vocab_size", None) is None:
-        args.padded_vocab_size = vocab_size_with_padding(tokenizer.vocab_size, args)
+        # Reserve additional vocabulary slots before
+        # rounding up to a GPU-friendly, tensor-parallel-divisible size. Defaults to 0, so this
+        # is a no-op unless --extra-vocab-size is set.
+        base_vocab_size = tokenizer.vocab_size + getattr(args, "extra_vocab_size", 0)
+        args.padded_vocab_size = vocab_size_with_padding(base_vocab_size, args)

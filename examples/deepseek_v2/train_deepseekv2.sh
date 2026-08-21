@@ -31,6 +31,7 @@ export NCCL_CROSS_NIC=${NCCL_CROSS_NIC:-0}
 export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1} # Reducing to 1 ensures no PCIE traffic (even on single node)
 export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 
 
 ENV=dsw
@@ -77,7 +78,6 @@ LR_WARMUP_ITERS=2
 LR_DECAY_ITERS=$(( ${TRAIN_ITERS} - ${LR_WARMUP_ITERS}))
 OUTPUT_BASEPATH=${EXPERIMENT_DIR}/deepseek-ckpts/test_ft
 GEMM_TUNING="${GEMM_TUNING:-0}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
 
 TRAIN_LOG=${EXPERIMENT_DIR}/MI300X-$MODEL_NAME-${PR}-seq${SEQ_LEN}-tp${TP}pp${PP}ep${EP}-mbs${MBS}gbs${GBS}-ac_${AC}-do_${DO}-fa_${FL}-sp_${SP}-${TIMESTAMP}.log
 
@@ -98,14 +98,9 @@ else
 	      "
 fi
 
-if [ $MOE_USE_LEGACY_GROUPED_GEMM = true ]; then
-    USE_LEGACY_GROUPED_GEMM_OPTION="--moe-use-legacy-grouped-gemm"
-else
-    USE_LEGACY_GROUPED_GEMM_OPTION=""
-    # disable gemm tuning when using TE Group GEMM.
-    GEMM_TUNING=0
-    echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
-fi
+# TE grouped GEMM is always used; disable gemm tuning accordingly.
+GEMM_TUNING=0
+echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
 
 # gemm tuning, https://github.com/ROCm/TransformerEngine
 if [ "$GEMM_TUNING" -eq 1 ]; then
@@ -383,9 +378,9 @@ megatron_options="  \
         --no-load-rng \
         --num-workers 8 \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
-        --tokenizer-type DeepSeekV2Tokenizer \
+        --tokenizer-type HuggingFaceTokenizer \
         --tokenizer-model ${TOKENIZER_MODEL}\
-        --legacy-tokenizer \
+        --trust-remote-code \
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --use-te-activation-func \
@@ -399,7 +394,6 @@ megatron_options="  \
         --disable-bias-linear \
         --use-mcore-models \
         --moe-grouped-gemm \
-        $USE_LEGACY_GROUPED_GEMM_OPTION \
         --ckpt-format torch \
         --rotary-base ${ROPE_THETA} \
         --rotary-scaling-factor ${SCALE_FACTOR} \
