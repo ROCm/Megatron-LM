@@ -78,6 +78,14 @@ LR_WARMUP_ITERS=2
 LR_DECAY_ITERS=$(( ${TRAIN_ITERS} - ${LR_WARMUP_ITERS}))
 OUTPUT_BASEPATH=${EXPERIMENT_DIR}/deepseek-ckpts/test_ft
 GEMM_TUNING="${GEMM_TUNING:-0}"
+# Grouped-GEMM backend for MoE experts: CK grouped GEMM is faster for bf16,
+# so enable it for bf16 and keep the default multi-stream (hipBLASLt) grouped GEMM for fp8.
+# Override NVTE_USE_CK_GROUPED_GEMM to force a specific backend.
+if [ "${PR}" = bf16 ]; then
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-1}"
+else
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-0}"
+fi
 
 TRAIN_LOG=${EXPERIMENT_DIR}/MI300X-$MODEL_NAME-${PR}-seq${SEQ_LEN}-tp${TP}pp${PP}ep${EP}-mbs${MBS}gbs${GBS}-ac_${AC}-do_${DO}-fa_${FL}-sp_${SP}-${TIMESTAMP}.log
 

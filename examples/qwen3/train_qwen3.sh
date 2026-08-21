@@ -128,6 +128,14 @@ EVAL_ITERS=${EVAL_ITERS:--1}
 
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
+# Grouped-GEMM backend for MoE experts: CK grouped GEMM is faster for bf16,
+# so enable it for bf16 and keep the default multi-stream (hipBLASLt) grouped GEMM for fp8.
+# Override NVTE_USE_CK_GROUPED_GEMM to force a specific backend.
+if [ "${PR}" = bf16 ]; then
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-1}"
+else
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-0}"
+fi
 MOE_PERMUTE_FUSION="${MOE_PERMUTE_FUSION:-true}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
