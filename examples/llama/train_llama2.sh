@@ -65,7 +65,7 @@ else
 fi
 
 MODEL_SIZE="${MODEL_SIZE:-70}"
-TP="${TP:-8}"
+TP="${TP:-1}"
 PP="${PP:-1}"
 CP="${CP:-1}"
 MBS="${MBS:-1}"
@@ -77,6 +77,20 @@ SEQ_PARALLEL="${SEQ_PARALLEL:-1}"
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
 TE_FP8_RECIPE="${TE_FP8_RECIPE:-delayed}" # Options: delayed, tensorwise, mxfp8
+
+# --- Fusion / data-parallel-comm perf toggles (ON by default; ~+3.5-7% across bf16/fp8). Set 0 to disable. ---
+GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-1}"  # fuse wgrad accumulation into the GEMM
+DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradient averaging into the DP collective
+CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
+CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
+FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
+# NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP-reduce
+# bandwidth at the cost of some gradient-comm precision. Convergence-neutral: a controlled 2x2 on C4
+# (LLaMA3-8B, BS=32, lr 8e-4) showed bf16 converges with this ON or OFF — convergence was gated by adam-eps,
+# NOT this toggle. The Megatron default adam-eps=1e-8 plateaus at lr 8e-4; use 1e-5 (the MLPerf llama3.1-8B
+# config sets adam_eps: 1.0e-5). Kept ON as a perf win.
+GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
+
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
@@ -109,6 +123,13 @@ fi
 
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
+    # Gradient accumulation fusion is incompatible with FSDP: torch-FSDP2 hard-asserts against it
+    # in arguments.py, and Megatron-FSDP crashes at runtime with an fsdp_grads "No buffer found for
+    # bucket_id" assertion. Force it off so the default-on toggle does not break the FSDP suites.
+    if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ]; then
+        echo "FSDP is incompatible with gradient accumulation fusion; disabling fusion (GRADIENT_ACCUMULATION_FUSION=0)."
+        GRADIENT_ACCUMULATION_FUSION=0
+    fi
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
@@ -130,7 +151,18 @@ fi
 
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
-DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/TE_FP8_${TE_FP8}/${TIME_STAMP}"
+# Precision tag for the log directory: bf16 | fp8 | fp8_tensorwise | mxfp8
+if [ "$TE_FP8" -eq 1 ]; then
+    case "$TE_FP8_RECIPE" in
+        delayed)    PREC_TAG="fp8" ;;
+        tensorwise) PREC_TAG="fp8_tensorwise" ;;
+        mxfp8)      PREC_TAG="mxfp8" ;;
+        *)          PREC_TAG="fp8_${TE_FP8_RECIPE}" ;;
+    esac
+else
+    PREC_TAG="bf16"
+fi
+DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/${PREC_TAG}/${TIME_STAMP}"
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
 TRAIN_LOG="${LOG_DIR}/output_${EXP_NAME}.log"
 mkdir -p $LOG_DIR
@@ -192,6 +224,8 @@ GPT_ARGS="
     --position-embedding-type rope \
     --no-position-embedding \
     --swiglu \
+    --use-te-activation-func \
+    --no-bias-swiglu-fusion \
     --disable-bias-linear \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
@@ -212,6 +246,21 @@ if [ "$RECOMPUTE" -eq 1 ]; then
 fi
 if [ "$ROPE_FUSION" -eq 0 ]; then
     GPT_ARGS="$GPT_ARGS --no-rope-fusion"
+fi
+
+# Fusion / mixed-precision toggles -> GPT_ARGS, matching their arguments.py groups (transformer
+# config, training, mixed precision) — same buckets as --no-bias-swiglu-fusion, --train-iters, --bf16.
+if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 0 ]; then
+    GPT_ARGS="$GPT_ARGS --no-gradient-accumulation-fusion"
+fi
+if [ "$CROSS_ENTROPY_LOSS_FUSION" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --cross-entropy-loss-fusion --cross-entropy-fusion-impl $CROSS_ENTROPY_FUSION_IMPL"
+fi
+if [ "$FUSED_SINGLE_QKV_ROPE" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --fused-single-qkv-rope"
+fi
+if [ "$GRAD_REDUCE_IN_BF16" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --grad-reduce-in-bf16"
 fi
 
 TRAIN_ARGS="--lr 1e-4 \
@@ -294,7 +343,6 @@ DISTRIBUTED_ARGS="
 EXTRA_ARGS="
     --group-query-attention \
     --num-query-groups $NUM_GROUPS \
-    --no-gradient-accumulation-fusion \
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
     --overlap-grad-reduce \
@@ -349,16 +397,11 @@ if [ "$TE_FP8" -eq 1 ]; then
             --attention-softmax-in-fp32 \
         "
     elif [ "$TE_FP8_RECIPE" == "mxfp8" ]; then
-        if [ "$MEGATRON_FSDP" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
-                --fp8-format=e4m3 \
-            "
-            # TE does not enable mxfp8 by default
-            export NVTE_ROCM_ENABLE_MXFP8=1
-        else 
-            echo "Error: Llama2 supports MXFP8 only for MEGATRON_FSDP."
-            exit
-        fi
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=mxfp8 \
+            --fp8-format=e4m3 \
+        "
+        # TE does not enable mxfp8 by default
+        export NVTE_ROCM_ENABLE_MXFP8=1
         
     elif [ "$TE_FP8_RECIPE" == "tensorwise" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --fp8-recipe=tensorwise \
@@ -370,11 +413,15 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-        if [ "$TE_FP8_RECIPE" != "mxfp8" ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-        else
-            echo "Error: For Llama2 FP8_PARAM_GATHER and MXFP8 cannot be currently used together."
-            exit
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+
+        # MXFP8 + DDP path: TE does not implement `replace_raw_data` for MXFP8Tensor,
+        # so the default `_ParamAndGradBuffer` storage swap fails. Reusing the grad
+        # buffer for the MXFP8 param all-gather sidesteps that path. The FSDP and
+        # Megatron-FSDP paths handle MXFP8 param all-gather natively in TE and do
+        # not need this workaround.
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ] && [ "$FSDP" -ne 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --reuse-grad-buf-for-mxfp8-param-ag"
         fi
     fi
 
@@ -404,6 +451,11 @@ else
    LOGGING_ARGS=""
 fi
 
+# DP-comm toggle -> EXTRA_ARGS ('distributed' arg group in arguments.py, alongside --overlap-grad-reduce)
+if [ "$DDP_AVERAGE_IN_COLLECTIVE" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --ddp-average-in-collective"
+fi
+
 run_cmd="
     torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
         $GPT_ARGS \
@@ -421,8 +473,18 @@ else
     run_cmd="$run_cmd |& tee $TRAIN_LOG"
 fi
 
-if [ "$NO_TRAINING" -eq 0 ]; then 
+TRAIN_RC=0
+if [ "$NO_TRAINING" -eq 0 ]; then
+    # pipefail so the run's `... |& tee $TRAIN_LOG` (TEE_OUTPUT=1) returns torchrun's status, not tee's
+    # (~always 0). Without it a training crash is masked and the script would exit 0. ($? after `eval`
+    # of the pipeline, since `eval` collapses PIPESTATUS to a single element = tee's status.)
+    set -o pipefail
     eval $run_cmd
+    TRAIN_RC=$?
+    set +o pipefail
+    if [ "$TRAIN_RC" -ne 0 ]; then
+        echo "ERROR: training (torchrun pretrain_gpt.py) failed with exit code $TRAIN_RC" |& tee -a $TRAIN_LOG
+    fi
 fi
 
 
@@ -463,4 +525,7 @@ grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*
 MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
 echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt
+
+# Propagate the training exit status (the perf-parse above must not mask a torchrun failure).
+exit $TRAIN_RC
 

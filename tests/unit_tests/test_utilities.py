@@ -1,3 +1,4 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import os
 from datetime import timedelta
 
@@ -27,8 +28,8 @@ class TestModel(torch.nn.Module):
 
 class Utils:
 
-    world_size = int(os.environ['WORLD_SIZE'])
-    rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    rank = int(os.environ.get('LOCAL_RANK', '0'))
     inited = False
     store = None
 
@@ -64,7 +65,7 @@ class Utils:
                 backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
-            torch.distributed.barrier()
+            torch.distributed.barrier(device_ids=[Utils.rank % torch.cuda.device_count()])
         Utils.inited = True
 
     @staticmethod
@@ -84,6 +85,28 @@ class Utils:
             Utils.rank = rank
 
     @staticmethod
+    def _destroy_model_parallel_process_groups():
+        process_groups = ps._global_process_group_list
+        if process_groups is None:
+            return
+
+        # Tests with communication overlap can return while the final subgroup
+        # collective is still queued. Do not abort it by tearing down the group.
+        torch.cuda.synchronize()
+        try:
+            from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
+        except ImportError:
+            pass
+        else:
+            # TE caches the amax-reduction group across autocast contexts.
+            FP8GlobalStateManager.reset()
+
+        pg_map = torch.distributed.distributed_c10d._world.pg_map
+        for group in reversed(process_groups):
+            if group is not None and group in pg_map:
+                torch.distributed.destroy_process_group(group)
+
+    @staticmethod
     def destroy_model_parallel():
         os.environ.pop('NVTE_FLASH_ATTN', None)
         os.environ.pop('NVTE_FUSED_ATTN', None)
@@ -91,6 +114,7 @@ class Utils:
         if not Utils.inited:
             return
         torch.distributed.barrier()
+        Utils._destroy_model_parallel_process_groups()
         ps.destroy_model_parallel()
         Utils.inited = False
 
@@ -107,6 +131,9 @@ class Utils:
         os.environ.pop('NVTE_FUSED_ATTN', None)
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
 
+        if ps._global_process_group_list is not None:
+            torch.distributed.barrier()
+            Utils._destroy_model_parallel_process_groups()
         ps.destroy_model_parallel()
         Utils.initialize_distributed()
         ps.initialize_model_parallel(

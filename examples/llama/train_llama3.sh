@@ -76,6 +76,40 @@ SEQ_PARALLEL="${SEQ_PARALLEL:-1}"
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
 TE_FP8_RECIPE="${TE_FP8_RECIPE:-delayed}" # Options: delayed, tensorwise, mxfp8
+TE_FP4="${TE_FP4:-0}"  # 0: disable FP4, 1: enable FP4
+TE_FP4_RECIPE="${TE_FP4_RECIPE:-nvfp4}" # Options: nvfp4, mxfp4
+FP4_PARAM_GATHER="${FP4_PARAM_GATHER:-0}"
+# nvfp4 keeps first/last layers in BF16 (NVFP4 paper recipe); mxfp4 uses all layers in FP4 (MLPerf recipe).
+if [ "$TE_FP4_RECIPE" == "mxfp4" ]; then
+    FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-0}"  # mxfp4: all layers in FP4 (set 1 to keep first/last in BF16)
+else
+    FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-1}"  # nvfp4: keep first/last layers in BF16 (NVFP4 paper recipe)
+fi
+FP4_BF16_START="${FP4_BF16_START:-2}"    # Number of layers at start in BF16 (paper: 2)
+FP4_BF16_END="${FP4_BF16_END:-8}"        # Number of layers at end in BF16 (paper: 8)
+
+# --- Fusion / data-parallel-comm perf toggles (ON by default; ~+3.5-7% across bf16/fp8/fp4). Set 0 to disable. ---
+GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-1}"  # fuse wgrad accumulation into the GEMM
+DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradient averaging into the DP collective
+CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
+CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
+FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
+# NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP-reduce
+# bandwidth at the cost of some gradient-comm precision. Convergence-neutral: a controlled 2x2 on C4
+# (LLaMA3-8B, BS=32, lr 8e-4) showed bf16 converges with this ON or OFF — convergence was gated by adam-eps,
+# NOT this toggle. The Megatron default adam-eps=1e-8 plateaus at lr 8e-4; use 1e-5 (the MLPerf llama3.1-8B
+# config primus/.../MI355X/llama3.1_8B-pretrain-FP8.yaml sets adam_eps: 1.0e-5). Kept ON as a perf win.
+# mxfp4 REQUIRES it ON (a4w4 asm wgrad emits BF16 only) — auto-forced by the guard below.
+GRAD_REDUCE_IN_BF16="${GRAD_REDUCE_IN_BF16:-1}"
+# mxfp4 needs a BF16 gradient buffer: the aiter a4w4 asm wgrad GEMM only emits BF16 output, so when wgrad is
+# fused into the grad buffer (gradient_accumulation_fusion=1) that buffer must be BF16. If you set
+# GRAD_REDUCE_IN_BF16=0 (FP32 buffer) the run crashes ("gemm_a4w4_asm only support BFloat16 output now!").
+# Re-force it on for mxfp4; set gradient_accumulation_fusion=0 instead if you must keep an FP32 grad buffer.
+if [ "$TE_FP4" -eq 1 ] && [ "$TE_FP4_RECIPE" == "mxfp4" ] && [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ] && [ "$GRAD_REDUCE_IN_BF16" -ne 1 ]; then
+    echo "mxfp4 + gradient_accumulation_fusion requires GRAD_REDUCE_IN_BF16=1 (a4w4 asm wgrad emits BF16 only); forcing it on."
+    GRAD_REDUCE_IN_BF16=1
+fi
+
 GEMM_TUNING="${GEMM_TUNING:-1}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
@@ -96,8 +130,20 @@ FP8_TRANSPOSE_CACHE="${FP8_TRANSPOSE_CACHE:-0}"
 ENABLE_HSDP="${ENABLE_HSDP:-0}"
 HSDP_NUM_REPLICAS="${HSDP_NUM_REPLICAS:-2}"
 
+if [ "$TE_FP8" -eq 1 ] && [ "$TE_FP4" -eq 1 ]; then
+    echo "Error: FP8 and FP4 cannot be used simultaneously. Please choose one."
+    exit 1
+fi
+
 if [ "$FSDP" -eq 1 ] || [ "$MEGATRON_FSDP" -eq 1 ]; then
     unset CUDA_DEVICE_MAX_CONNECTIONS
+    # Gradient accumulation fusion is incompatible with FSDP: torch-FSDP2 hard-asserts against it
+    # in arguments.py, and Megatron-FSDP crashes at runtime with an fsdp_grads "No buffer found for
+    # bucket_id" assertion. Force it off so the default-on toggle does not break the FSDP suites.
+    if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 1 ]; then
+        echo "FSDP is incompatible with gradient accumulation fusion; disabling fusion (GRADIENT_ACCUMULATION_FUSION=0)."
+        GRADIENT_ACCUMULATION_FUSION=0
+    fi
     if [ "$TP" -gt 1 ]; then
         echo "It is not recommended to use FSDP and TP together. Disabling TP."
         TP=1
@@ -119,7 +165,20 @@ fi
 
 EXPERIMENT_DIR="experiment"
 mkdir -p $EXPERIMENT_DIR
-DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/TE_FP8_${TE_FP8}/${TIME_STAMP}"
+# Precision tag for the log directory: bf16 | fp8 | fp8_tensorwise | mxfp8 | mxfp4 | nvfp4
+if [ "$TE_FP4" -eq 1 ]; then
+    PREC_TAG="$TE_FP4_RECIPE"            # mxfp4 | nvfp4
+elif [ "$TE_FP8" -eq 1 ]; then
+    case "$TE_FP8_RECIPE" in
+        delayed)    PREC_TAG="fp8" ;;
+        tensorwise) PREC_TAG="fp8_tensorwise" ;;
+        mxfp8)      PREC_TAG="mxfp8" ;;
+        *)          PREC_TAG="fp8_${TE_FP8_RECIPE}" ;;
+    esac
+else
+    PREC_TAG="bf16"
+fi
+DEFAULT_LOG_DIR="${EXPERIMENT_DIR}/${NNODES}nodes_rank${NODE_RANK}_train_${MODEL_SIZE}B_mbs${MBS}_bs${BS}_tp${TP}_pp${PP}_cp${CP}_iter${TOTAL_ITERS}/${PREC_TAG}/${TIME_STAMP}"
 LOG_DIR="${LOG_DIR:-${DEFAULT_LOG_DIR}}"
 TRAIN_LOG="${LOG_DIR}/output_${EXP_NAME}.log"
 mkdir -p $LOG_DIR
@@ -173,6 +232,8 @@ GPT_ARGS="
     --position-embedding-type rope \
     --no-position-embedding \
     --swiglu \
+    --use-te-activation-func \
+    --no-bias-swiglu-fusion \
     --disable-bias-linear \
     --init-method-std 0.02 \
     --attention-dropout 0.0 \
@@ -194,6 +255,21 @@ if [ "$RECOMPUTE" -eq 1 ]; then
 fi
 if [ "$ROPE_FUSION" -eq 0 ]; then
     GPT_ARGS="$GPT_ARGS --no-rope-fusion"
+fi
+
+# Fusion / mixed-precision toggles -> GPT_ARGS, matching their arguments.py groups (transformer
+# config, training, mixed precision) — same buckets as --no-bias-swiglu-fusion, --train-iters, --bf16.
+if [ "$GRADIENT_ACCUMULATION_FUSION" -eq 0 ]; then
+    GPT_ARGS="$GPT_ARGS --no-gradient-accumulation-fusion"
+fi
+if [ "$CROSS_ENTROPY_LOSS_FUSION" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --cross-entropy-loss-fusion --cross-entropy-fusion-impl $CROSS_ENTROPY_FUSION_IMPL"
+fi
+if [ "$FUSED_SINGLE_QKV_ROPE" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --fused-single-qkv-rope"
+fi
+if [ "$GRAD_REDUCE_IN_BF16" -eq 1 ]; then
+    GPT_ARGS="$GPT_ARGS --grad-reduce-in-bf16"
 fi
 
 TRAIN_ARGS="--lr 1e-4 \
@@ -274,7 +350,6 @@ DISTRIBUTED_ARGS="
 EXTRA_ARGS="
     --group-query-attention \
     --num-query-groups $NUM_GROUPS \
-    --no-gradient-accumulation-fusion \
     --distributed-backend nccl \
     --distributed-timeout-minutes 120 \
     --overlap-grad-reduce \
@@ -345,11 +420,15 @@ if [ "$TE_FP8" -eq 1 ]; then
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then
-        if [ "$TE_FP8_RECIPE" == "mxfp8" ]  && [ "$FSDP" -eq 1 ]; then
-            EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
-        else
-            echo "Error: For Llama3 FP8_PARAM_GATHER and MXFP8 cannot be currently used together, unless FSDP=1"
-            exit
+        EXTRA_ARGS="$EXTRA_ARGS --fp8-param-gather"
+
+        # MXFP8 + DDP path: TE does not implement `replace_raw_data` for MXFP8Tensor,
+        # so the default `_ParamAndGradBuffer` storage swap fails. Reusing the grad
+        # buffer for the MXFP8 param all-gather sidesteps that path. The FSDP and
+        # Megatron-FSDP paths handle MXFP8 param all-gather natively in TE and do
+        # not need this workaround.
+        if [ "$TE_FP8_RECIPE" == "mxfp8" ] && [ "$FSDP" -ne 1 ] && [ "$MEGATRON_FSDP" -ne 1 ]; then
+            EXTRA_ARGS="$EXTRA_ARGS --reuse-grad-buf-for-mxfp8-param-ag"
         fi
     fi
 
@@ -357,6 +436,32 @@ if [ "$TE_FP8" -eq 1 ]; then
         EXTRA_ARGS="$EXTRA_ARGS --keep-fp8-weight-transpose-cache-te \
             --keep-fp8-transpose-cache \
         " 
+    fi
+fi
+
+if [ "$TE_FP4" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
+        --fp4-format=e2m1 \
+    "
+
+    if [ "$TE_FP4_RECIPE" == "nvfp4" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp4-recipe=nvfp4"
+    elif [ "$TE_FP4_RECIPE" == "mxfp4" ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp4-recipe=mxfp4"
+    else
+        echo "$TE_FP4_RECIPE is not supported"
+        exit 1
+    fi
+
+    if [ "$FP4_SELECTIVE_BF16" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --first-last-layers-bf16 \
+            --num-layers-at-start-in-bf16 $FP4_BF16_START \
+            --num-layers-at-end-in-bf16 $FP4_BF16_END \
+        "
+        echo "FP4 ($TE_FP4_RECIPE): Keeping first $FP4_BF16_START and last $FP4_BF16_END layers in BF16"
+    fi
+    if [ "$FP4_PARAM_GATHER" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --fp4-param-gather"
     fi
 fi
 
@@ -378,6 +483,11 @@ if [ "$MEGATRON_FSDP" -eq 1 ]; then
     fi
 fi
 
+# DP-comm toggle -> EXTRA_ARGS ('distributed' arg group in arguments.py, alongside --overlap-grad-reduce)
+if [ "$DDP_AVERAGE_IN_COLLECTIVE" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --ddp-average-in-collective"
+fi
+
 run_cmd="
     torchrun $DISTRIBUTED_ARGS pretrain_gpt.py \
         $GPT_ARGS \
@@ -395,8 +505,18 @@ else
     run_cmd="$run_cmd |& tee $TRAIN_LOG"
 fi
 
-if [ "$NO_TRAINING" -eq 0 ]; then 
+TRAIN_RC=0
+if [ "$NO_TRAINING" -eq 0 ]; then
+    # pipefail so the run's `... |& tee $TRAIN_LOG` (TEE_OUTPUT=1) returns torchrun's status, not tee's
+    # (~always 0). Without it a training crash is masked and the script would exit 0. ($? after `eval`
+    # of the pipeline, since `eval` collapses PIPESTATUS to a single element = tee's status.)
+    set -o pipefail
     eval $run_cmd
+    TRAIN_RC=$?
+    set +o pipefail
+    if [ "$TRAIN_RC" -ne 0 ]; then
+        echo "ERROR: training (torchrun pretrain_gpt.py) failed with exit code $TRAIN_RC" |& tee -a $TRAIN_LOG
+    fi
 fi
 
 
@@ -437,3 +557,6 @@ grep -Eo 'mem usages: [^|]*' "$TRAIN_LOG" | sed -E 's/.*mem usages: ([0-9\.]+).*
 MEMUSAGE=$(python3 mean_log_value.py tmp.txt)
 echo "mem usages: $MEMUSAGE" |& tee -a "$TRAIN_LOG"
 rm tmp.txt
+
+# Propagate the training exit status (the perf-parse above must not mask a torchrun failure).
+exit $TRAIN_RC

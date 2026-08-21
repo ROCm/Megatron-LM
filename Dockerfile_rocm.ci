@@ -47,7 +47,9 @@ pybind11 \
 setuptools==69.5.1 \
 datasets \
 tiktoken \
-pynvml
+pynvml \
+fastapi \
+uvicorn
 
 RUN pip install "nltk==3.8.1"
 
@@ -63,11 +65,7 @@ RUN git clone https://github.com/Dao-AILab/causal-conv1d causal-conv1d &&\
 
 # Install mamba
 WORKDIR ${STAGE_DIR}
-RUN git clone https://github.com/sudhu2k/mamba mamba &&\
-    cd mamba &&\
-    git checkout hipcub_warp_threads_deprecation &&\
-    git show --oneline -s &&\
-    pip install --no-build-isolation --no-deps .
+RUN pip install mamba-ssm --no-build-isolation
 
 # Build flash-attention
 ARG BUILD_FA="1"
@@ -80,6 +78,9 @@ git clone ${FA_REPO} \
 && git checkout ${FA_BRANCH} \
 && MAX_JOBS=128 GPU_ARCHS=${PYTORCH_ROCM_ARCH_OVERRIDE} python3 setup.py install; \
 fi
+
+# CMake/ninja required by TransformerEngine, grouped_gemm, MORI, etc.
+RUN pip install cmake ninja
 
 # Clone TE repo and submodules
 WORKDIR ${STAGE_DIR}
@@ -102,6 +103,28 @@ RUN git clone https://github.com/caaatch22/grouped_gemm.git &&\
     git checkout rocm &&\
     git submodule update --init --recursive &&\
     pip install --no-build-isolation .
+
+
+RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
+    cd Emerging-Optimizers &&\
+    git checkout v0.1.0 &&\
+    pip install --no-build-isolation .
+
+# MORI EP (MoE dispatch/combine) for --moe-flex-dispatcher-backend mori
+ARG MORI_BRANCH=a14e6992ffa95478e83127fe2672afff2840856f
+ARG MORI_REPO=https://github.com/ROCm/mori.git
+RUN rm -f /etc/apt/sources.list.d/rocm.list && \
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpci-dev \
+        libibverbs-dev
+
+WORKDIR ${STAGE_DIR}
+RUN git clone ${MORI_REPO} mori &&\
+    cd mori &&\
+    git checkout ${MORI_BRANCH} &&\
+    echo "MORI at commit:" $(git rev-parse HEAD) &&\
+    BUILD_UMBP=OFF pip install .
 
 WORKDIR $WORKSPACE_DIR
 COPY . Megatron-LM
