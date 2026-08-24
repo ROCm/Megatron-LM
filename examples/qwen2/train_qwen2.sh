@@ -295,15 +295,8 @@ EXTRA_ARGS="$EXTRA_ARGS --transformer-impl=transformer_engine \
     --fp8-amax-compute-algo=max \
     --attention-softmax-in-fp32 \
 "
-# FP8 amax reduction scope. When running data-parallel only (TP=1 and CP=1), the default amax
-# all-reduce over the TP x DP(-CP) group is just a redundant DP-wide all-reduce; restrict it to the
-# TP group with --tp-only-amax-red to skip it. With TP>1 or CP>1 the flag is omitted
-# so the default full-group reduction is used. Override the DP-only default via TP_ONLY_AMAX_RED.
-if [ "$TP" -eq 1 ] && [ "$CP" -eq 1 ]; then
-    TP_ONLY_AMAX_RED="${TP_ONLY_AMAX_RED:-1}"
-else
-    TP_ONLY_AMAX_RED=0
-fi
+# FP8 amax reduction scope. Default on: restrict amax reduction to the TP (or TP-CP) group
+TP_ONLY_AMAX_RED="${TP_ONLY_AMAX_RED:-1}"
 if [ "$TP_ONLY_AMAX_RED" -eq 1 ]; then
     EXTRA_ARGS="$EXTRA_ARGS --tp-only-amax-red"
 fi
