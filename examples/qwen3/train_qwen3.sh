@@ -528,6 +528,18 @@ elif [ "$PR" = fp8 ]; then
         exit 1
         ;;
     esac
+    # FP8 amax reduction scope. When running data-parallel only (TP=1 and CP=1), the default amax
+    # all-reduce over the TP x DP(-CP) group is just a redundant DP-wide all-reduce; restrict it to the
+    # TP group with --tp-only-amax-red to skip it. With TP>1 or CP>1 the flag is omitted
+    # so the default full-group reduction is used. Override the DP-only default via TP_ONLY_AMAX_RED.
+    if [ "$TP" -eq 1 ] && [ "$CP" -eq 1 ]; then
+        TP_ONLY_AMAX_RED="${TP_ONLY_AMAX_RED:-1}"
+    else
+        TP_ONLY_AMAX_RED=0
+    fi
+    if [ "$TP_ONLY_AMAX_RED" -eq 1 ]; then
+        pr_options="$pr_options --tp-only-amax-red"
+    fi
 fi
 
 if [ "$DO" = true ]; then
