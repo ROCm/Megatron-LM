@@ -259,6 +259,7 @@ class MegatronMultimodalTokenizer:
             add_generation_prompt=add_generation_prompt,
             return_assistant_token_mask=False,
             return_tensors="np",
+            return_dict=False,
             chat_template=self._prompt_config.custom_chat_template,
         )
         tokens = token_ids_from_chat_template_output(raw)
@@ -274,8 +275,11 @@ class MegatronMultimodalTokenizer:
             if len(turn["content"]) == 0:
                 raise ValueError(f"empty turn in conversation: {conversation}. Skipping.")
 
-            turn_raw = self.tokenizer.apply_chat_template(
-                [turn], tokenize=True, chat_template=self._prompt_config.custom_chat_template
+            turn_tokens = self.tokenizer.apply_chat_template(
+                [turn],
+                tokenize=True,
+                return_dict=False,
+                chat_template=self._prompt_config.custom_chat_template,
             )
             turn_tokens = token_ids_from_chat_template_output(turn_raw)
 

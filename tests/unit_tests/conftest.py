@@ -3,6 +3,7 @@
 # Modified for portability across upstream and ROCm CI environments.
 
 import os
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -74,7 +75,10 @@ def pytest_sessionfinish(session, exitstatus):
 def cleanup():
     yield
     if torch.distributed.is_initialized():
-        torch.distributed.barrier()
+        try:
+            torch.distributed.barrier()
+        except Exception:
+            return
         torch.distributed.destroy_process_group()
 
 

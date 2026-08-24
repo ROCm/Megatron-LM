@@ -250,11 +250,6 @@ class TestMegatronFsdpFullyShard:
         """
         from torch.distributed.tensor import DTensor
 
-        from megatron.core.distributed.fsdp.src.megatron_fsdp import (
-            MixedPrecisionPolicy,
-            fully_shard,
-        )
-
         # Skip tests.
         if outer_shard_strategy == OPTIM and shard_strategy != OPTIM_GRADS_PARAMS:
             # TODO(@shjwudp, @cspades): Requires various modifications to support.
