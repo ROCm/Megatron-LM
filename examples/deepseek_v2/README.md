@@ -43,7 +43,10 @@ You can use either mock data or real data for training.
   DATA_DIR="/path/to/deepseek-datasets"  # Change to where your dataset is stored
   ```
 ### 3.2 Tokenizer
-DeepSeek-V2 uses `DeepSeekV2Tokenizer`
+Training loads the DeepSeek-V2 tokenizer via `--tokenizer-type HuggingFaceTokenizer` pointed at the
+HuggingFace model (`--tokenizer-model deepseek-ai/DeepSeek-V2-Lite --trust-remote-code`).
+Data preprocessing (`tools/run_make_pretraining_dataset_megatron.sh`) still uses the
+`DeepSeekV2Tokenizer` patch type.
 
 ## 4. How to Run
 

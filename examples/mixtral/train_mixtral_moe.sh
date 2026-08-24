@@ -169,12 +169,10 @@ fi
 OPTIMIZER_OFFLOAD=false
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 echo "GEMM_TUING: $GEMM_TUNING"
 echo "USE_GROUPED_GEMM: $USE_GROUPED_GEMM"
-echo "MOE_USE_LEGACY_GROUPED_GEMM: $MOE_USE_LEGACY_GROUPED_GEMM"
 echo "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
 echo "GPT_LAYER_IN_TE: $GPT_LAYER_IN_TE"
 echo ""
@@ -209,11 +207,8 @@ else
     USE_GROUPED_GEMM_OPTION=""
 fi
 
-if [ $MOE_USE_LEGACY_GROUPED_GEMM = true ]; then
-    USE_LEGACY_GROUPED_GEMM_OPTION="--moe-use-legacy-grouped-gemm"
-else
-    USE_LEGACY_GROUPED_GEMM_OPTION=""
-    # disable gemm tuning when using TE Group GEMM.
+# TE grouped GEMM is always used; disable gemm tuning when grouped GEMM is enabled.
+if [ $USE_GROUPED_GEMM = true ]; then
     GEMM_TUNING=0
     echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
 fi
@@ -337,7 +332,6 @@ MOE_ARGS=(
     --moe-aux-loss-coeff 1e-2
     --transformer-impl ${TRANSFORMER_IMPL} 
     $USE_GROUPED_GEMM_OPTION 
-    $USE_LEGACY_GROUPED_GEMM_OPTION 
     --moe-token-dispatcher-type alltoall
     --overlap-grad-reduce
     --overlap-param-gather
