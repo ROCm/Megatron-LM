@@ -2129,7 +2129,6 @@ def _add_network_size_args(parser):
         "memory_efficient_layer_norm",
         "fp8_dot_product_attention",
         "fp8_multi_head_attention",
-        "tp_only_amax_red",
         "use_kitchen",
         "moe_token_dropping",
         "cuda_graph_use_single_mempool",
