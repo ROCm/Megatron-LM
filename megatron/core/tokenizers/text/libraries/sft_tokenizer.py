@@ -6,8 +6,6 @@ from typing import Dict, List, Union
 
 import numpy as np
 
-from megatron.core.tokenizers.chat_template_utils import token_ids_from_chat_template_output
-
 try:
     import transformers
 
@@ -185,7 +183,6 @@ class SFTTokenizer:
                     [turn], tokenize=True, chat_template=self._prompt_config.custom_chat_template
                 )
             )
-            turn_tokens = token_ids_from_chat_template_output(turn_raw)
 
             # There should be only one BOS at the very beginning.
             # After the first turn, skip BOS token.

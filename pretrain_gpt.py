@@ -401,7 +401,7 @@ if __name__ == "__main__":
     pretrain, store = inprocess_restart.maybe_wrap_for_inprocess_restart(pretrain)
 
     args = parse_and_validate_args(
-        extra_args_provider=add_modelopt_args if has_nvidia_modelopt else None,
+        extra_args_provider=combined_args_provider,
         args_defaults={'tokenizer_type': 'GPT2BPETokenizer'},
     )
     full_config = pretrain_cfg_container_from_args(args)
@@ -410,7 +410,6 @@ if __name__ == "__main__":
         partial(model_provider, gpt_builder),
         ModelType.encoder_or_decoder,
         forward_step,
-        extra_args_provider=combined_args_provider,
         store=store,
         get_embedding_ranks=get_embedding_ranks,
     )

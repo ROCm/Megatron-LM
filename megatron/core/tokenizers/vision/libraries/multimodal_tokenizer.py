@@ -275,7 +275,7 @@ class MegatronMultimodalTokenizer:
             if len(turn["content"]) == 0:
                 raise ValueError(f"empty turn in conversation: {conversation}. Skipping.")
 
-            turn_tokens = self.tokenizer.apply_chat_template(
+            turn_raw = self.tokenizer.apply_chat_template(
                 [turn],
                 tokenize=True,
                 return_dict=False,

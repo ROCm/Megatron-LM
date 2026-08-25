@@ -226,7 +226,8 @@ def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_groupe
     expert_model_parallel_size = extra_kwargs.pop(
         "expert_model_parallel_size", 4 if num_moe_experts is not None else 1
     )
-    config = MLATransformerConfig(
+    # Defaults first, then let extra_kwargs override them.
+    config_kwargs = dict(
         attention_backend="unfused",
         pipeline_model_parallel_size=1,
         expert_model_parallel_size=expert_model_parallel_size,
@@ -246,8 +247,9 @@ def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_groupe
         num_moe_experts=num_moe_experts,
         moe_grouped_gemm=moe_grouped_gemm,
         moe_router_dtype="fp32",
-        **extra_kwargs,
     )
+    config_kwargs.update(extra_kwargs)
+    config = MLATransformerConfig(**config_kwargs)
     return config
 
 
@@ -261,7 +263,7 @@ def get_valid_token_dispatcher_types():
 
 
 def get_valid_flex_dispatcher_backend():
-    from megatron.core.transformer.moe.fused_a2a import HAVE_DEEP_EP, HAVE_HYBRIDEP. HAVE_MORI
+    from megatron.core.transformer.moe.fused_a2a import HAVE_DEEP_EP, HAVE_HYBRIDEP, HAVE_MORI
 
     if HAVE_HYBRIDEP:
         return "hybridep"
@@ -495,11 +497,15 @@ def get_valid_fp8_flags():
     fp8_types = ["e4m3", "hybrid"]
     recipes = []
     arch = get_device_arch_version()
+    # ROCm reports arch 9 for MI300 (gfx942) but TE does not support FP8 block
+    # scaled gemm there ("FP8 block scaled gemm not yet supported for ROCm"), so
+    # exclude the blockwise recipe on ROCm.
+    is_rocm = torch.version.hip is not None
 
     if is_te_min_version("2.3.0.dev0"):
         recipes.append(Fp8Recipe.tensorwise)  # Hopper + Blackwell
 
-    if is_te_min_version("2.4.0.dev0") and arch == 9:
+    if is_te_min_version("2.4.0.dev0") and arch == 9 and not is_rocm:
         recipes.append(Fp8Recipe.blockwise)  # Hopper only
 
     if is_te_min_version("2.3.0.dev0") and arch >= 10:

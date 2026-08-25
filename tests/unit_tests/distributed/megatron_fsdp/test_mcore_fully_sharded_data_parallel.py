@@ -1028,11 +1028,43 @@ class TestMegatronFSDPE2E:
     def _reset_full_cuda_graph_static_state():
         """Reset class-level state on FullCudaGraphWrapper / StaticBufferLoader
         so a test that uses the wrapper does not see leftovers from a previous
-        test in this process."""
-        FullCudaGraphWrapper.curr_iteration = {'training': 0, 'validation': 0}
-        FullCudaGraphWrapper.cuda_graph = {'training': None, 'validation': None}
-        FullCudaGraphWrapper.result = {'training': None, 'validation': None}
-        StaticBufferLoader.static_buffers = {'training': [], 'validation': []}
+        test in this process.
+
+        On ROCm, capturing a second full-iteration CUDA graph while the first
+        graph's HIP memory pool is still live raises
+        ``HIPCachingAllocator.cpp: use_count > 0``. Dropping only the dict
+        entries is not enough: the CUDAGraph objects, static capture buffers,
+        and process-wide graph pool/stream must be released before the next
+        ``torch.cuda.graph()`` capture.
+        """
+        import megatron.core.full_cuda_graph as fcg
+
+        for stage in ("training", "validation"):
+            graph = FullCudaGraphWrapper.cuda_graph.get(stage)
+            FullCudaGraphWrapper.cuda_graph[stage] = None
+            FullCudaGraphWrapper.result[stage] = None
+            FullCudaGraphWrapper.curr_iteration[stage] = 0
+            StaticBufferLoader.static_buffers[stage] = []
+            if graph is not None:
+                del graph
+
+        try:
+            from megatron.core.optimizer.optimizer_cuda_graph import OptimizerCudaGraphWrapper
+
+            opt_graph = OptimizerCudaGraphWrapper.cuda_graph
+            OptimizerCudaGraphWrapper.cuda_graph = None
+            OptimizerCudaGraphWrapper.result = None
+            OptimizerCudaGraphWrapper.curr_iteration = 0
+            if opt_graph is not None:
+                del opt_graph
+        except ImportError:
+            pass
+
+        fcg._shared_graph_pool = None
+        fcg._shared_capture_stream = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
 
     @staticmethod
     def _reset_cuda_rng_tracker():

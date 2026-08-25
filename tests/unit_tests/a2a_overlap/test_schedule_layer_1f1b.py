@@ -23,9 +23,9 @@ from tests.unit_tests.a2a_overlap.utils import (
     deterministic_mode,
     get_compare_tolerances,
     get_test_config,
+    get_valid_flex_dispatcher_backend,
     get_valid_fp8_flags,
     get_valid_token_dispatcher_types,
-    is_mori_available,
     reinitialize_model_parallel_for_mori,
     reset_model,
 )
@@ -462,7 +462,9 @@ class TestA2AOverlap:
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+    @pytest.mark.skipif(
+        get_valid_flex_dispatcher_backend() != "mori", reason="MORI is not available"
+    )
     def test_transformer_layer_overlap_mori(self):
         """
         MORI variant of ``test_transformer_layer_overlap``.
@@ -604,7 +606,9 @@ class TestA2AOverlap:
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+    @pytest.mark.skipif(
+        get_valid_flex_dispatcher_backend() != "mori", reason="MORI is not available"
+    )
     def test_mtp_layer_overlap_mori(self):
         """
         MORI variant of ``test_mtp_layer_overlap``. Kept as a dedicated test for the same

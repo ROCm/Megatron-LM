@@ -305,6 +305,10 @@ _NVLS_ENGINE_MAX_TOKENS = 512
 
 
 @pytest.mark.internal
+@pytest.mark.failing_on_rocm(
+    "NVLS all-gather-v dispatcher requires Hopper+ GPUs with NVLink symmetric "
+    "memory, which is unavailable on ROCm (use inference_moe_token_dispatcher_type='nccl')."
+)
 class TestNVLSAllGatherVDispatcher:
 
     @classmethod

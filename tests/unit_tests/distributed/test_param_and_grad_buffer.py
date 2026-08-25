@@ -791,6 +791,10 @@ class TestNVFP4IndexMaps:
             ),
             mock.patch('megatron.core.fp4_utils.modify_nvfp4_rowwise_storage'),
             mock.patch('torch.cuda.current_device', return_value='cpu'),
+            # The ROCm fork adds an unconditional torch.cuda.synchronize() during buffer
+            # construction; with current_device mocked to 'cpu' it would enter a CUDA device
+            # guard and raise "invalid argument to exchangeDevice". Mock it out for CPU runs.
+            mock.patch('torch.cuda.synchronize'),
             mock.patch(
                 'megatron.core.distributed.param_and_grad_buffer.log_on_each_pipeline_stage'
             ),

@@ -1,5 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import gc
 import logging
 import math
 import shutil
@@ -83,11 +84,22 @@ def destroy_device_mesh(device_mesh):
     try:
         from torch.distributed.device_mesh import _mesh_resources
 
-        _mesh_resources.child_to_root_mapping.clear()
-        _mesh_resources.root_to_flatten_mapping.clear()
-        _mesh_resources.mesh_stack.clear()
-        _mesh_resources.mesh_dim_group_options.clear()
-        _mesh_resources.flatten_name_to_root_dims.clear()
+        # PyTorch's DeviceMesh CuTe-layout refactor moved the global _MeshEnv bookkeeping
+        # dicts into DeviceMesh: child_to_root_mapping / root_to_flatten_mapping /
+        # flatten_name_to_root_dims / mesh_dim_group_options are present through 2.9.x but
+        # removed in the released 2.10.0 (only mesh_stack remains). Clear only what exists.
+        for attr in (
+            "mesh_stack",
+            "child_to_root_mapping",
+            "root_to_flatten_mapping",
+            "flatten_name_to_root_dims",
+            "mesh_dim_group_options",
+        ):
+            if not hasattr(_mesh_resources, attr):
+                continue
+            mapping = getattr(_mesh_resources, attr)
+            if mapping is not None:
+                mapping.clear()
     except Exception as e:
         # Global _MeshEnv is on a convoluted deprecation path.
         # Attempt to clean the global state, otherwise skip.
@@ -488,6 +500,24 @@ class TestMegatronFsdpFullyShard:
             optimizer.step()
             optimizer.zero_grad()
 
+    @pytest.fixture
+    def release_cuda_graph_capture(self):
+        """Release HIP/CUDA graph capture state after each parametrized case.
+
+        HIPCachingAllocator asserts use_count > 0 if a prior CUDAGraph's
+        private pool is still live when the next case captures.
+        """
+        resources = {"graph": None, "capture_stream": None, "device_mesh": None}
+        yield resources
+        resources["graph"] = None
+        resources["capture_stream"] = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        device_mesh = resources.pop("device_mesh", None)
+        if device_mesh is not None:
+            destroy_device_mesh(device_mesh)
+
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse('2.4.0'),
         reason="Megatron-FSDP requires PyTorch 2.4.0 or later.",
@@ -499,7 +529,7 @@ class TestMegatronFsdpFullyShard:
     # FSDP (no outer-DP collectives) and HFSDP (outer-DP sharded). Both wrap a
     # device mesh with DP-Outer=2 / DP-Shard=4 to exercise the full hierarchy.
     @pytest.mark.parametrize("dp_outer_strategy", [None, OPTIM])
-    def test_full_iteration_cuda_graph(self, dp_outer_strategy):
+    def test_full_iteration_cuda_graph(self, dp_outer_strategy, release_cuda_graph_capture):
         """
         End-to-end test that a full Megatron-FSDP training iteration (forward +
         backward) is CUDA-graphable, and that optimizer.zero_grad / optimizer.step
@@ -524,6 +554,7 @@ class TestMegatronFsdpFullyShard:
         device_mesh = build_distributed_environment(
             (2, torch.distributed.get_world_size() // 2, 1, 1)
         )
+        release_cuda_graph_capture["device_mesh"] = device_mesh
 
         # Construct toy Megatron-FSDP model.
         toy_model, fsdp_unit_modules = build_toy_model(
@@ -592,10 +623,14 @@ class TestMegatronFsdpFullyShard:
         # (Megatron-FSDP post-backward grad installation is captured.)
         optimizer.zero_grad(set_to_none=False)
         graph = torch.cuda.CUDAGraph()
+        release_cuda_graph_capture["graph"] = graph
         torch.distributed.barrier()
         torch.cuda.synchronize()
         capture_stream = torch.cuda.Stream()
-        with torch.cuda.graph(graph, stream=capture_stream, capture_error_mode="thread_local"):
+        release_cuda_graph_capture["capture_stream"] = capture_stream
+        with torch.cuda.graph(
+            graph, stream=capture_stream, capture_error_mode="thread_local"
+        ):
             static_loss = run_step()
         torch.cuda.synchronize()
         torch.distributed.barrier()
@@ -660,10 +695,6 @@ class TestMegatronFsdpFullyShard:
             f"trace={[l.item() for l in replay_losses]}"
         )
 
-        # Required to reset the parallelism environment.
-        destroy_device_mesh(device_mesh)
-
-    
     @pytest.mark.skipif(
         not is_te_min_version("2.9.0"),
         reason="TE >= 2.10.0 is required for test_fully_shard_te_quantized",

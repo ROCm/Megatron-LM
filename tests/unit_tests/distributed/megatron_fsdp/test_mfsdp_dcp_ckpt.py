@@ -13,6 +13,10 @@ from packaging import version
 from torch.nn.functional import mse_loss
 from torch.optim import Adam
 
+from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import (
+    MixedPrecisionPolicy,
+    fully_shard,
+)
 from tests.unit_tests.test_utilities import Utils
 
 logger = logging.getLogger(__name__)
@@ -49,14 +53,21 @@ def destroy_device_mesh(device_mesh):
 
     # Teardown device mesh
     del device_mesh
-    
-    # Clear mesh resources
-    _mesh_resources.mesh_stack.clear()
-    _mesh_resources.child_to_root_mapping.clear()
-    _mesh_resources.root_to_flatten_mapping.clear()
-    _mesh_resources.flatten_name_to_root_dims.clear()
-    _mesh_resources.mesh_dim_group_options.clear()
-    
+
+    # PyTorch renamed / removed several _MeshEnv fields. Only clear attributes that exist.
+    for attr in (
+        "mesh_stack",
+        "child_to_root_mapping",
+        "root_to_flatten_mapping",
+        "flatten_name_to_root_dims",
+        "mesh_dim_group_options",
+    ):
+        if not hasattr(_mesh_resources, attr):
+            continue
+        mapping = getattr(_mesh_resources, attr)
+        if mapping is not None:
+            mapping.clear()
+
 
 
 class ToyCNN(torch.nn.Module):

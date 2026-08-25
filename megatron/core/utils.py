@@ -2421,6 +2421,7 @@ def get_batch_on_this_cp_rank(
 ### NVTX profiling ###
 ######################
 
+
 _nvtx_enabled: bool = False  # Whether NVTX range profiling is enabled
 _nvtx_range_messages: list[str] = []  # Messages associated with active NVTX ranges
 # Permanently pin the string object representing the name of each NVTX range.
@@ -2436,7 +2437,7 @@ def configure_nvtx_profiling(enabled: bool) -> None:
         enabled (bool): Whether to enable NVTX range profiling
     """
     global _nvtx_enabled
-    _nvtx_enabled = enabled and HAVE_NVTX
+    _nvtx_enabled = enabled
 
 
 def _nvtx_range_get_func_path():

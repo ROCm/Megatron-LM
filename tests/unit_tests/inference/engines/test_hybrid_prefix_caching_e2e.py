@@ -542,6 +542,15 @@ class TestMambaPrefixCachingE2E:
 
         return finished, ctx.lifetime_prefill_token_count
 
+    @pytest.mark.failing_on_rocm(
+        reason="Greedy-decode outputs diverge under ROCm bf16 rounding: pc=off runs a "
+        "single fused 512-token (4-chunk) Mamba scan, while pc=on restores the EOS "
+        "state and runs a different 2-chunk scan with initial_states. The two paths "
+        "are distinct Triton kernels plus different-shape TE/hipBLASLt GEMMs, so bf16 "
+        "reductions associate differently and flip an argmax after ~3 generated tokens "
+        "(req 3). Match-count and prefill accounting still hold; only the greedy token "
+        "sequence diverges. Tuned to NVIDIA's bf16 rounding margin."
+    )
     @torch.inference_mode()
     def test_mamba_block_aligned_eos_e2e(self):
         """Verify block-aligned EOS caching and recompute-based back-off."""

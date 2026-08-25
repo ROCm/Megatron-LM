@@ -3,6 +3,19 @@
 # Modified for portability across upstream and ROCm CI environments.
 
 import os
+
+# Pin Mamba/SSM Triton autotune to a deterministic config for the whole unit-test
+# session. The SSM kernels evaluate their autotune config list at @triton.autotune
+# decoration (import) time, so MAMBA_DETERMINISTIC must be set before any test
+# module imports megatron.core.ssm.*. Setting it in a per-file module (e.g.
+# test_dynamic_engine.py) is too late in a full-suite run, because an earlier test
+# may import the SSM kernels first and freeze the non-deterministic config list --
+# which lets timing-based autotuning flip a greedy token across runs of the hybrid
+# inference tests. Setting it here (before the megatron imports below) guarantees
+# determinism is engaged regardless of collection order. Use setdefault so an
+# explicit override from the environment still wins.
+os.environ.setdefault("MAMBA_DETERMINISTIC", "1")
+
 from datetime import timedelta
 from pathlib import Path
 

@@ -7,7 +7,7 @@ from megatron.core.models.hybrid.hybrid_block import HybridStack
 from megatron.core.models.hybrid.hybrid_layer_allocation import Symbols, validate_segment_layers
 from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.ssm.gated_delta_net import GatedDeltaNet
+from megatron.core.ssm.gated_delta_net import HAVE_FLA, GatedDeltaNet
 from megatron.core.ssm.mamba_layer import MambaLayer
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
@@ -217,6 +217,11 @@ class TestHybridBlock:
         with pytest.raises(ValueError):
             block = self.get_hybrid_block(layer_pattern)
 
+    @pytest.mark.skipif(
+        not HAVE_FLA,
+        reason="GatedDeltaNet requires the flash-linear-attention (FLA) package, "
+        "which is unavailable on ROCm.",
+    )
     def test_gdn_layer_types(self):
         """
         Make sure that G creates a TransformerLayer wrapping GatedDeltaNet,
@@ -231,6 +236,11 @@ class TestHybridBlock:
         assert isinstance(layers[1].self_attention, SelfAttention)
         assert isinstance(layers[2], MambaLayer)
 
+    @pytest.mark.skipif(
+        not HAVE_FLA,
+        reason="GatedDeltaNet requires the flash-linear-attention (FLA) package, "
+        "which is unavailable on ROCm.",
+    )
     def test_gdn_gpu_forward(self):
         """Test GPU forward pass with GDN, attention, and Mamba layers."""
         layer_pattern = Symbols.GDN + Symbols.ATTENTION + Symbols.MAMBA

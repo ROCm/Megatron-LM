@@ -256,6 +256,11 @@ class _TestDynamicInferenceBase:
 
 
 @pytest.mark.internal
+@pytest.mark.failing_on_rocm(
+    "NVLS dispatcher requires Hopper+ GPUs fully connected via NVLink with "
+    "torch.distributed._symmetric_memory, which is unavailable on ROCm "
+    "(use inference_moe_token_dispatcher_type='nccl', covered by TestDynamicInferenceNCCL)."
+)
 class TestDynamicInferenceNVLS(_TestDynamicInferenceBase):
     """NVLS dispatcher: combinatorial sweep of EP request states."""
 

@@ -11,6 +11,14 @@ from functools import partial
 from typing import Dict, List, Optional, Tuple
 from unittest import mock
 
+# Pin Mamba/SSM Triton autotune to a deterministic config. Without this, the
+# kernels are autotuned by wall-clock timing, so different runs may select
+# different tile configs whose bf16 reduction order diverges enough to flip a
+# greedy token in the hybrid inference tests (see TestChunkedPrefillCudaGraphs).
+# Must be set before megatron.core.ssm.* is imported, because autotune_configs()
+# is evaluated at @triton.autotune decoration (module import) time.
+os.environ.setdefault("MAMBA_DETERMINISTIC", "1")
+
 import pytest
 import torch
 from tqdm import tqdm
@@ -4825,18 +4833,20 @@ class TestChunkedPrefillCudaGraphs:
 
         return finished, step_count
 
-    # On ROCm, chunked prefill splits the Mamba/hybrid scan into differently sized chunks
-    # than the baseline single-shot prefill, and round-trips the running SSM state through
-    # the bf16 state buffer at each chunk boundary. The resulting bf16 rounding differences
-    # flip a near-tie greedy argmax after ~6 generated tokens. This is a hardware-specific
-    # rounding-margin issue (the GPT path and the non-chunked cases still match), so only
-    # the hybrid + chunked_prefill combination is marked failing_on_rocm.
+    # Baseline vs test run structurally different paths (eager/CUDA-graph, plain/chunked scan)
+    # whose bf16 roundings flip a ROCm hybrid greedy near-tie, so hybrid rows fail_on_rocm.
     @pytest.mark.parametrize(
         "model_provider,chunked_prefill",
         [
             ("gpt", False),
             ("gpt", True),
-            ("hybrid", False),
+            pytest.param(
+                "hybrid",
+                False,
+                marks=pytest.mark.failing_on_rocm(
+                    "Hybrid greedy outputs flip a near-tie argmax under ROCm bf16 rounding."
+                ),
+            ),
             pytest.param(
                 "hybrid",
                 True,

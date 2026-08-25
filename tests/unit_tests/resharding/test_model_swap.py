@@ -617,8 +617,8 @@ def test_router_expert_bias_refit(
 
     del src_model, dst_model
     clear_all_caches()
-    _destroy_pg_collection(src_pgs)
-    _destroy_pg_collection(dst_pgs)
+    _destroy_pg_collections(src_pgs)
+    _destroy_pg_collections(dst_pgs)
     Utils.destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()
@@ -786,8 +786,8 @@ def test_router_expert_bias_refit_non_collocated(refit_backend: str):
     if dst_model is not None:
         del dst_model
     clear_all_caches()
-    _destroy_pg_collection(src_pgs)
-    _destroy_pg_collection(dst_pgs)
+    _destroy_pg_collections(src_pgs)
+    _destroy_pg_collections(dst_pgs)
     Utils.destroy_model_parallel()
     gc.collect()
     torch.cuda.empty_cache()

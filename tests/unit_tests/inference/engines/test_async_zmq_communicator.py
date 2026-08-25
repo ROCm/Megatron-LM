@@ -92,7 +92,9 @@ async def test_all_reduce_max_async_handles_zmq_again_retries(rank, world_size, 
     """The async variant must tolerate `zmq.Again` from non-blocking recvs by
     awaiting and retrying. This is the only behaviour that distinguishes it
     from `sync_all_reduce_max`."""
-    import zmq
+    # pyzmq is an optional dependency and is not installed in all environments
+    # (e.g. the ROCm CI image); skip rather than error when it is unavailable.
+    zmq = pytest.importorskip("zmq")
 
     comm = _make_comm(rank=rank, world_size=world_size)
     real_payload = struct.pack("!1i", 9)
