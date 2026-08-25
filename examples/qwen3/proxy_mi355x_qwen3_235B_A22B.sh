@@ -48,6 +48,11 @@ export EVAL_ITERS=0
 export SAVE_INTERVAL=20000
 export CKPT_FORMAT=torch
 
+# --- FP8 (blockwise scaling; Primus fp8: hybrid) ---
+export PR=fp8
+export FP8_RECIPE=blockwise
+# Do not set FP8_PARAM_GATHER=true: it conflicts with overlap_grad_reduce on MoE.
+
 # --- activation checkpointing (recompute_granularity full, num_layers 3) ---
 export AC=full
 export RECOMPUTE_METHOD=block
@@ -64,7 +69,7 @@ export APPLY_ROPE_FUSION=true
 
 # --- MoE / DeepEP / grouped GEMM ---
 export ENABLE_DEEP_EP=false
-export ENABLE_MORI=true
+export ENABLE_MORI=false
 export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true
 

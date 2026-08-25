@@ -518,10 +518,17 @@ elif [ "$PR" = fp8 ]; then
         export NVTE_ROCM_ENABLE_MXFP8=1
         ;;
     blockwise)
+        fp8_param_gather_opt=""
+        if [ "${FP8_PARAM_GATHER:-false}" = true ]; then
+            echo "[WARN] blockwise FP8: skipping --fp8-param-gather (incompatible with --overlap-grad-reduce on MoE)."
+        fi
+        export NVTE_USE_BLOCKWISE_GMM_TRITON=1
+        export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
+        echo "[INFO] blockwise FP8: NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 (TE GroupedLinear single_grouped_weight)."
         pr_options=" \
         --bf16 \
         --fp8-recipe blockwise \
-        --fp8-format hybrid"
+        --fp8-format hybrid${fp8_param_gather_opt}"
         ;;
     *)
         echo "Unsupported FP8_RECIPE=${FP8_RECIPE} (use delayed, tensorwise, mxfp8, or blockwise)."
@@ -681,6 +688,8 @@ if [ "$PROFILE" = true ]; then
         --profile \
         --profile-ranks 0 \
         --use-pytorch-profiler \
+        --pytorch-profiler-collect-shapes \
+        --pytorch-profiler-collect-callstack \
         --profile-step-start ${PROFILE_START} \
         --profile-step-end ${PROFILE_END} \
         --moe-router-force-load-balancing"

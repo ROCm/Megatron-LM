@@ -1810,6 +1810,18 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
 
             extra_kwargs["ub_name"] = tp_comm_buffer_name
 
+            # Blockwise FP8: pack expert weights into one GroupedTensor. TE also
+            # requires NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 or the ctor flag is ignored.
+            fp8_recipe = getattr(self.config, "fp8_recipe", None)
+            if (
+                self.config.fp8
+                and fp8_recipe is not None
+                and str(fp8_recipe) == Fp8Recipe.blockwise
+                and class_has_init_param(te.pytorch.GroupedLinear, "single_grouped_weight")
+            ):
+                os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+                extra_kwargs["single_grouped_weight"] = True
+
             self.expert_parallel = self.config.expert_model_parallel_size > 1
             if is_expert:
                 extra_kwargs["rng_tracker_name"] = get_expert_parallel_rng_tracker_name()
@@ -1873,11 +1885,17 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             # doing so would change num-zeros gradient counting.
             if self.explicit_expert_comm and original_parallel_mode in ("column", "row"):
                 part_dim = 0 if original_parallel_mode == "column" else 1
-                for i in range(num_gemms):
-                    weight = getattr(self, f"weight{i}", None)
+                if getattr(self, "single_grouped_weight", False):
+                    weight = getattr(self, "weight", None)
                     if weight is not None:
                         setattr(weight, "partition_dim", part_dim)
                         setattr(weight, "partition_stride", 1)
+                else:
+                    for i in range(num_gemms):
+                        weight = getattr(self, f"weight{i}", None)
+                        if weight is not None:
+                            setattr(weight, "partition_dim", part_dim)
+                            setattr(weight, "partition_stride", 1)
 
             def merge_extra_states(
                 self,
