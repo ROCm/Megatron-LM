@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 from __future__ import annotations
 
+import inspect
 import logging
 from collections.abc import Callable
 from copy import deepcopy
@@ -344,15 +345,35 @@ class TEGroupedMLP(MegatronModule):
         tokens_per_expert_gpu = None
         if isinstance(tokens_per_expert, tuple):
             tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
-        tokens_per_expert: list[int] = tokens_per_expert.tolist()
+        tokens_per_expert_list: list[int] = (
+            tokens_per_expert.tolist()
+            if isinstance(tokens_per_expert, torch.Tensor)
+            else list(tokens_per_expert)
+        )
+        tokens_per_expert = tokens_per_expert_list
         if self.config.fp8 or self.config.fp4:
-            actual_tokens_per_expert = tokens_per_expert
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
-                permuted_local_hidden_states, tokens_per_expert
+            actual_tokens_per_expert = tokens_per_expert_list
+            pad_kwargs = {}
+            pad_fwd = getattr(self.quantization_padding, "forward", None)
+            if (
+                tokens_per_expert_gpu is not None
+                and pad_fwd is not None
+                and "m_splits_tensor" in inspect.signature(pad_fwd).parameters
+            ):
+                pad_kwargs["m_splits_tensor"] = tokens_per_expert_gpu
+            permuted_local_hidden_states, padded_splits = self.quantization_padding(
+                permuted_local_hidden_states, tokens_per_expert_list, **pad_kwargs
             )
             permuted_probs, _ = self.quantization_padding(
-                permuted_probs.unsqueeze(-1), actual_tokens_per_expert
+                permuted_probs.unsqueeze(-1), actual_tokens_per_expert, **pad_kwargs
             )
+            tokens_per_expert = self.quantization_padding.compute_padded_splits(
+                actual_tokens_per_expert
+            )
+            if isinstance(padded_splits, torch.Tensor) and padded_splits.is_cuda:
+                tokens_per_expert_gpu = padded_splits
+            elif tokens_per_expert != actual_tokens_per_expert:
+                tokens_per_expert_gpu = None
         else:
             permuted_probs = permuted_probs.unsqueeze(-1)
 

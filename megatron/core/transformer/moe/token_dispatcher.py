@@ -750,7 +750,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             "before_finish", self.tokens_per_expert
         )
         self.tokens_per_expert = None
-        if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON") == "1":
+        if self.tokens_per_expert_gpu is not None and self.tokens_per_expert_gpu.is_cuda:
             tokens_per_expert_gpu = self.tokens_per_expert_gpu.to(torch.int32)
             self.tokens_per_expert_gpu = None
             return global_input_tokens, (tokens_per_expert, tokens_per_expert_gpu), global_probs
@@ -1840,6 +1840,13 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             self._comm_manager.get_permuted_hidden_states_by_experts(hidden_states)
         )
         tokens_per_expert = self._comm_manager.get_number_of_tokens_per_expert()
+        tokens_per_expert_gpu = getattr(self._comm_manager, "tokens_per_expert", None)
+        if tokens_per_expert_gpu is not None and tokens_per_expert_gpu.is_cuda:
+            return (
+                global_input_tokens,
+                (tokens_per_expert, tokens_per_expert_gpu.to(torch.int32)),
+                permuted_probs,
+            )
         return global_input_tokens, tokens_per_expert, permuted_probs
 
     def combine_preprocess(self, hidden_states: torch.Tensor):
