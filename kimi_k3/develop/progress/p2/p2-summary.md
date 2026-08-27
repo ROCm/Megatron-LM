@@ -59,4 +59,9 @@ fla backend is available (triton 3.7.1) but stays off by default until G15.
 
 ## 7. Commit chain
 
-_pending review (rule R1.1)._
+| commit | scope |
+| --- | --- |
+| **c1d4db3d4** | P2 T2.1–T2.5: layer plan + specs, arguments, model builder; G11/G12/G13 green |
+
+**P2 closes here.** Next: P3 (KDA), P4 (gated MLA), P5 (AttnRes block), P6 (MoE) —
+four independent core phases.
