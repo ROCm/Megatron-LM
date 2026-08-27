@@ -59,12 +59,22 @@ kimi_k3/develop/
 | **P9** | complete | twin-run noise band, per-head Muon, QK-clip, bitwise resume under PP=2 (found A15: dist_muon could not resume at all) |
 | **P10** | complete (G41 owed) | MXFP4 scale rule corrected against the released weights (A16); a8w4 forward at rel-L2 1.66e-3; STE gradients exact |
 | **P11** | partial | chunked AttnRes mixer bit-identical (G43); baseline trace says the Muon step is 21 % and AttnRes 0.1 % — phase rescoped. EP=8 blocked on a shared node |
-| **P12** | partial | 93 L configs validated: floor 28 nodes, PP capped at 8 by AttnRes block alignment (G46). G47 owed |
+| **P12** | complete (T12.5 owed) | 93 L configs validated: floor 28 nodes, PP capped at 8 by AttnRes block alignment (G46); dispatcher A/B plan (G47, found A17) |
 
 The decoder is complete and trains end to end: 30 steps on a fixed batch drive the
 loss from 8.36 to ~0.0 under both `dist_muon` and `adam`, and the 4 L official
 config (94 B parameters) trains on a single node at EP = 8, peaking at 189–202 GiB
-of 288. `pytest kimi_k3/tests/ -q` → **168 passed, 1 skipped**.
+of 288. It converts both ways against the released checkpoint, resumes bitwise
+under PP = 2, and matches the release's own KDA module on real layer-0 weights.
+`pytest kimi_k3/tests/ -q` → **254 passed, 8 skipped**.
+
+Seventeen findings are on the register. Three came out of executing rather than
+reading, and each is a thing that would have shipped silently: **A15** —
+`dist_muon` could not be resumed at all, because the layer-wise optimizer cannot
+read what its own `state_dict()` writes; **A16** — the MXFP4 shared-scale rule was
+wrong, and a quarter of the released weights' groups were arithmetically
+impossible under it; **A17** — core's "cannot enable both DeepEP and MoRI" guard
+is unreachable.
 
 Owed to a nightly job rather than an interactive session: production-geometry KDA
 parity (G15), the 8-rank EP exercise (G26), sequence-length memory scaling beyond

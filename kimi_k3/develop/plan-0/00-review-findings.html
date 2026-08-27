@@ -578,6 +578,7 @@
     <p><strong>The plan is good and three things in it are wrong.</strong> The core-isolation strategy, the config-builder bypass, the router-injection path, the VPP descope, the measured-floor tolerance policy and the reasoning about STE and <code>gradcheck</code> all hold up against the source.</p>
     <p>What does not hold up: the <strong>AttnRes pipeline transport</strong> would silently drop half its gradients, the <strong>Muon capacity model</strong> is built on a mechanism that does not exist as described, and the <strong>ground-truth section is missing the one constant</strong> that determines pipeline layout. Two further claims about AITER and TransformerEngine could not be reproduced at the pins. Everything else is detail.</p>
     <p><strong>Update, 2026-08-27.</strong> The first four feasibility gates have since run on hardware, and they turn three of the findings below from arguments into measurements — see <a href="#verified">what the gates measured</a>. One finding of my own has been <strong>retracted</strong>: D5 claimed fla silently ignores the released kernel call's arguments, which was inferred from a signature and disproved by running it.</p>
+    <p><strong>The plan is now built, P0 through P12.</strong> 254 tests pass. It converts both ways against the released checkpoint, resumes bitwise under pipeline parallelism, and matches the release's own KDA module on real weights. Building it produced <strong>three more findings</strong> that reading could not have — including an optimizer that could not be resumed at all, and a quantisation rule that a quarter of the released weights proved wrong. See <a href="#built">what building it found</a>.</p>
   </div>
 
   <div class="layout">
@@ -588,6 +589,7 @@
         <li><a href="#headline">What changes the design <span>3</span></a></li>
         <li><a href="#figure">The missing constant <span>12</span></a></li>
         <li><a href="#verified">What the gates measured <span>G2–G7</span></a></li>
+        <li><a href="#built">What building it found <span>A15–A17</span></a></li>
         <li><a href="#core">A · Core mechanics <span>13</span></a></li>
         <li><a href="#truth">B · Ground truth <span>10</span></a></li>
         <li><a href="#missing">C · Missing content <span>6</span></a></li>
@@ -654,6 +656,56 @@
         <h3 class="sub">And one retraction of my own</h3>
         <p>Finding D5 claimed that <code>fla</code>'s <code>chunk_kda</code> silently ignores <code>A_log</code>, <code>dt_bias</code> and <code>transpose_state_layout</code>, because they are absent from its signature while it ends in <code>**kwargs</code>. That was inferred from reading the signature and never running the call. <strong>It is wrong.</strong> fla handles all three deliberately — it even raises when <code>A_log</code> is missing — and perturbing <code>A_log</code> demonstrably changes the output. The proposed fix was wrong too: a signature-name check would have failed on a working library.</p>
         <p>The real blocker is narrower and was only visible by running it: fla's KDA <strong>backward</strong> does not compile on gfx950 (D6). The register keeps D5 struck through rather than deleted.</p>
+      </section>
+
+
+      <section id="built">
+        <h2 class="sec">What building it found</h2>
+        <p class="sec-note">The plan is now built, P0 through P12. Three findings came out of executing rather than reading — and each is something that would have shipped silently.</p>
+
+        <div class="three">
+          <div>
+            <span class="tag">A15 — high</span>
+            <h4><code>dist_muon</code> could not be resumed at all</h4>
+            <p><code>ChainedOptimizer.state_dict()</code> returns a <em>list</em> whenever more than one optimizer is chained, and <code>dist_muon</code> always chains two. The layer-wise optimizer then calls <code>.values()</code> on it. It cannot read what its own <code>state_dict()</code> writes — on the optimizer this project measured at 7.87 B/param and recommends for K3.</p>
+          </div>
+          <div>
+            <span class="tag">A16 — high</span>
+            <h4>The MXFP4 scale rule was wrong</h4>
+            <p>P0 used the OCP formula, which targets E2M1’s largest <em>normal</em> by flooring and clips a group peaking at 3.99 down to 3.0. The released weights settle it: 25.75% of a real expert’s groups peak at magnitude 3.0, which that rule <strong>cannot produce</strong>.</p>
+          </div>
+          <div>
+            <span class="tag">A17 — low</span>
+            <h4>A guard that cannot fire</h4>
+            <p>Core’s “cannot enable both DeepEP and MoRI” error is unreachable: <code>moe_enable_deepep</code> is processed first and overwrites the backend. Ask for both and you get DeepEP, with only an unrelated deprecation warning.</p>
+          </div>
+        </div>
+
+        <h3 class="sub">Measured, not assumed</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>gate</th><th>what it settled</th><th>result</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="num">G30</td><td class="wrap">Does the converter account for every released tensor?</td><td class="wrap"><strong>497,052 mapped, 168 skipped by name, 0 unmapped</strong> of 497,220</td></tr>
+              <tr><td class="num">G32</td><td class="wrap">Does our KDA match the release on <em>real</em> weights?</td><td class="wrap">847 MiB fetched by range request; both modules load with 0 missing / 0 unexpected; <strong>cosine 0.999973</strong></td></tr>
+              <tr><td class="num">G34</td><td class="wrap">Is eager-vs-<code>fla</code> inside the run-to-run noise?</td><td class="wrap">band 0.238 / 0.084 / 0.049 from three seeds; the twin sits at <strong>0.137 / 0.022 / 0.018</strong></td></tr>
+              <tr><td class="num">G35</td><td class="wrap">Is per-head Muon really per-head?</td><td class="wrap"><strong>Bitwise equal</strong> to N independent core-Muon steps on the head slices, both axes</td></tr>
+              <tr><td class="num">G37</td><td class="wrap">Does a resume under PP=2 reproduce the run?</td><td class="wrap"><strong>Bitwise</strong> for 10 steps, with and without dropout; both negative controls fail</td></tr>
+              <tr><td class="num">G38</td><td class="wrap">Is our quantiser the release’s quantiser?</td><td class="wrap"><strong>Byte-identical</strong> to <code>aiter.per_1x32_f4_quant</code> after A16</td></tr>
+              <tr><td class="num">G39</td><td class="wrap">Does the a8w4 kernel match a dequantised matmul?</td><td class="wrap"><strong>rel-L2 1.66e-3</strong>, flat across four shapes including 3584→3072</td></tr>
+              <tr><td class="num">G46</td><td class="wrap">What would 93 L actually take?</td><td class="wrap"><strong>28 nodes</strong> at pp8×ep28 — and PP cannot exceed 8 with aligned AttnRes boundaries</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="sub">The predicted bottleneck was not the bottleneck</h3>
+        <p>The plan named the AttnRes mixer as the hot spot — ~120 GB of reads per forward — while insisting the trace decides. It does, and they disagree: at official widths the mixer is <strong>0.1%</strong> of device time and the Muon optimizer step is <strong>21%</strong>. So no AttnRes performance fix was made; the chunked mixer that did land stands on its <em>memory</em> measurement and a bit-identical forward, not on the trace.</p>
+        <p>The honest limit is arithmetic rather than scheduling. Two AttnRes slots need 13 layers, and 13 layers at official width is <strong>484 GiB per GPU</strong> — 1.7× a whole device. Ranking that mixer is structurally a multi-node measurement, and no better-timed local run will change it.</p>
+
+        <h3 class="sub">Two gates that would have passed for the wrong reason</h3>
+        <p>The recompute twin is bitwise <code>0.0</code> — which is what a <em>correct</em> recompute path produces, and also what a flag that does nothing produces. The harness now counts calls into <code>tensor_parallel.checkpoint</code>: 0 off, 4 on. Likewise the resume test’s RNG control was inert until dropout was switched on, because nothing else drew from the generator. Both were caught by asking what the control would look like if it were broken.</p>
       </section>
 
       <section id="figure">
