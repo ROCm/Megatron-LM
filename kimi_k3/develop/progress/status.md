@@ -102,15 +102,15 @@
 | [-] | T8.4 Checkpoint-anchored parity | TBD-p8 | 2026-08-27 | **G32 GREEN for one KDA layer on real weights**: 847 MiB fetched by range request, our module and the **release's own** module both load it with 0 missing / 0 unexpected, forward agrees to **rel-L2 7.4e-3, cosine 0.999973** (inside the measured bf16 bound). The full four-layer truncated-model slice is still owed. Report: `results/anchored_parity.md` |
 | [x] | T8.5 Tokenizer round-trip | `110c84c69` | 2026-08-27 | **G33 GREEN** (P7): special ids asserted against the released `config.json` |
 
-## P9 — Training equivalence, per-head Muon (G34–G37)
+## P9 — Training equivalence, per-head Muon, resume hardening (G34–G37)
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T9.1 `tools/twin_run.py` + measured noise band | | | G34 |
-| [ ] | T9.2 Twin axes (eager vs fla, recompute) | | | |
-| [ ] | T9.3 `optim/per_head_muon.py` + group policy | | | G35; core's `is_qkv` does not cover MLA |
-| [ ] | T9.4 Core `clip_qk` wiring | | | G36 |
-| [ ] | T9.5 Save→resume stability under PP=2 | | | G37 |
+| [x] | T9.1 `tools/twin_run.py` + noise band | `76070d0b7` | 2026-08-27 | **G34 GREEN.** Band from 3 seeds at tiny/40 steps: max 0.2382, mean 0.0837, final-quarter 0.0488 (`results/twin_runs.md`) |
+| [x] | T9.2 Twin axes | `76070d0b7` | 2026-08-27 | eager-vs-`fla` KDA **inside the band** on all three statistics (0.1371 / 0.0223 / 0.0184); recompute on-vs-off **bitwise 0.0**, with the checkpoint path proven to fire (0 calls off, 4 on) so the zero is not vacuous |
+| [x] | T9.3 `optim/per_head_muon.py` + group policy | `23ade88df` | 2026-08-27 | **G35 GREEN.** One split step is **bitwise-equal** to N core-Muon steps on the head slices, both axes; head slices are TP-local so `partition_dim=None`. Policy asserted against a real model |
+| [x] | T9.4 Wire `clip_qk` | `23ade88df` | 2026-08-27 | **G36 GREEN** at tiny: core's own `clip_qk(model)` drives our MLA unmodified; max logit recomputed per head and clipped to the threshold. The NoPE `k_rot` slice is shared across heads, so its whole correction lands on the query side |
+| [x] | T9.5 Resume under PP=2 | TBD-p9 | 2026-08-27 | **G37 GREEN, bitwise** over 10 post-resume steps, with and without dropout. Both negative controls fail. Found finding **A15**: `dist_muon` could not be resumed at all as shipped (`results/pp_resume.md`) |
 
 ## P10 — MXFP4 / MXFP8 QAT (G38–G41)
 

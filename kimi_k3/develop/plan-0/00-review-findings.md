@@ -50,6 +50,8 @@ those five.
 
 | **A14** | **MED — found in P2** | **Meta-device construction does not avoid allocation.** Megatron and TE modules place parameters on `torch.cuda.current_device()` explicitly, ignoring an ambient `torch.device("meta")` context — on the tiny preset, 93 of 114 parameters land on the GPU anyway (only our own AttnRes mixers honour it). The incoming plan's "official presets are validated by meta-device construction + analytic parameter counting" is therefore half unavailable: attempting it at 93 L would try to materialise 2.78 T parameters. The analytic table is the whole answer, and `build_k3_model` now **refuses** to construct a non-tiny preset without an explicit `allow_official=True`. | observed while building G13; `kimi_k3/tests/test_k3_p2_construction.py` |
 
+| **A15** | **HIGH — found in P9** | **`dist_muon` cannot load its own optimizer state.** `ChainedOptimizer.state_dict()` returns a **list** whenever more than one optimizer is chained, and `dist_muon` always chains two (Muon plus the scalar optimizer). `LayerWiseDistributedOptimizer.load_state_dict` then does `wrapped_state_dict = state_dict` followed by `for sd in wrapped_state_dict.values()`, which raises `AttributeError: 'list' object has no attribute 'values'`. Every `dist_muon` resume therefore fails — the recommended optimizer for K3 cannot be resumed at all as shipped. Fork-local workaround in `kimi_k3/optim/resume.py` applies the conversion the override intends and calls `ChainedOptimizer.load_state_dict` directly; a tripwire in `test_k3_p9_resume.py` fails once core fixes it. Found by gate G37. | `megatron/core/optimizer/layer_wise_optimizer.py:295-306`, `megatron/core/optimizer/optimizer.py:1187-1191` |
+
 ---
 
 ## B. Ground truth vs the released model

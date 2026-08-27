@@ -56,7 +56,8 @@ kimi_k3/develop/
 | **P6** LatentMoE, QB router, SiTU | complete | G23–G25 green, G26 partial |
 | **P7** trainer | complete | G27–G29 green |
 | **P8** | complete | converter both directions, 497,220 tensors accounted for, anchored parity on real layer-0 weights (cosine 0.999973) |
-| **P9–P12** | not started | twin runs, QAT, perf, scale-out |
+| **P9** | complete | twin-run noise band, per-head Muon, QK-clip, bitwise resume under PP=2 (found A15: dist_muon could not resume at all) |
+| **P10–P12** | not started | QAT, perf, scale-out |
 
 The decoder is complete and trains end to end: 30 steps on a fixed batch drive the
 loss from 8.36 to ~0.0 under both `dist_muon` and `adam`, and the 4 L official
