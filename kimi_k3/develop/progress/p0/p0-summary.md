@@ -30,7 +30,7 @@ TE, apex and AITER are all built against this torch.
 | `kimi_k3/tests/fixtures/release_shapes.json` | 50 real tensor shapes + dtypes from the released headers (6 KB, no weight data) |
 | `kimi_k3/PINS.md` | four of five pins resolved; licenses recorded |
 | `develop/notes/2026-08-27-release-audit.md` | G2 evidence |
-| `develop/notes/2026-08-27-fla-signature-check.md` | why G1 is red |
+| `develop/notes/2026-08-27-fla-signature-check.md` | the fla retraction and what actually blocked G1 |
 
 ## 3. Gates
 
@@ -181,6 +181,8 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 | **d6c51b7f1** | P0 T0.7: PP=2 packed-payload transport, bitwise exact (G7 green) |
 
 | **c07ef0507** | P0 T0.8: MXFP4 quantiser, SiTU, one-expert QAT prototype, AITER/TE asset verification (G8 green) |
+
+| **396ba6423** | P0 T0.1: triton 3.7.1 unblocks the KDA backward (G1 green) |
 
 **P0 closes here with all eight gates green.** Next: P1 (scaffold, guard, CI
 wiring), then P2.
