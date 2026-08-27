@@ -119,4 +119,6 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 | --- | --- |
 | **94a40436c** | P0 T0.2–T0.4: config path, block injection, parameter oracle, 22 tests, release audit; G2/G3/G4 green, G1 red and blocking |
 
-T0.5–T0.8 (all GPU) continue in this phase and will extend this summary.
+| **73114c73a** | P0 T0.5: optimizer-memory measurement (G5 green); capacity section regenerated from data |
+
+T0.6–T0.8 (all GPU) continue in this phase and will extend this summary.
