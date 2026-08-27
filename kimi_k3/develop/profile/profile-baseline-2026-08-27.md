@@ -92,8 +92,26 @@ Two, both from core and both worth a decision rather than suppression:
 * `full scope is deprecated. Use empty cuda_graph_scope` — from
   `recompute_granularity="full"`; cosmetic at the pin.
 
+## No single-node proxy can rank the AttnRes mixer — at any EP
+
+This is the more useful version of "the node was busy", and it is arithmetic
+rather than scheduling. A residual slot is appended every 12 layers, so **two**
+slots need at least **13** layers. At official width that is:
+
+| layers | max slots | params/GPU at EP=8 | state + headroom | fits in 288 GiB |
+|---|---|---|---|---|
+| 2 | 1 | 7.85 B | 139.6 GiB | yes — what was run |
+| 4 | 1 | 16.31 B | 201.5 GiB | yes at EP=8, **not** at EP=7 (measured: OOM) |
+| **13** | **2** | 54.88 B | **484.3 GiB** | **no — 1.7x a whole GPU** |
+| 25 | 3 | 106.24 B | 860.7 GiB | no |
+
+So `K = 1` is the ceiling for any one node, and the mixer's cost is `O(K + 1)`.
+Ranking it against the rest of the model is **structurally a multi-node
+measurement**, not something a better-timed single-node run would fix. Anyone
+picking this up should size for pipeline parallelism across nodes rather than
+waiting for the box to clear.
+
 ## Owed
 
-The EP=8 run at 4 L, and a deeper proxy (≥ 24 layers, so at least two AttnRes
-slots exist) before any AttnRes performance claim. Both need a node that is not
-being shared. G44 and G45 stay open.
+The EP=8 run at 4 L (blocked on the shared node), and a >= 13-layer proxy across
+nodes before any AttnRes performance claim. G44 and G45 stay open.

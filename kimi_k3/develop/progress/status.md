@@ -138,6 +138,6 @@
 | [x] | T12.1 93 L configs from the measured recipe | `a5c3a9f62` | 2026-08-27 | **G46 GREEN.** Floor is **28 nodes** (pp8 x ep28: 19.25 B params/GPU, 141 GiB state + 82 GiB measured headroom). `results/scaleout_93l.md` |
 | [x] | T12.2 PP layouts + legality test | `a5c3a9f62` | 2026-08-27 | **PP cannot exceed 8** with aligned boundaries — 93 layers give seven whole AttnRes blocks, so eight cut points. Every `pp16` candidate is flagged, not silently emitted |
 | [x] | T12.3 EP ladder | `a5c3a9f62` | 2026-08-27 | 8/16/28/32/56, each asserted to divide 896 |
-| [ ] | T12.4 Dispatcher A/B matrix | — | — | **G47 owed** — a plan, not an implementation |
+| [x] | T12.4 Dispatcher A/B matrix | TBD-p12 | 2026-08-27 | **G47 GREEN** as a plan (`plan-0/07-dispatcher-ab.md`). The premise is overtaken: core already ships DeepEP **and** MoRI as flex backends — nothing to port, only runtimes to install. Found **A17**: core's "cannot enable both" guard is unreachable, so asking for MoRI + DeepEP silently gives DeepEP |
 | [ ] | T12.5 Continued-pretrain flatness scripts | — | — | owed |
 
