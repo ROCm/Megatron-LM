@@ -106,6 +106,14 @@ def _layer_spec_for(config, entry: K3LayerPlan) -> ModuleSpec:
     from kimi_k3.block.k3_transformer_layer import K3TransformerLayer
 
     spec.module = K3TransformerLayer
+
+    if entry.ffn == MOE:
+        # LatentMoE with the norm core lacks, and the quantile-balancing router (P6)
+        from kimi_k3.moe.k3_moe_layer import K3MoELayer
+        from kimi_k3.moe.k3_router import QuantileBalancingRouter
+
+        spec.submodules.mlp.module = K3MoELayer
+        spec.submodules.mlp.submodules.router = QuantileBalancingRouter
     return spec
 
 
