@@ -15,3 +15,16 @@ repos:
   hooks:
   - id: isort
     files: ^megatron/core/.*
+
+# --- Kimi K3 (kimi_k3/) ---------------------------------------------------
+# The guard is what keeps kimi_k3/ fork-local so IFU merges never conflict with
+# it (kimi_k3/develop/rules/rule.md R2.1). A maintainer enables these by running
+# `pre-commit install`; the hook itself needs no arguments.
+- repo: local
+  hooks:
+  - id: kimi-k3-no-core-diff
+    name: "kimi-k3: no changes outside kimi_k3/"
+    entry: kimi_k3/ci/no_core_diff_guard.sh --staged
+    language: system
+    pass_filenames: false
+    always_run: true

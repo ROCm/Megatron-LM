@@ -91,5 +91,7 @@ def test_set_input_tensor_takes_exactly_one_packed_payload(single_rank_world, ti
 
 
 def test_pin_contracts_hold():
-    checked = assert_pin_contracts()
-    assert len(checked) == 7, checked
+    """Smoke only; `test_k3_p1_pin_contracts.py` owns them one by one."""
+    from kimi_k3.model.core_patch import PIN_CONTRACTS
+
+    assert len(assert_pin_contracts()) == len(PIN_CONTRACTS)

@@ -1,0 +1,67 @@
+# Kimi K3 CI -- stages 0 and 1 of the ladder in
+# kimi_k3/develop/plan-0/05-test-strategy.md.
+#
+# NOTE FOR A HUMAN: `runs-on` labels and the container image below are
+# placeholders. This repository's runners are not visible from the branch, so a
+# maintainer must set them before enabling the workflow. Everything else is
+# ready: both stages are just `pytest` invocations plus the guard.
+name: kimi-k3
+
+on:
+  pull_request:
+    paths:
+      - 'kimi_k3/**'
+      - '.github/workflows/kimi_k3.yml'
+  push:
+    branches: ['dev/wen/kimi-k3']
+
+concurrency:
+  group: kimi-k3-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  stage0-guard-and-cpu:
+    name: "stage 0 -- guard + CPU contracts"
+    runs-on: [self-hosted, rocm]        # TODO(maintainer): real label
+    container:
+      image: ${{ vars.K3_CI_IMAGE || 'rocm/megatron-lm:latest' }}   # TODO(maintainer)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0               # the guard needs the merge-base
+
+      - name: Core-isolation guard
+        run: kimi_k3/ci/no_core_diff_guard.sh origin/${{ github.base_ref || 'rocm_dev' }}...HEAD
+
+      - name: Pin contracts, config, layer pattern, parameter count
+        run: |
+          python -m pytest -q \
+            kimi_k3/tests/test_k3_p1_pin_contracts.py \
+            kimi_k3/tests/test_k3_p0_config.py \
+            kimi_k3/tests/test_k3_p0_param_count.py \
+            kimi_k3/tests/test_k3_p0_attn_res.py
+
+  stage1-single-gpu:
+    name: "stage 1 -- tiny-tier parity (1 GPU)"
+    needs: stage0-guard-and-cpu
+    runs-on: [self-hosted, rocm, gpu]  # TODO(maintainer): real label
+    container:
+      image: ${{ vars.K3_CI_IMAGE || 'rocm/megatron-lm:latest' }}
+      options: --device=/dev/kfd --device=/dev/dri --group-add video --ipc=host
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Environment + dependency pins
+        run: python -m pytest -q kimi_k3/tests/test_env.py
+
+      - name: Model construction, QAT, fla contract, torch.compile contract
+        run: |
+          python -m pytest -q \
+            kimi_k3/tests/test_k3_p0_construction.py \
+            kimi_k3/tests/test_k3_p0_qat.py \
+            kimi_k3/tests/test_k3_p0_fla_contract.py \
+            kimi_k3/tests/test_k3_p0_torch_compile_contract.py
+
+      - name: Record the environment
+        if: always()
+        run: python -m kimi_k3.tools.capture_env
