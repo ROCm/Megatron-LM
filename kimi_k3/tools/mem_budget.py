@@ -149,6 +149,45 @@ OPTIMIZER_BYTES_PER_PARAM = {
 }
 
 
+def muon_group_split(cfg, vocab_size: int) -> Dict[str, int]:
+    """Split K3's parameters the way core's Muon path does.
+
+    ``get_megatron_muon_optimizer`` sends a parameter to Muon iff it is 2-D and
+    not flagged ``is_embedding_or_output_parameter`` (muon.py:283-302);
+    everything else goes to ``--muon-scalar-optimizer`` (Adam by default, 8 B of
+    state per parameter). The two groups therefore have different bytes/param,
+    which is why G5 measures them separately.
+
+    Note the odd one out: the AttnRes projections are ``[1, hidden]``, i.e. 2-D,
+    so they land in the Muon group and go through Newton-Schulz as rank-1
+    "matrices". Whether that is intended is a P9 (T9.3) question, flagged here so
+    the split is at least explicit.
+    """
+    h = cfg.hidden_size
+    hd = cfg.k3_kda_head_dim
+    nh = cfg.k3_kda_num_heads
+    p = nh * hd
+    n_kda = sum(1 for i in range(cfg.num_layers) if cfg.is_kda_layer(i))
+    n_mla = cfg.num_layers - n_kda
+    n_moe = max(cfg.num_layers - 1, 0)
+
+    kda_scalar = 3 * p * cfg.k3_kda_conv_size + nh + p + hd  # convs (3-D), A_log, dt_bias, o_norm
+    mla_scalar = cfg.q_lora_rank + cfg.kv_lora_rank  # the two LoRA norms
+    moe_scalar = cfg.num_moe_experts + cfg.k3_routed_expert_hidden_size  # bias + latent norm
+    per_layer_scalar = 4 * h  # input/post norms + 2 AttnRes norms ([1, h] projections are 2-D)
+
+    scalar = (
+        n_kda * kda_scalar
+        + n_mla * mla_scalar
+        + n_moe * moe_scalar
+        + cfg.num_layers * per_layer_scalar
+        + 2 * h  # final norm + output AttnRes norm (its [1, h] projection is 2-D -> Muon)
+        + vocab_size * h * 2  # embedding + lm_head are excluded from Muon by flag
+    )
+    total = breakdown(cfg, vocab_size).total
+    return {"muon_2d": total - scalar, "scalar_group": scalar, "total": total}
+
+
 def params_per_gpu(cfg, vocab_size: int, tp: int = 1, pp: int = 1, ep: int = 1) -> float:
     """Expert parallelism shards the routed experts; TP/PP shard everything."""
     b = breakdown(cfg, vocab_size)

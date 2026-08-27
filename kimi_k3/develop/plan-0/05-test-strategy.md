@@ -55,7 +55,7 @@ module with identical quantisation and ordinary autograd.
 | **G2** | P0 | CPU | Release audit closed: `A_log` checkpoint shape, `KimiRMSNorm` default eps, exact key prefixes + vision-key count, tokenizer ids — each recorded with its evidence |
 | **G3** | P0 | CPU | `type(config) is KimiK3TransformerConfig`, MLA fields populated, `core_transformer_config_from_args` never on the call stack |
 | **G4** | P0 | CPU | Meta-device tiny `K3GPTModel`: decoder is `K3TransformerBlock`; **no core `TransformerBlock` ever constructed**; rebinding uninstalled; 93 L analytic count within 1 % |
-| **G5** | P0 | GPU | Measured bytes/param, per parameter group, for adam / precision-aware adam+dist-opt / muon / **dist_muon**, as a function of DP → `results/opt_mem.md` |
+| **G5** | P0 | GPU | Measured bytes/param, per parameter group, for adam / precision-aware adam+dist-opt / muon / **dist_muon**, as a function of DP → `develop/results/opt_mem.md`, produced by `tools/opt_mem_probe.py` + `tools/opt_mem_report.py`. Measured as the CUDA allocator delta from before construction to after two optimizer steps, so masters, moments, gradient buffers and all-gather scratch are all counted |
 | **G6** | P0 | GPU | AttnRes payload bytes per stage boundary vs slot count, and mixer fp32 temporaries, at tiny and official width |
 | **G7** | P0 | GPU | PP=2 packed payload: loss + gradient parity vs single-stage, **and** a payload-gradient assertion (a perturbed slot on stage 1 produces non-zero gradient on stage 0) |
 | **G8** | P0 | GPU | External assets present at the pins (AITER K3 a8w4 + `Situv2`; TE MXFP4 quantizer entry point) **and** one-expert QAT prototype: a8w4 forward, STE vs fake-quant, packed-cache refresh, checkpoint round-trip |
@@ -115,8 +115,8 @@ A smoke run must grep clean against this set; each plan may extend it.
 
 | Stage | Trigger | Content | Budget |
 |---|---|---|---|
-| **0** | every commit | guard (G9) · pin contracts (G10) · config + layer pattern + meta-device (G3, G4, G11–G13) · mapping dry run (G30) · QB exact-parity math (G25) · tokenizer (G33) | < 5 min, CPU |
-| **1** | every commit | tiny-tier parity: KDA (G14, G15-fast), MLA (G17-fast), AttnRes (G19, G20, G22), SiTU/MoE (G23, G24-fast) · synthetic converter round-trip (G31-synthetic) | < 20 min, 1 GPU |
+| **0** | every commit | guard (G9) · pin contracts (G10) · config + layer pattern + parameter count (G3, G11, G13) · mapping dry run (G30) · QB exact-parity math (G25) · tokenizer (G33) | < 5 min, CPU |
+| **1** | every commit | **model construction (G4, G12)** — needs a GPU because the local non-TE MLA spec cannot be constructed at the pin (finding A13) · tiny-tier parity: KDA (G14, G15-fast), MLA (G17-fast), AttnRes (G19, G20, G22), SiTU/MoE (G23, G24-fast) · synthetic converter round-trip (G31-synthetic) | < 20 min, 1 GPU |
 | **2** | nightly | release-tier parity (G15, G17, G18, G43) · 4 L integration (G27–G29) · EP smoke (G26) · anchored parity (G32) · QAT smoke (G38–G40) | 8 GPU |
 | **3** | scheduled / manual | twin runs (G34), QAT convergence (G41), perf traces (G42, G44, G45), multi-node 8 L | 8 GPU / cluster |
 

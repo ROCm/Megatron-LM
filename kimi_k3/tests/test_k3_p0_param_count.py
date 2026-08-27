@@ -132,3 +132,20 @@ def test_expert_parallelism_shards_almost_everything():
     # the layout recommended in develop/plan-0/06-capacity-and-parallelism.md
     per_gpu = mem_budget.params_per_gpu(cfg, 163840, pp=16, ep=32)
     assert 8e9 < per_gpu < 10e9, per_gpu
+
+
+def test_muon_group_split_is_explicit():
+    """Core sends only 2-D non-embedding weights to Muon (muon.py:283-302)."""
+    cfg = cfg93()
+    split = mem_budget.muon_group_split(cfg, 163840)
+    assert split["muon_2d"] + split["scalar_group"] == split["total"]
+
+    # The scalar (Adam) group is tiny in count but is dominated by the embeddings.
+    embeddings = 2 * 163840 * cfg.hidden_size
+    assert split["scalar_group"] > embeddings
+    assert (split["scalar_group"] - embeddings) / split["total"] < 1e-4
+
+    # Per-KDA-layer scalars: 3 conv weights (3-D), A_log, dt_bias, o_norm.
+    p = cfg.k3_kda_num_heads * cfg.k3_kda_head_dim
+    kda_scalar = 3 * p * cfg.k3_kda_conv_size + cfg.k3_kda_num_heads + p + cfg.k3_kda_head_dim
+    assert kda_scalar == 3 * 12288 * 4 + 96 + 12288 + 128

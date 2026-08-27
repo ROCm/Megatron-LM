@@ -35,7 +35,7 @@ the optimizer memory model — plus close the open ground-truth questions.
 | **G2** — release artefact audit | **GREEN** | 4/4 open items closed with evidence; fixture committed |
 | **G3** — config on the real inheritance path | **GREEN** | 9 tests |
 | **G4** — model construction, no transient core block | **GREEN** | 4 tests; constructor spy sees 0 core blocks; meta and cuda both build |
-| **G5** — optimizer memory | not started | needs 1–8 GPU |
+| **G5** — optimizer memory | **GREEN** | 16 runs / 40 rank-rows; `dist_muon` 7.87 B/param at DP=8 vs `muon` 15.17 flat; analytic `6 + 8/DP + c` fits with c ≈ 0.9–1.2 |
 | **G6** — AttnRes payload sizing | not started | needs 1 GPU |
 | **G7** — PP=2 packed payload + gradient assertion | not started | needs 2 GPUs |
 | **G8** — external assets + one-expert QAT | not started | AITER pin known stale (finding D1) |
@@ -56,6 +56,20 @@ Analytic parameter model, checked tensor-by-tensor against the released headers:
 Every per-component formula matches the checkpoint exactly, with one documented
 delta: the checkpoint's `A_log` is `[128]` and ours is `[96]` (+32 per KDA layer).
 Routed experts are **98.0 %** of all parameters.
+
+### Optimizer memory (G5)
+
+| recipe | DP=1 | DP=2 | DP=4 | DP=8 |
+|---|---:|---:|---:|---:|
+| `adam` | 18.02 | 18.02 | 18.02 | 18.02 |
+| `adam` + dist-opt | 18.02 | 12.02 | 9.03 | 7.52 |
+| the same + precision-aware | — | 11.02 | — | 7.27 |
+| `muon` | 15.17 | — | — | 15.17 |
+| `dist_muon` | 15.17 | 11.00 | 8.91 | **7.87** |
+
+`dist_muon` at DP = 8 is **1.93×** cheaper than plain `muon`, and identical to it
+at DP = 1. The capacity tables in `plan-0/06-capacity-and-parallelism.md` §2 are
+now generated from these rows rather than from an assumed 14 B/param.
 
 ## 5. Findings added to the register
 
@@ -89,7 +103,15 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 - `fla` revision bisection (blocks G1, then G15).
 - AITER pin bump or a written descope of the a8w4 fast path (blocks G8, then P10).
 - Construction gates need 1 GPU because of A13 — the CI ladder in
-  `plan-0/05-test-strategy.md` moves G4/G12 from stage 0 to stage 1.
+  `plan-0/05-test-strategy.md` moves G4/G12 from stage 0 to stage 1. (done)
+- `DistributedDataParallelConfig` must carry `use_distributed_optimizer` too, or
+  the first optimizer step dies in `_copy_main_params_to_model_params`. Nothing
+  validates the pair at construction time — remember this at P7 bring-up.
+- The AttnRes projections are `[1, hidden]`, i.e. 2-D, so core's Muon path sends
+  them through Newton–Schulz as rank-1 matrices. Decide in P9 (T9.3) whether to
+  exclude them.
+- `dist_muon` shard balance is ±4 % at DP=8 on the probe's shape mix; re-measure
+  at 4 L official shapes with grouped-GEMM experts (G28).
 
 ## 9. Commit chain
 

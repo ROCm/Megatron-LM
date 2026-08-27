@@ -33,51 +33,67 @@ params_per_gpu = P_nonexpert / (TP·PP) + P_expert / (TP·PP·EP)
 | 1 | 16 | 16 | 256 | 14.2 B | 93 L — plausible |
 | 1 | 16 | 32 | 512 | 8.9 B | 93 L — comfortable |
 
-## 2. Optimizer memory (corrected model — finding A6)
+## 2. Optimizer memory — MEASURED (gate G5, 2026-08-27)
 
-Bytes per parameter **per GPU**, for the parameters that live on that GPU:
+Bytes per parameter **per GPU**, for the parameters resident on that GPU.
+Measured with `tools/opt_mem_probe.py` on a 99.0 M-parameter model carrying K3's
+shape mix (MLA + MoE + norms), TP = PP = EP = 1, world size = DP, as the CUDA
+allocator delta from before construction to after two optimizer steps. Full
+tables: [`../results/opt_mem.md`](../results/opt_mem.md); raw per-rank rows:
+`../results/opt_mem_raw.jsonl`.
 
-| Recipe | bf16 weight | main grad | master | momentum / states | total | sharded across |
-|---|---:|---:|---:|---:|---:|---|
-| `adam` | 2 | 4 | 4 | 8 | **18** | nothing |
-| `adam` + `--use-distributed-optimizer` | 2 | 4 | (4 + 8)/DP | — | **6 + 12/DP** | DP |
-| `muon` | 2 | 4 | 4 | 4 | **14** | nothing |
-| **`dist_muon`** | 2 | 4 | (4 + 4)/DP | — | **6 + 8/DP** | DP (`LayerWiseDistributedOptimizer`) |
+| recipe | DP=1 | DP=2 | DP=4 | DP=8 | shards across |
+|---|---:|---:|---:|---:|---|
+| `adam` | 18.02 | 18.02 | 18.02 | 18.02 | nothing |
+| `adam` + `--use-distributed-optimizer` | 18.02 | 12.02 | 9.03 | **7.52** | DP |
+| the same + `--use-precision-aware-optimizer` | — | 11.02 | — | **7.27** | DP |
+| `muon` | 15.17 | — | — | **15.17** | nothing |
+| **`dist_muon`** | 15.17 | 11.00 | 8.91 | **7.87** | DP (whole tensors) |
 
-Notes that the incoming plan did not have:
+What the measurements settle:
 
-1. `--use-distributed-optimizer` is rejected for **any** Muon variant
-   (`arguments.py:1552`) — but `dist_muon` has its *own* sharding
-   (`muon.py:373-386` → `layer_wise_optimizer.py:26-40,105-158`): whole tensors
-   are assigned to DP ranks in a ping-pong order by numel, each rank optimises
-   only its shard, and parameters are all-gathered after the step. So a sharded
-   Muon path **does** exist; it just is not the `distrib_optimizer.py` one.
-2. Sharding is **whole-tensor**, so balance is approximate. With grouped-GEMM
-   experts, a layer's expert weights are a few very large tensors — the balance
-   quality at a given `(EP, DP)` is a **measurement** (G5), not an assumption.
-3. Muon applies only to 2-D non-embedding weights (`muon.py:283-302`); the rest
-   goes to `--muon-scalar-optimizer` (adam by default). K3's Adam group therefore
-   contains `A_log`, `dt_bias`, the three `[12288, 1, 4]` conv weights, all
-   RMSNorm weights, both AttnRes `Linear(7168, 1)` projections per layer, and the
-   embeddings — small in count, but they carry Adam's 8 B/param.
-4. `dist_muon` is also the only Muon variant compatible with
-   `--overlap-grad-reduce` / `--overlap-param-gather`
-   (`arguments.py:881-882, 1549-1550`).
-5. At **DP = 1** (pure model parallelism) there is nothing to shard and
-   `dist_muon` degenerates to 14 B/param. The sharding pays off exactly in the
-   regime where a 2.78 T model is actually trained (DP > 1 for throughput).
+1. **A sharded Muon recipe exists and roughly halves optimizer memory.**
+   `dist_muon` at DP = 8 costs **7.87 B/param** against plain `muon`'s 15.17 —
+   1.93×. The incoming plan's flat 14 B/param is right only at DP = 1, where
+   `dist_muon` and `muon` measure identically (15.17 both), because there is
+   nothing to shard.
+2. **The analytic model holds.** Fitting `6 + 8/DP + c` to the `dist_muon` row
+   gives `c` = 1.17 / 1.00 / 0.91 / 0.87 at DP = 1 / 2 / 4 / 8 — that residual is
+   the scalar (Adam) group plus allocator overhead. `adam` + dist-opt lands on
+   its analytic `6 + 12/DP` to two decimals at DP = 2 and 4.
+3. **`muon`'s 15.17 is not 14** because the parameters Muon does *not* manage —
+   norms, biases, embeddings, and in K3 also the conv weights, `A_log` and
+   `dt_bias` — carry Adam's 8 B/param. The split is computed for the real model
+   by `tools/mem_budget.py:muon_group_split`.
+4. **`dist_muon`'s balance is approximate.** Per-rank spread at DP = 8 is
+   7.65 – 8.25 B/param (±4 %), because sharding assigns *whole tensors* in a
+   ping-pong order by numel. With grouped-GEMM experts — a few very large tensors
+   per layer — that imbalance can grow; P7 re-measures at the real shapes.
+5. **Precision-aware Adam is only marginally cheaper than plain dist-opt Adam**
+   at DP = 8 (7.27 vs 7.52) on this shape mix, so it is not by itself a reason to
+   prefer Adam over `dist_muon`.
 
-### 2.1 Cluster-level floor **[estimate — confirm with G5]**
+Constraints that remain true regardless: `--use-distributed-optimizer` is
+rejected for every Muon variant (`arguments.py:1552`), and `dist_muon` is the
+only Muon variant compatible with `--overlap-grad-reduce` /
+`--overlap-param-gather` (`arguments.py:881-882, 1549-1550`).
 
-At DP = 1, cluster-wide optimizer+weight state is `P × 14 B = 38.9 TB`. A node is
-8 × MI355X × 288 GB = 2.304 TB, so the **raw** floor is ≈ 17 nodes with zero
-headroom — arithmetically the same figure the incoming plan quotes, and equally
-unusable as a target: activations, the AttnRes payload, fragmentation and
-communication buffers all come out of the same budget. A realistic planning
-figure at 60–75 % utilisation is **23–29 nodes at DP = 1**, dropping as DP rises
-because `dist_muon` shards master+momentum (`6 + 8/DP`) while weights and grads
-replicate. `tools/mem_budget.py` computes the full curve; no config quotes a node
-count until G5 and G28 have run.
+Two caveats on transferring these numbers to the 93 L model: the probe runs
+EP = 1, so expert parameters here are DP-replicated rather than EP-sharded; and
+the probe's shape mix is K3-like but not K3-exact (the KDA modules land in P3).
+G28 re-measures on the 4 L official config.
+
+### 2.1 Cluster-level floor **[estimate — refine with G28]**
+
+At DP = 1, cluster-wide weight + optimizer state is `P × 15.17 B ≈ 42.2 TB`
+(using the measured `muon` figure rather than the analytic 14). A node is
+8 × MI355X × 288 GB = 2.304 TB, so the **raw** floor is ≈ 19 nodes with zero
+headroom — unusable as a target, since activations, the AttnRes payload,
+fragmentation and communication buffers come out of the same budget. At 60–75 %
+utilisation that is **25–31 nodes at DP = 1**, falling as DP rises because
+`dist_muon` shards master weights and momentum while weights and gradients
+replicate. `tools/mem_budget.py` computes the curve; no configuration quotes a
+node count that is not backed by a row in `../results/opt_mem.md`.
 
 ## 3. AttnRes memory **[estimates — confirm with G6]**
 
