@@ -116,10 +116,10 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T10.1 `k3_qat.py` quantiser + our OCP-MX reference | | | G38; TE ships no NumPy reference at the pin |
-| [ ] | T10.2 `k3_qat_experts.py` a8w4 fwd + STE bwd | | | G39, G40 |
-| [ ] | T10.3 Checkpointing of packed data + scales + masters | | | |
-| [ ] | T10.4 QAT-vs-BF16 twin + serve parity | | | G41 |
+| [x] | T10.1 quantiser + oracle | `9b1d2e8c7` | 2026-08-27 | **G38 GREEN.** The scale rule was wrong and the released weights said so — 25.75 % of a real expert's groups are impossible under the OCP floor-to-6.0 formula. Corrected to the measured rule; now **byte-identical** to `aiter.per_1x32_f4_quant`, and MXFP8 bit-identical with `scale_type=fp8_e8m0`. Finding **A16** |
+| [x] | T10.2 a8w4 forward + STE backward | TBD-p10 | 2026-08-27 | **G39 GREEN** at rel-L2 **1.66e-3** including K3's own 3584→3072 geometry, via `aiter.ops.triton.moe.moe_op_gemm_a8w4` — no checkout bump needed, contrary to P0's D1 deferral. **G40 GREEN, exact** (rtol 0, atol 0) |
+| [x] | T10.3 Checkpointing of packed data + scales + masters | `de2d10b1e` | 2026-08-27 | landed in P0 with the expert prototype; packed caches are buffers and ride the checkpoint |
+| [ ] | T10.4 QAT-vs-BF16 twin, serve parity | — | — | **G41 owed** — 8-GPU scheduled tier, per the P9 twin protocol |
 
 ## P11 — Perf baseline and fused AttnRes (G42–G45)
 
