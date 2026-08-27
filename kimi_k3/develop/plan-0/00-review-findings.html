@@ -1,0 +1,1181 @@
+<title>Kimi K3 Plan Audit</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+  :root {
+    --ground:      #EDF0F2;
+    --surface:     #FFFFFF;
+    --surface-2:   #F5F8F9;
+    --ink:         #0F1519;
+    --ink-2:       #46545E;
+    --ink-3:       #6C7A84;
+    --rule:        #D3DADE;
+    --rule-strong: #AEBAC1;
+    --accent:      #0B6E75;
+    --accent-soft: #DCEDEE;
+    --crit:        #A8201A;
+    --crit-soft:   #F6E2E0;
+    --high:        #8A5200;
+    --high-soft:   #F7EBD8;
+    --med:         #2F5680;
+    --med-soft:    #E1E9F2;
+    --low:         #5D6B74;
+    --low-soft:    #E6EAEC;
+    --keep:        #1F6B4A;
+    --keep-soft:   #DDEDE4;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:      #0B1013;
+      --surface:     #121A1E;
+      --surface-2:   #162027;
+      --ink:         #E4EBEE;
+      --ink-2:       #9DAEB8;
+      --ink-3:       #7C8C96;
+      --rule:        #24333A;
+      --rule-strong: #35494F;
+      --accent:      #58C8CF;
+      --accent-soft: #10333A;
+      --crit:        #F08A82;
+      --crit-soft:   #351A19;
+      --high:        #E0A54A;
+      --high-soft:   #33260F;
+      --med:         #93B6DE;
+      --med-soft:    #182838;
+      --low:         #9DAEB8;
+      --low-soft:    #1B262B;
+      --keep:        #6FC69B;
+      --keep-soft:   #122A20;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:      #0B1013;
+    --surface:     #121A1E;
+    --surface-2:   #162027;
+    --ink:         #E4EBEE;
+    --ink-2:       #9DAEB8;
+    --ink-3:       #7C8C96;
+    --rule:        #24333A;
+    --rule-strong: #35494F;
+    --accent:      #58C8CF;
+    --accent-soft: #10333A;
+    --crit:        #F08A82;
+    --crit-soft:   #351A19;
+    --high:        #E0A54A;
+    --high-soft:   #33260F;
+    --med:         #93B6DE;
+    --med-soft:    #182838;
+    --low:         #9DAEB8;
+    --low-soft:    #1B262B;
+    --keep:        #6FC69B;
+    --keep-soft:   #122A20;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.62;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .shell {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 24px 96px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    border-bottom: 2px solid var(--ink);
+    padding: 56px 0 22px;
+    margin-bottom: 0;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 18px;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(2.3rem, 5.2vw, 3.4rem);
+    line-height: 1.04;
+    letter-spacing: -0.021em;
+    text-wrap: balance;
+    margin: 0 0 14px;
+  }
+
+  .standfirst {
+    font-size: 1.16rem;
+    line-height: 1.5;
+    color: var(--ink-2);
+    max-width: 60ch;
+    margin: 0;
+  }
+
+  .provenance {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 26px;
+    margin-top: 26px;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--ink-3);
+  }
+  .provenance b { color: var(--ink-2); font-weight: 500; }
+
+  /* ---------- tally ---------- */
+
+  .tally {
+    display: grid;
+    grid-template-columns: repeat(5, minmax(0, 1fr));
+    border-bottom: 1px solid var(--rule);
+    background: var(--surface);
+  }
+  .tally div {
+    padding: 18px 16px 16px;
+    border-right: 1px solid var(--rule);
+  }
+  .tally div:last-child { border-right: 0; }
+  .tally .n {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.9rem;
+    line-height: 1;
+    font-variant-numeric: tabular-nums;
+    display: block;
+  }
+  .tally .l {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    display: block;
+    margin-top: 8px;
+  }
+  .tally .crit .n { color: var(--crit); }
+  .tally .high .n { color: var(--high); }
+  .tally .med .n  { color: var(--med); }
+  .tally .low .n  { color: var(--low); }
+  .tally .keep .n { color: var(--keep); }
+
+  /* ---------- layout ---------- */
+
+  .layout {
+    display: grid;
+    grid-template-columns: 216px minmax(0, 1fr);
+    gap: 56px;
+    align-items: start;
+    margin-top: 44px;
+  }
+
+  .rail { position: sticky; top: 28px; }
+
+  .rail h2 {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    margin: 0 0 12px;
+  }
+  .rail ol {
+    list-style: none;
+    margin: 0 0 28px;
+    padding: 0;
+    border-top: 1px solid var(--rule);
+  }
+  .rail li { border-bottom: 1px solid var(--rule); }
+  .rail a {
+    display: flex;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 9px 0;
+    color: var(--ink-2);
+    text-decoration: none;
+    font-family: var(--display);
+    font-size: 13.5px;
+    font-weight: 500;
+  }
+  .rail a:hover { color: var(--accent); }
+  .rail a span {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-3);
+    font-variant-numeric: tabular-nums;
+  }
+
+  main { min-width: 0; }
+
+  section { margin-bottom: 64px; scroll-margin-top: 24px; }
+
+  h2.sec {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.55rem;
+    letter-spacing: -0.012em;
+    margin: 0 0 6px;
+    text-wrap: balance;
+  }
+  .sec-note {
+    color: var(--ink-2);
+    font-size: 1rem;
+    max-width: 68ch;
+    margin: 0 0 26px;
+  }
+  h3.sub {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.05rem;
+    letter-spacing: 0.002em;
+    margin: 36px 0 14px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--rule-strong);
+  }
+
+  p { max-width: 70ch; }
+
+  code, .mono { font-family: var(--mono); font-size: 0.86em; }
+  code {
+    background: var(--surface-2);
+    border: 1px solid var(--rule);
+    padding: 0.06em 0.32em;
+    color: var(--ink);
+  }
+
+  a { color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  /* ---------- verdict ---------- */
+
+  .verdict {
+    background: var(--surface);
+    border-top: 3px solid var(--ink);
+    border-bottom: 1px solid var(--rule);
+    padding: 26px 28px 24px;
+    margin: 40px 0 0;
+  }
+  .verdict p { margin: 0 0 14px; font-size: 1.06rem; }
+  .verdict p:last-child { margin-bottom: 0; }
+  .verdict strong { font-weight: 600; }
+
+  /* ---------- headline three ---------- */
+
+  .three {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 0;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+  }
+  .three > div {
+    padding: 20px 22px 22px;
+    border-right: 1px solid var(--rule);
+  }
+  .three > div:last-child { border-right: 0; }
+  .three h4 {
+    font-family: var(--display);
+    font-size: 0.98rem;
+    font-weight: 600;
+    margin: 10px 0 8px;
+  }
+  .three p { font-size: 0.95rem; color: var(--ink-2); margin: 0; max-width: none; }
+  .three .tag {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--crit);
+  }
+
+  /* ---------- figure ---------- */
+
+  figure {
+    margin: 34px 0 0;
+    padding: 24px 24px 20px;
+    background: var(--surface);
+    border: 1px solid var(--rule);
+  }
+  figcaption {
+    font-size: 0.92rem;
+    color: var(--ink-2);
+    margin-top: 18px;
+    max-width: 74ch;
+  }
+  .strip-wrap { overflow-x: auto; padding-bottom: 6px; }
+  .strip {
+    display: grid;
+    grid-template-columns: repeat(93, minmax(7px, 1fr));
+    gap: 2px;
+    min-width: 620px;
+    align-items: end;
+  }
+  .strip i {
+    display: block;
+    height: 30px;
+    background: var(--med-soft);
+    border-bottom: 2px solid var(--med);
+  }
+  .strip i.mla { background: var(--accent-soft); border-bottom-color: var(--accent); height: 44px; }
+  .strip i.slot { position: relative; }
+  .strip i.slot::before {
+    content: "";
+    position: absolute;
+    inset: -12px 0 auto 0;
+    height: 6px;
+    background: var(--crit);
+  }
+  .rulers {
+    display: grid;
+    grid-template-columns: repeat(93, minmax(7px, 1fr));
+    gap: 2px;
+    min-width: 620px;
+    margin-top: 6px;
+  }
+  .rulers b {
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--ink-3);
+    font-weight: 400;
+    grid-column: span 12;
+    border-top: 1px solid var(--rule-strong);
+    padding-top: 5px;
+    font-variant-numeric: tabular-nums;
+  }
+  .rulers b:last-child { grid-column: span 9; }
+
+  .key {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 20px;
+    margin-top: 16px;
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--ink-2);
+  }
+  .key i {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    margin-right: 7px;
+    vertical-align: -2px;
+  }
+  .key .k-kda { background: var(--med-soft); border-bottom: 2px solid var(--med); }
+  .key .k-mla { background: var(--accent-soft); border-bottom: 2px solid var(--accent); }
+  .key .k-slot { background: var(--crit); }
+
+  /* ---------- tables ---------- */
+
+  .table-wrap { overflow-x: auto; margin-top: 22px; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 0.93rem; }
+  th, td {
+    text-align: left;
+    padding: 9px 14px;
+    border-bottom: 1px solid var(--rule);
+    white-space: nowrap;
+  }
+  th {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    font-weight: 500;
+    background: var(--surface-2);
+  }
+  td.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+  tr:last-child td { border-bottom: 0; }
+  td.wrap { white-space: normal; }
+
+  /* ---------- findings register ---------- */
+
+  .register { border-top: 2px solid var(--ink); }
+
+  .finding {
+    border-bottom: 1px solid var(--rule);
+    padding: 22px 0 24px;
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 0 22px;
+    scroll-margin-top: 20px;
+  }
+  .finding .fid {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--ink-3);
+    padding-top: 3px;
+  }
+  .finding h4 {
+    font-family: var(--display);
+    font-size: 1.09rem;
+    font-weight: 600;
+    letter-spacing: -0.004em;
+    line-height: 1.32;
+    margin: 0 0 10px;
+    text-wrap: balance;
+  }
+  .finding p { margin: 0 0 12px; color: var(--ink-2); }
+  .finding p:last-of-type { margin-bottom: 0; }
+  .finding .body > *:last-child { margin-bottom: 0; }
+
+  .sev {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    padding: 3px 7px 2px;
+    margin-bottom: 9px;
+  }
+  .sev-crit { color: var(--crit); background: var(--crit-soft); }
+  .sev-high { color: var(--high); background: var(--high-soft); }
+  .sev-med  { color: var(--med);  background: var(--med-soft); }
+  .sev-low  { color: var(--low);  background: var(--low-soft); }
+  .sev-keep { color: var(--keep); background: var(--keep-soft); }
+
+  .evidence {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    line-height: 1.7;
+    color: var(--ink-3);
+    background: var(--surface-2);
+    border-left: 2px solid var(--rule-strong);
+    padding: 8px 12px;
+    margin-top: 12px !important;
+    overflow-x: auto;
+    max-width: none;
+  }
+  .evidence b { color: var(--ink-2); font-weight: 500; }
+
+  /* ---------- keep list ---------- */
+
+  .keeps { list-style: none; padding: 0; margin: 0; border-top: 1px solid var(--rule); }
+  .keeps li {
+    display: grid;
+    grid-template-columns: 74px minmax(0, 1fr);
+    gap: 22px;
+    padding: 11px 0;
+    border-bottom: 1px solid var(--rule);
+    color: var(--ink-2);
+    font-size: 0.97rem;
+  }
+  .keeps li span {
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--keep);
+    padding-top: 3px;
+  }
+
+  /* ---------- next steps ---------- */
+
+  .steps { list-style: none; padding: 0; margin: 24px 0 0; counter-reset: step; }
+  .steps li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 18px;
+    padding: 16px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .steps li::before {
+    content: counter(step, decimal-leading-zero);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    padding-top: 4px;
+  }
+  .steps strong { font-family: var(--display); font-weight: 600; display: block; margin-bottom: 4px; }
+  .steps p { margin: 0; color: var(--ink-2); font-size: 0.96rem; }
+
+  .docset {
+    margin-top: 24px;
+    border: 1px solid var(--rule);
+    background: var(--surface);
+    padding: 4px 22px 18px;
+  }
+  .docset dl { margin: 0; }
+  .docset dt {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--accent);
+    margin-top: 16px;
+  }
+  .docset dd { margin: 3px 0 0; color: var(--ink-2); font-size: 0.95rem; }
+
+  footer {
+    margin-top: 72px;
+    padding-top: 18px;
+    border-top: 2px solid var(--ink);
+    font-family: var(--mono);
+    font-size: 11.5px;
+    color: var(--ink-3);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px 24px;
+  }
+
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; gap: 32px; }
+    .rail { position: static; }
+    .rail ol { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
+    .tally { grid-template-columns: repeat(2, 1fr); }
+    .tally div { border-bottom: 1px solid var(--rule); }
+    .finding, .keeps li { grid-template-columns: 1fr; gap: 4px; }
+    .finding .fid { padding-top: 0; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; transition: none !important; }
+  }
+</style>
+
+<div class="shell">
+
+  <header class="masthead">
+    <p class="eyebrow">Design review · ROCm/Megatron-LM · updated 2026-08-27</p>
+    <h1>Kimi K3 plan audit</h1>
+    <p class="standfirst">A severity-tagged review of the incoming “rev 2” integration plan, checked line by line against the pinned fork and the released model rather than against the plan’s own account of them.</p>
+    <div class="provenance">
+      <span><b>Core pin</b> ROCm/Megatron-LM @ a1b00d4</span>
+      <span><b>Release</b> HF moonshotai/Kimi-K3</span>
+      <span><b>TE</b> 2.12.0.dev0+40434cf6</span>
+      <span><b>AITER</b> f299f579a (2026-04-03)</span>
+      <span><b>fla</b> git 5e02dd3 (0.6.0)</span>
+    </div>
+  </header>
+
+  <div class="tally">
+    <div class="crit"><span class="n">5</span><span class="l">Critical</span></div>
+    <div class="high"><span class="n">13</span><span class="l">High</span></div>
+    <div class="med"><span class="n">11</span><span class="l">Medium</span></div>
+    <div class="low"><span class="n">5</span><span class="l">Low</span></div>
+    <div class="keep"><span class="n">11</span><span class="l">Kept as written</span></div>
+  </div>
+
+  <div class="verdict">
+    <p><strong>The plan is good and three things in it are wrong.</strong> The core-isolation strategy, the config-builder bypass, the router-injection path, the VPP descope, the measured-floor tolerance policy and the reasoning about STE and <code>gradcheck</code> all hold up against the source.</p>
+    <p>What does not hold up: the <strong>AttnRes pipeline transport</strong> would silently drop half its gradients, the <strong>Muon capacity model</strong> is built on a mechanism that does not exist as described, and the <strong>ground-truth section is missing the one constant</strong> that determines pipeline layout. Two further claims about AITER and TransformerEngine could not be reproduced at the pins. Everything else is detail.</p>
+    <p><strong>Update, 2026-08-27.</strong> The first four feasibility gates have since run on hardware, and they turn three of the findings below from arguments into measurements — see <a href="#verified">what the gates measured</a>. One finding of my own has been <strong>retracted</strong>: D5 claimed fla silently ignores the released kernel call's arguments, which was inferred from a signature and disproved by running it.</p>
+  </div>
+
+  <div class="layout">
+
+    <nav class="rail" aria-label="Sections">
+      <h2>Register</h2>
+      <ol>
+        <li><a href="#headline">What changes the design <span>3</span></a></li>
+        <li><a href="#figure">The missing constant <span>12</span></a></li>
+        <li><a href="#verified">What the gates measured <span>G2–G7</span></a></li>
+        <li><a href="#core">A · Core mechanics <span>13</span></a></li>
+        <li><a href="#truth">B · Ground truth <span>10</span></a></li>
+        <li><a href="#missing">C · Missing content <span>6</span></a></li>
+        <li><a href="#stale">D · External deps <span>6</span></a></li>
+        <li><a href="#keeps">E · Kept as written <span>11</span></a></li>
+        <li><a href="#next">F · Consequences <span>4</span></a></li>
+        <li><a href="#docs">The plan that replaces it</a></li>
+      </ol>
+      <h2>Severity</h2>
+      <ol>
+        <li><a href="#core">Critical <span>design breaks</span></a></li>
+        <li><a href="#core">High <span>scope error</span></a></li>
+        <li><a href="#core">Medium <span>parity risk</span></a></li>
+        <li><a href="#core">Low <span>hygiene</span></a></li>
+      </ol>
+    </nav>
+
+    <main>
+
+      <section id="headline">
+        <h2 class="sec">What changes the design</h2>
+        <p class="sec-note">Twenty-eight of the thirty-one findings are corrections you would fold into a phase. Three change what gets built.</p>
+        <div class="three">
+          <div>
+            <span class="tag">A1 · A4 — critical</span>
+            <h4>The pipeline payload loses its gradients</h4>
+            <p>Core back-props only <code>output_tensor[0]</code>. A two-tensor AttnRes payload trains happily, the loss falls, and the block residual’s contribution never reaches the stage that produced it.</p>
+          </div>
+          <div>
+            <span class="tag">A6 — critical</span>
+            <h4>The Muon memory model is a floor, not a recipe</h4>
+            <p><code>dist_muon</code> does shard master weights and momentum across DP. Per-GPU cost is <code>6 + 8/DP</code>, and expert parallelism already shards 98% of the parameters — neither is in the plan’s table.</p>
+          </div>
+          <div>
+            <span class="tag">B1 · B2 — critical</span>
+            <h4>The ground truth is missing block size 12</h4>
+            <p>Eight residual slots, appended every twelve layers, sized by the sequence length. It sets the pipeline payload, the layout, and the shape of the oracle the plan asks for.</p>
+          </div>
+        </div>
+      </section>
+
+      <section id="verified">
+        <h2 class="sec">What the gates measured</h2>
+        <p class="sec-note">The first feasibility gates have run on 8× MI355X. Three of the findings below are no longer arguments.</p>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>gate</th><th>what it settled</th><th>result</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="num">G7</td><td class="wrap">Does the packed payload carry gradients across a pipeline boundary? (finding A1)</td><td class="wrap"><strong>Bitwise match</strong> to the single-stage run — loss 0.0, gradients 0.0 across all 131 parameters</td></tr>
+              <tr><td class="num">G7′</td><td class="wrap">Negative control: slots detached, emulating a two-tensor payload</td><td class="wrap"><strong>Identical loss</strong>, gradients wrong by <strong>8.1e-4</strong></td></tr>
+              <tr><td class="num">G5</td><td class="wrap">Does <code>dist_muon</code> actually shard? (finding A6)</td><td class="wrap"><strong>7.87 B/param</strong> at DP=8 vs <strong>15.17</strong> for plain <code>muon</code>; identical at DP=1</td></tr>
+              <tr><td class="num">G6</td><td class="wrap">What does AttnRes cost? (finding A4)</td><td class="wrap"><strong>109.6 GiB</strong> read per forward, <strong>≈635 ms</strong> eager mixer forward per microbatch</td></tr>
+              <tr><td class="num">G2</td><td class="wrap">The open ground-truth questions (findings B5, B7)</td><td class="wrap"><code>A_log</code> is <code>[128]</code> with the last 32 exactly zero; the MLA LoRA norms use <strong>1e-6</strong>, not 1e-5</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <h3 class="sub">The negative control is the finding</h3>
+        <p>Detaching the block-residual slots does exactly what a two-tensor payload would: they travel forward, the next stage consumes them, and their gradient never comes back. The loss is <em>identical to seven decimal places</em> and the gradients are wrong by 8.1e-4. A loss-only comparison would have called that run correct — which is precisely why A1 was worth raising and why the gate asserts gradient flow rather than loss agreement.</p>
+
+        <h3 class="sub">And one retraction of my own</h3>
+        <p>Finding D5 claimed that <code>fla</code>'s <code>chunk_kda</code> silently ignores <code>A_log</code>, <code>dt_bias</code> and <code>transpose_state_layout</code>, because they are absent from its signature while it ends in <code>**kwargs</code>. That was inferred from reading the signature and never running the call. <strong>It is wrong.</strong> fla handles all three deliberately — it even raises when <code>A_log</code> is missing — and perturbing <code>A_log</code> demonstrably changes the output. The proposed fix was wrong too: a signature-name check would have failed on a working library.</p>
+        <p>The real blocker is narrower and was only visible by running it: fla's KDA <strong>backward</strong> does not compile on gfx950 (D6). The register keeps D5 struck through rather than deleted.</p>
+      </section>
+
+      <section id="figure">
+        <h2 class="sec">The missing constant</h2>
+        <p class="sec-note"><code>attn_res_block_size = 12</code> appears nowhere in the plan. Everything about AttnRes transport falls out of it.</p>
+
+        <figure>
+          <div class="strip-wrap">
+            <div class="strip" id="strip" aria-hidden="true"></div>
+            <div class="rulers" aria-hidden="true">
+              <b>1–12</b><b>13–24</b><b>25–36</b><b>37–48</b><b>49–60</b><b>61–72</b><b>73–84</b><b>85–93</b>
+            </div>
+          </div>
+          <div class="key">
+            <span><i class="k-kda"></i>KDA layer (69)</span>
+            <span><i class="k-mla"></i>Gated MLA layer (24)</span>
+            <span><i class="k-slot"></i>Residual slot appended (8)</span>
+          </div>
+          <figcaption>93 layers in a <code>KDA·KDA·KDA·MLA</code> pattern, with the tail broken once — layers 92 and 93 are both MLA. A slot is appended at every layer whose zero-indexed position is a multiple of twelve, so the block residual grows from one slot to eight and the final block runs nine layers long.</figcaption>
+        </figure>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Stage</th><th>Layers (0-indexed)</th><th>Count</th><th>Sends 1+K</th><th>Payload @ S=8192</th></tr>
+            </thead>
+            <tbody>
+              <tr><td class="num">0</td><td class="num">0–11</td><td class="num">12</td><td class="num">2</td><td class="num">235 MB</td></tr>
+              <tr><td class="num">1</td><td class="num">12–23</td><td class="num">12</td><td class="num">3</td><td class="num">352 MB</td></tr>
+              <tr><td class="num">2</td><td class="num">24–35</td><td class="num">12</td><td class="num">4</td><td class="num">470 MB</td></tr>
+              <tr><td class="num">3</td><td class="num">36–47</td><td class="num">12</td><td class="num">5</td><td class="num">587 MB</td></tr>
+              <tr><td class="num">4</td><td class="num">48–59</td><td class="num">12</td><td class="num">6</td><td class="num">704 MB</td></tr>
+              <tr><td class="num">5</td><td class="num">60–71</td><td class="num">12</td><td class="num">7</td><td class="num">822 MB</td></tr>
+              <tr><td class="num">6</td><td class="num">72–83</td><td class="num">12</td><td class="num">8</td><td class="num">939 MB</td></tr>
+              <tr><td class="num">7</td><td class="num">84–92</td><td class="num">9</td><td class="wrap">— output mix, final norm, head, loss</td><td class="num">—</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p style="margin-top:14px; color:var(--ink-2); font-size:0.95rem;">Recommended PP=8 layout, boundaries placed just before an append layer because that is where the payload is one slot smaller. In 1F1B the in-flight microbatch count falls as the payload grows, so the per-stage cost stays near 2 GB at S=8192 — significant, and directly divided by context parallelism. Estimates; gate G6 measures them.</p>
+      </section>
+
+      <section id="core">
+        <h2 class="sec">A · Core mechanics</h2>
+        <p class="sec-note">Verified against the pinned fork. Line numbers are at <code>a1b00d4</code>.</p>
+
+        <div class="register">
+
+          <article class="finding" id="A1">
+            <div class="fid">A1</div>
+            <div class="body">
+              <span class="sev sev-crit">Critical</span>
+              <h4>A multi-tensor pipeline payload silently loses its gradient</h4>
+              <p><code>backward_step</code> back-props <em>only</em> <code>output_tensor[0]</code> with <code>output_tensor_grad[0]</code>; the code says so itself — “can handle at most one skip connection”. Extra tensors sent over P2P (the distillation use case) are forward-only.</p>
+              <p>So the plan’s “the schedule carries both <code>prefix_sum</code> and <code>block_residual</code> <em>(and their gradients)</em>” cannot be built as two tensors. The block residual’s gradient would be received and dropped, and training would proceed with a wrong-but-plausible loss. The payload has to be <strong>one packed tensor</strong> — concatenated along the sequence axis so the P2P shape stays a <code>(seq, mbs, hidden)</code> triple — unpacked inside the block.</p>
+              <p class="evidence"><b>megatron/core/pipeline_parallel/schedules.py:451-493</b> · the comment at <b>:459-460</b> · shape plumbing at <b>:2164-2183</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A2">
+            <div class="fid">A2</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>Do not wrap or replace <code>get_forward_backward_func</code></h4>
+              <p>Core already accepts <code>adjust_tensor_shapes_fn(recv, send)</code> in the 1F1B schedule and applies it right after <code>get_tensor_shapes()</code>. It runs <em>per rank</em>, so a stage can legally declare a different receive shape than its send shape — exactly what a monotonically growing block residual needs.</p>
+              <p>What is missing is only the binding: <code>train_step</code> passes the hook only when NVIDIA-modelopt distillation is active. Binding it from our own entry point is a few lines. Re-implementing 1F1B is hundreds, and re-breaks on every IFU.</p>
+              <p class="evidence"><b>schedules.py:2019</b> parameter · <b>:2180-2183</b> application · <b>:1975-2004</b> get_tensor_shapes · <b>training/training.py:1815-1822, 1853</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A3">
+            <div class="fid">A3</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>The same hook is asserted <code>None</code> at PP=1 and under VPP</h4>
+              <p>The binding must therefore be conditional on <code>PP &gt; 1</code>, or every tiny single-GPU test — the whole of CI stage 1 — fails on an assertion the moment AttnRes is enabled. The plan’s VPP descope is correct and now has a line number to cite.</p>
+              <p class="evidence"><b>schedules.py:631-632</b> no-pipelining · <b>:949-950</b> interleaved</p>
+            </div>
+          </article>
+
+          <article class="finding" id="A4">
+            <div class="fid">A4</div>
+            <div class="body">
+              <span class="sev sev-crit">Critical</span>
+              <h4>The AttnRes payload is up to 9× a normal pipeline tensor, and nothing is budgeted for it</h4>
+              <p><code>block_residual</code> is <code>[B·S, K, H]</code> with K growing by one slot every twelve layers. At the last boundary the payload is <code>(1+8)·S·B·H</code>: 117 MB becomes 1.06 GB per in-flight microbatch at S=8192, multiplied by the 1F1B in-flight count.</p>
+              <p>This is a first-order constraint on pipeline depth and the strongest argument for context parallelism, and it appears nowhere in the plan.</p>
+              <p class="evidence"><b>HF Kimi-K3:modeling_kimi_linear.py</b> — <code>KimiLinearModel.forward</code>, <code>_forward_attn_residual</code> · <b>config.json</b> — <code>text_config.attn_res_block_size = 12</code></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A5">
+            <div class="fid">A5</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>Fully overriding <code>GPTModel.__init__</code> is unnecessary and permanent</h4>
+              <p>That constructor spans roughly 190 lines — embedding, four rotary variants, MTP, output layer, weight tying, offloading. Duplicating it means re-porting every upstream change to that surface forever.</p>
+              <p>The actual requirement — instantiate our block, with no transient core block allocated — is met by scoped rebinding of the module attribute <code>gpt_model.TransformerBlock</code> around <code>super().__init__()</code>, which produces no diff under <code>megatron/**</code> and stays guard-clean. Keep the constructor-spy test either way, and add a pin-contract test so an IFU that moves the symbol fails loudly.</p>
+              <p class="evidence"><b>models/gpt/gpt_model.py:34</b> module-level import · <b>:86-274</b> __init__ · <b>:209-216</b> <code>self.decoder = TransformerBlock(...)</code></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A6">
+            <div class="fid">A6</div>
+            <div class="body">
+              <span class="sev sev-crit">Critical</span>
+              <h4>The Muon capacity model is wrong, and every number downstream of it inherits that</h4>
+              <p>The plan reads <code>assert not args.use_distributed_optimizer</code> as “Muon cannot shard optimizer state” and builds a flat 14 B/param model, from which it derives 38.9 TB for 93 layers, a seventeen-node floor, the deletion of the sixteen-node configuration, and the conclusion that no viable full-model recipe exists.</p>
+              <p>But <code>--optimizer dist_muon</code> selects <code>LayerWiseDistributedOptimizer</code>, which shards master weights and optimizer state across the DP and expert-DP ranks by whole-tensor ping-pong assignment, keeps full gradients in the DDP buffer, and all-gathers parameters after the step. Per-GPU it is <code>2 + 4 + (4+4)/DP</code> — <strong>7 B/param at DP=8, not 14</strong> — plus the Adam group for non-2-D parameters.</p>
+              <p>Two qualifications so the finding is not overstated: the 38.9 TB arithmetic <em>is</em> right at DP=1, where there is nothing to shard. What breaks are the conclusions — that no sharded Muon recipe exists, that the flat figure applies at every DP, and that a cluster-total table is the right view at all when expert parallelism already shards 98% of the parameters.</p>
+              <p class="evidence"><b>optimizer/muon.py:373-386</b> · <b>optimizer/layer_wise_optimizer.py:26-40, 105-158</b> · <b>training/training.py:1668</b> · <b>training/arguments.py:1546-1555</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A7">
+            <div class="fid">A7</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>Muon’s parameter split needs an explicit K3 policy</h4>
+              <p>Only 2-D non-embedding weights go to Muon; everything else goes to the scalar optimizer. For K3 that puts <code>A_log</code>, <code>dt_bias</code>, the three <code>[12288,1,4]</code> conv weights, every RMSNorm and both AttnRes <code>Linear(7168,1)</code> projections in the Adam group at 8 B/param, while <code>b_proj</code> lands in Muon. The memory model is two-group, and the per-head work must know the split.</p>
+              <p>Also: <code>is_qkv</code> is detected by the literal name <code>linear_qkv.weight</code> and carries an explicit <code>TODO(deyuf): support MLA</code>. Per-head Muon for MLA and KDA supplies its own head split — a real implementation, not a thin wrapper.</p>
+              <p class="evidence"><b>optimizer/muon.py:283-302</b> split · <b>:274-282</b> is_qkv + TODO · <b>:335-347</b> bf16 master wrapping</p>
+            </div>
+          </article>
+
+          <article class="finding" id="A8">
+            <div class="fid">A8</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>QK-clip already exists in core</h4>
+              <p><code>--qk-clip</code>, <code>--qk-clip-alpha</code>, <code>--qk-clip-threshold</code> and <code>clip_qk(model)</code> ship at the pin, gated on TE ≥ 2.9 and driven by <code>self_attention.clip_qk</code> plus <code>core_attention.current_max_attn_logits</code>. Expose the hook on our MLA module and reuse it. Note the walker traverses <code>model_chunk.module.module.decoder.layers</code> and skips modules without the attribute — KDA layers are skipped for free, but our block must keep a <code>.layers</code> attribute under that exact name.</p>
+              <p class="evidence"><b>optimizer/qk_clip.py:8-45</b> · <b>training/arguments.py:1288-1294</b> · <b>multi_latent_attention.py:1172-1180</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A9">
+            <div class="fid">A9</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>Core MLA has no NoPE mode</h4>
+              <p><code>rope_type</code> accepts only <code>"rope"</code> and <code>"yarn"</code> and raises otherwise, and the MLA forward always applies rotary. K3 asserts <code>use_nope</code>, sets <code>rotary_emb = None</code>, and expands an un-rotated shared <code>k_rot</code> across heads. Its scale is <code>q_head_dim ** -0.5 = 192**-0.5</code>, not <code>128**-0.5</code>, and the output gate multiplies before <code>o_proj</code>. This is a real subclass with an overridden rotary and scale path, not a config flip.</p>
+              <p class="evidence"><b>multi_latent_attention.py:193-215</b> · <b>transformer_config.py:2311</b> · <b>HF Kimi-K3:KimiMLAAttention</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A10">
+            <div class="fid">A10</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>Core LatentMoE is almost what K3 needs, but not quite</h4>
+              <p><code>postprocess()</code> runs <code>fc2_latent_proj(output)</code> with no normalisation, while K3 applies <code>routed_expert_norm = RMSNorm(3584)</code> to the combined expert output <em>before</em> the up-projection. The plan lists LatentMoE under “core consumed as-is”. The fix is small and clean — subclass <code>MoELayer</code>, override <code>postprocess</code> — but it has to be planned. The shared-expert-overlap assertion the plan mentions is real, and TE is genuinely required for the latent projections.</p>
+              <p class="evidence"><b>moe/moe_layer.py:243-274</b> · <b>:418-425</b> · <b>:505-515</b> · <b>HF Kimi-K3:KimiSparseMoeBlock.forward</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A11">
+            <div class="fid">A11</div>
+            <div class="body">
+              <span class="sev sev-low">Low</span>
+              <h4>Latent projections are not tensor-parallel</h4>
+              <p>They are built with <code>parallel_mode="duplicated"</code>, so every TP rank holds a full <code>7168×3584</code> pair per MoE layer — about 4.7 B parameters replicated per TP rank across 92 layers. Worth measuring before choosing TP &gt; 1, and a candidate upstream proposal later. Not a v1 blocker.</p>
+              <p class="evidence"><b>moe/moe_layer.py:252-274</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A12">
+            <div class="fid">A12</div>
+            <div class="body">
+              <span class="sev sev-keep">Confirmed</span>
+              <h4>Confirmed exactly as the plan states — no action</h4>
+              <p><code>core_transformer_config_from_args</code> unconditionally replaces the caller’s <code>config_class</code> with <code>MLATransformerConfig</code> when <code>multi_latent_attention</code> is set, so the plan is right to bypass it. <code>MoESubmodules.router</code> is a builder field defaulting to <code>TopKRouter</code>, so router injection through the submodule spec is real. <code>router_replay.py</code>, <code>muon.py</code>, <code>qk_clip.py</code> and the experimental attention variants all exist, and the spec factory supports only <code>"gated_delta_net"</code>.</p>
+              <p class="evidence"><b>training/arguments.py:1230-1232</b> · <b>moe/moe_layer.py:136-142, 236-240</b> · <b>experimental_attention_variant_module_specs.py:139-140, 285-288</b></p>
+            </div>
+          </article>
+
+          <article class="finding" id="A13">
+            <div class="fid">A13</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>The local (non-TE) MLA path cannot be constructed at all</h4>
+              <p><code>MLASelfAttention</code> unconditionally passes <code>k_channels</code> / <code>v_channels</code> to its <code>core_attention</code> submodule, and core's own <code>DotProductAttention</code> accepts neither and has no <code>**kwargs</code> — so any local MLA spec raises <code>TypeError</code> at construction.</p>
+              <p>Two consequences: CPU-only CI cannot build an MLA-containing model from core specs, so the construction gates run on one GPU with the TE spec; and our own MLA subclass inherits the behaviour, so its <code>core_attention</code> must be TE or must accept those kwargs. Found by hitting it while building the construction gate.</p>
+              <p class="evidence"><b>multi_latent_attention.py:219-226</b> · <b>dot_product_attention.py:42-51</b></p>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <section id="truth">
+        <h2 class="sec">B · Ground truth vs the released model</h2>
+        <p class="sec-note">Read from the released <code>config.json</code> and modeling sources, not from the report.</p>
+
+        <div class="register">
+
+          <article class="finding" id="B1">
+            <div class="fid">B1</div>
+            <div class="body">
+              <span class="sev sev-crit">Critical</span>
+              <h4><code>attn_res_block_size = 12</code> is absent from the ground-truth section</h4>
+              <p>Slots are appended at zero-indexed <code>layer_idx % 12 == 0</code> — layers 0, 12, 24, 36, 48, 60, 72, 84, so eight slots, and the final block runs nine layers. Every pipeline-layout, payload-size and AttnRes test decision depends on this number. The tiny preset’s “block size 2” is fine; the official value was simply never stated.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B2">
+            <div class="fid">B2</div>
+            <div class="body">
+              <span class="sev sev-crit">Critical</span>
+              <h4>The AttnRes math is under-specified for building an oracle</h4>
+              <p>The real mechanism: two mixes per layer — one before attention, one before the MLP — plus one at model output; each mix is a softmax over K+1 slots of a score formed from an RMS-normalised slot dotted with <code>norm.weight * proj.weight</code>; the whole mix runs in fp32; and <code>prefix_sum</code> is reset to <code>None</code> at a block boundary so the residual stream restarts per block. “The block carries <code>prefix_sum</code> and <code>block_residual</code>” is not enough to reproduce that.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B3">
+            <div class="fid">B3</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>KDA has two gates and the plan conflates them</h4>
+              <p><code>f_a_proj(7168→128) → f_b_proj(128→12288)</code> is the low-rank <em>decay</em> gate consumed inside <code>chunk_kda</code> with <code>lower_bound=-5</code>. <code>g_proj(7168→12288)</code> is the full-rank <em>output</em> gate consumed by <code>o_norm = FusedRMSNormGated(128, activation='sigmoid')</code> after the kernel. The plan declares “gate form CLOSED”, describes only the first, then lists “sigmoid output gate” as if it were the same object.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B4">
+            <div class="fid">B4</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>The pinned <code>chunk_kda</code> kwarg list is incomplete</h4>
+              <p>The release also passes <code>use_qk_l2norm_in_kernel=True</code> — so the q/k L2 normalisation the plan describes as a module step happens in-kernel — plus <code>initial_state</code>, <code>output_final_state=True</code> and <code>cu_seqlens</code>. The signature check must assert the full set, and the FP32 oracle must place the normalisation where the kernel does or the two will never agree.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B5">
+            <div class="fid">B5</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4><code>A_log</code>’s shape is contradictory between the plan and the code</h4>
+              <p>Modeling code declares <code>Parameter(log(uniform(1,16)))</code> of shape <code>[num_heads] = [96]</code>; the plan asserted the padded <code>[128]</code> form without evidence. <strong>Settled by reading 512 bytes of the released shard:</strong> it is <code>F32 [128]</code> with <code>A_log[96:]</code> exactly zero. The converter now asserts, then trims on import and zero-pads on export, instead of guessing.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B6">
+            <div class="fid">B6</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>Shared experts run on the 7168-wide hidden, not on the latent</h4>
+              <p>Only the routed experts run at 3584. Per-layer shared-expert parameters are <code>3 × 7168 × 6144 = 132.1 M</code>, not <code>3 × 3584 × 6144 = 66.1 M</code>. The plan states the intermediate size correctly but never the input width; getting it wrong moves a 12 B slice of the model and breaks checkpoint load.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B7">
+            <div class="fid">B7</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span> <span class="sev sev-keep">Confirmed · G2</span>
+              <h4>The MLA LoRA norms do not use <code>rms_norm_eps</code></h4>
+              <p><code>q_a_layernorm</code> and <code>kv_a_layernorm</code> are constructed without an <code>eps</code> argument, so they take <code>KimiRMSNorm</code>’s class default. If that default is 1e-6, the plan’s blanket “RMSNorm ε = 1e-5” introduces a parity error on a 1536-wide norm that no kernel tolerance will ever explain.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B8">
+            <div class="fid">B8</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>The release is multimodal and the text config is nested</h4>
+              <p><code>KimiK3ForConditionalGeneration</code>: the text config sits under <code>text_config</code>, and the shards carry <code>vision_tower.*</code> and <code>mm_projector.*</code> alongside the language model. The mapping spec must strip the nesting and name the vision prefixes as <em>explicitly skipped</em> — the plan’s “zero unmapped tensors” gate fails otherwise — and account for <code>media_placeholder_token_id = 163605</code>.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B9">
+            <div class="fid">B9</div>
+            <div class="body">
+              <span class="sev sev-low">Low</span>
+              <h4>Router details worth writing down verbatim</h4>
+              <p>fp32 logits → sigmoid → add <code>e_score_correction_bias</code> <em>for selection only</em> → top-16 → weights gathered from the <em>unbiased</em> scores → renormalise → scale by 1.0, with <code>num_expert_group = topk_group = 1</code> so no group routing happens despite <code>use_grouped_topk: true</code>. This maps cleanly onto core’s <code>TopKRouter</code>, which is good news worth recording.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="B10">
+            <div class="fid">B10</div>
+            <div class="body">
+              <span class="sev sev-low">Low</span>
+              <h4>Two “full-rank gate” flags, two different modules</h4>
+              <p><code>use_full_rank_gate</code> is a KDA field inside <code>linear_attn_config</code>; the plan attributes “full-rank sigmoid output gate” to MLA. MLA’s gate happens to be full-rank too, for an unrelated reason (<code>mla_use_output_gate</code>). A test written from the plan’s wording would check the wrong flag.</p>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <section id="missing">
+        <h2 class="sec">C · Missing engineering content</h2>
+        <p class="sec-note">Not wrong — absent.</p>
+
+        <div class="register">
+
+          <article class="finding" id="C1">
+            <div class="fid">C1</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>There is no performance work in the plan at all</h4>
+              <p>No baseline trace, no bottleneck report, no kernel budget, no perf gate. K3 has a large and entirely predictable non-GEMM bottleneck: the AttnRes mixer materialises <code>(T, K+1, H)</code> in fp32 twice per layer — about 120 GB of reads per forward at production shape — which a fused kernel removes. That deserves a phase with a trace, a ranked list and a budget.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="C2">
+            <div class="fid">C2</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>No process scaffolding</h4>
+              <p>No status tracker, no gate numbering, no per-phase close-out convention, no correctness ratchet, no banned-warning ratchet, no rules file. For a project that will run for months across IFUs, that is the difference between a plan and a plan people can resume.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="C3">
+            <div class="fid">C3</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>The CI ladder does not test the core mechanisms we ride</h4>
+              <p>Five of them — <code>adjust_tensor_shapes_fn</code>, <code>MoESubmodules.router</code>, <code>gpt_model.TransformerBlock</code>, <code>clip_qk</code>, <code>LayerWiseDistributedOptimizer</code> — are what an IFU breaks first, and it breaks them silently. They need a tripwire test in the cheapest CI stage.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="C4">
+            <div class="fid">C4</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>No parallelism layout math</h4>
+              <p>93 layers is not divisible by any plausible PP degree, AttnRes wants boundaries aligned to multiples of twelve, and context parallelism is the natural mitigation for the payload cost. None of it is worked out anywhere in the plan.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="C5">
+            <div class="fid">C5</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>The twin-run protocol has no owner</h4>
+              <p>It is described but not owned by a tool. The noise band, the comparison statistic and the dataset hash need a committed script, or the protocol drifts between runs and the comparison stops meaning anything.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="C6">
+            <div class="fid">C6</div>
+            <div class="body">
+              <span class="sev sev-low">Low</span>
+              <h4>“Matches the released model” needs a caveat wherever it appears</h4>
+              <p>After <code>dequantize_on_import</code>, a BF16 continued-pretrain run starts from MXFP4-quantised-then-dequantised weights — the original BF16 weights were never released. The plan’s byte-exact-roundtrip caveat is right; the semantic one is missing.</p>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <section id="stale">
+        <h2 class="sec">D · External dependencies</h2>
+        <p class="sec-note">Stated in the plan as verified facts. Two were not reproducible at the pins available here; two more came out of actually running the dependency; one is mine, and wrong.</p>
+
+        <div class="register">
+
+          <article class="finding" id="D1">
+            <div class="fid">D1</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>The AITER K3 assets could not be found</h4>
+              <p>The AITER checkout in this workspace (<code>f299f579a</code>, 2026-04-03) contains neither <code>configs/model_configs/kimik3_a8w4_tuned_fmoe.csv</code> nor <code>aiter/ops/opus/</code> — the directory does not exist — and no <code>Situv2</code> match. They may well exist on a newer <code>main</code>. The point is that Phase 0 must fail closed on their absence rather than discover it in the QAT phase.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="D2">
+            <div class="fid">D2</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>The TransformerEngine MXFP4 path does not match the installed TE</h4>
+              <p>In <code>2.12.0.dev0+40434cf6</code> the <code>MXFP4BlockScaling</code> and <code>MXFP8BlockScaling</code> recipes exist, and <code>MXFP4Quantizer</code> lives at <code>pytorch/tensor/mxfp4_tensor.py:40</code> — but <code>pytorch/custom_recipes/</code> holds <code>quantization_nvfp4.py</code>, not <code>quantization_mxfp4.py</code>, and no NumPy reference implementation is present. The plan’s acceptance criterion “exact vs TE’s NumPy reference” has no oracle as written; write the OCP-MX reference and cross-check the round-trip instead.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="D3">
+            <div class="fid">D3</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span> <span class="sev sev-keep">Superseded</span>
+              <h4><code>fla</code> is not installed</h4>
+              <p>It is now, from git. What that surfaced is below: the released call works, the backward does not compile, and the published wheel is unusable.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="D5">
+            <div class="fid">D5</div>
+            <div class="body">
+              <span class="sev sev-low">Retracted</span>
+              <h4>“<s>fla silently ignores the released call's arguments</s>” — withdrawn</h4>
+              <p>I claimed <code>chunk_kda</code> silently drops <code>A_log</code>, <code>dt_bias</code> and <code>transpose_state_layout</code>, since they are absent from its signature while it ends in <code>**kwargs</code>. That was read off the signature and never executed. fla pops <code>transpose_state_layout</code> as an explicit alias, reads <code>A_log</code> / <code>dt_bias</code> from kwargs when the in-kernel gate is on, and <em>raises</em> when <code>A_log</code> is missing without a lower bound. Perturbing <code>A_log</code> changes the output.</p>
+              <p>The proposed remedy was wrong in the same way: a signature-name check would have failed on a working library. The gate is functional instead — run the released call, compare against the FP32 oracle.</p>
+              <p class="evidence"><b>fla/ops/kda/chunk.py</b> — <code>kwargs.pop('transpose_state_layout')</code>, <code>kwargs.get("A_log")</code> · verified on MI355X, max|Δ| = 0.079</p>
+            </div>
+          </article>
+
+          <article class="finding" id="D6">
+            <div class="fid">D6</div>
+            <div class="body">
+              <span class="sev sev-high">High</span>
+              <h4>fla's KDA backward does not compile on gfx950</h4>
+              <p>The forward runs. The backward dies inside Triton's AMD backend — <code>fla/ops/kda/chunk_intra.py:395</code>, <code>TritonAMDGPUPipeline</code> MLIR pass, <code>RuntimeError: PassManager::run failed</code>, triton 3.6.0 — reached through <code>chunk_kda_bwd → chunk_kda_bwd_intra</code>. So the fast path gives inference-shaped KDA and no training KDA on this stack.</p>
+              <p>This is the plan's existing fla-backward risk arriving as a compiler failure rather than a numerical one, which is the loud case. It does not block the module phases: the backend stays eager, and the FP32 oracle was always the contract.</p>
+              <p class="evidence">Unblocks, cheapest first: another triton build · prune the failing autotune config · upstream the reproducer · our own backward</p>
+            </div>
+          </article>
+
+          <article class="finding" id="D7">
+            <div class="fid">D7</div>
+            <div class="body">
+              <span class="sev sev-med">Medium</span>
+              <h4>The published fla wheel is unusable</h4>
+              <p><code>flash-linear-attention==0.5.2</code> ships only <code>fla/layers</code> and <code>fla/models</code> — 154 files, no <code>fla/ops</code> at all — so its own <code>from fla.ops.kda import chunk_kda</code> cannot resolve. Pin git <code>5e02dd3</code>, not PyPI.</p>
+            </div>
+          </article>
+
+          <article class="finding" id="D4">
+            <div class="fid">D4</div>
+            <div class="body">
+              <span class="sev sev-low">Low</span>
+              <h4>The upstream watch list was not re-verified</h4>
+              <p>Megatron KDA PR #5769, AttnRes issue #4016 / PR #4398, Bridge #4910, fla KCP #691. Keep them as watch items; never plan a phase around an unmerged PR.</p>
+            </div>
+          </article>
+
+        </div>
+      </section>
+
+      <section id="keeps">
+        <h2 class="sec">E · Kept as written</h2>
+        <p class="sec-note">Verified and carried into the replacement plan unchanged. Do not relitigate these.</p>
+        <ul class="keeps">
+          <li><span>E1</span>Fork-local <code>kimi_k3/</code> with a guard and a two-file allowlist — the right call for a repo that takes regular IFUs.</li>
+          <li><span>E2</span>Bypassing <code>core_transformer_config_from_args()</code>: the substitution is real and would silently discard the config subclass.</li>
+          <li><span>E3</span>Router injection through the MoE submodule spec — real, verified, clean.</li>
+          <li><span>E4</span>The VPP descope, which matches an explicit assertion in core.</li>
+          <li><span>E5</span>Component-specific tolerances from a measured eager-fp32-vs-bf16 floor, three statistics, rationale in the docstring.</li>
+          <li><span>E6</span><code>gradcheck</code> only for true-autograd modules and never for STE; STE validated against an explicit fake-quant reference.</li>
+          <li><span>E7</span>Tiny-preset-by-default, with official presets validated analytically rather than instantiated.</li>
+          <li><span>E8</span>Escalation policy: no core edit without an upstream-shaped patch, an issue draft and sign-off.</li>
+          <li><span>E9</span>Checkpoint parity against a deliberately truncated HF reference — the only honest way to anchor a four-layer slice.</li>
+          <li><span>E10</span>The QAT reading: a8w4 forward with a high-precision STE backward, no Hadamard because SiTU soft-caps, RNE by default, no a8w4 dgrad.</li>
+          <li><span>E11</span>Provenance <em>plus</em> a recorded license conclusion for every ported reference file.</li>
+        </ul>
+      </section>
+
+      <section id="next">
+        <h2 class="sec">F · Consequences for sequencing</h2>
+        <p class="sec-note">The findings change the gated feasibility phase in four ways. The rest of the phase structure survives.</p>
+        <ol class="steps">
+          <li>
+            <div>
+              <strong>Measure <code>dist_muon</code>, per group, against DP</strong>
+              <p>Not a single scalar. The optimizer-memory gate produces a bytes-per-parameter curve for adam, precision-aware adam with the distributed optimizer, muon and dist_muon, split by parameter group.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Add a payload-sizing gate before the pipeline design freezes</strong>
+              <p>Packed payload bytes per stage boundary and the fp32 mixer temporaries, at tiny and at production width.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Add an external-asset gate that fails closed</strong>
+              <p>The AITER K3 kernels, the TE quantizer entry point and the <code>fla</code> signature, all checked at the pinned SHAs before any porting starts.</p>
+            </div>
+          </li>
+          <li>
+            <div>
+              <strong>Re-specify the PP prototype around the packed tensor</strong>
+              <p>Single packed payload plus <code>adjust_tensor_shapes_fn</code>, with a gradient-flow assertion that goes red if a payload gradient is ever dropped — validated by temporarily reverting to the two-tensor design.</p>
+            </div>
+          </li>
+        </ol>
+      </section>
+
+      <section id="docs">
+        <h2 class="sec">The plan that replaces it</h2>
+        <p class="sec-note">Written into <code>kimi_k3/develop/</code>, following the DeepSeek-V4 house style: thirteen phases (P0–P12), gates G1–G47, a status tracker and a rules file.</p>
+        <div class="docset">
+          <dl>
+            <dt>architecture/01-kimi-k3-architecture-deep-dive.md</dt>
+            <dd>Ground truth read from the release, with a per-component parameter budget summing to 2.779 T and the AttnRes math in full.</dd>
+            <dt>plan-0/00-review-findings.md</dt>
+            <dd>This register, with every citation.</dd>
+            <dt>plan-0/01-roadmap.md</dt>
+            <dd>Phases, dependency graph, milestones, risks, scope.</dd>
+            <dt>plan-0/02-target-architecture.md</dt>
+            <dd>Module map, config mapping, the packing protocol, the state-dict table.</dd>
+            <dt>plan-0/03-code-layout.md · 04-phase-details.md · 05-test-strategy.md</dt>
+            <dd>File landing list, per-phase tasks with exit criteria, and gates G1–G47 with the CI ladder.</dd>
+            <dt>plan-0/06-capacity-and-parallelism.md</dt>
+            <dd>Corrected optimizer model, AttnRes payload cost, and the PP=8 layout of 12×7+9.</dd>
+            <dt>rules/rule.md · progress/status.md · notes/</dt>
+            <dd>Working rules, the task tracker, and the transport decision record.</dd>
+          </dl>
+        </div>
+      </section>
+
+      <footer>
+        <span>Review dated 2026-08-27</span>
+        <span>34 findings · 11 confirmations · 1 retraction</span>
+        <span>Verified against a1b00d4, the released checkpoint, and gates G2–G7 on 8× MI355X</span>
+      </footer>
+
+    </main>
+  </div>
+</div>
+
+<script>
+  (function () {
+    var strip = document.getElementById("strip");
+    if (!strip) return;
+    var mla = new Set([4,8,12,16,20,24,28,32,36,40,44,48,52,56,60,64,68,72,76,80,84,88,92,93]);
+    var frag = document.createDocumentFragment();
+    for (var n = 1; n <= 93; n++) {
+      var tick = document.createElement("i");
+      var cls = mla.has(n) ? "mla" : "";
+      if ((n - 1) % 12 === 0) cls += (cls ? " " : "") + "slot";
+      if (cls) tick.className = cls;
+      tick.title = "Layer " + n + (mla.has(n) ? " · gated MLA" : " · KDA") + ((n - 1) % 12 === 0 ? " · slot appended" : "");
+      frag.appendChild(tick);
+    }
+    strip.appendChild(frag);
+  })();
+</script>

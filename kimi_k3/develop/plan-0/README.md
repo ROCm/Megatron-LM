@@ -8,7 +8,7 @@ This directory is the **development plan** for adding Kimi-K3 training support t
 
 | File | Description |
 |---|---|
-| [`00-review-findings.md`](00-review-findings.md) | **Review of the incoming "rev 2" plan**, verified against the pinned repo and the released model. Read this to understand why plan-0 differs. |
+| [`00-review-findings.md`](00-review-findings.md) | **Review of the incoming "rev 2" plan**, verified against the pinned repo and the released model. Read this to understand why plan-0 differs. Rendered, share-ready version: [`00-review-findings.html`](00-review-findings.html) — also published at `claude.ai/code/artifact/ed6abf5c-19ae-4f27-871f-b9efb73c7fc4` (private until shared). |
 | [`01-roadmap.md`](01-roadmap.md) | **Roadmap.** Principles, 13 phases, dependency graph, milestones, top risks, scope. Start here. |
 | [`02-target-architecture.md`](02-target-architecture.md) | **Target design.** K3 modules → Megatron parents, config mapping, the AttnRes pipeline protocol, state-dict mapping. |
 | [`03-code-layout.md`](03-code-layout.md) | **Landing list.** Every file, its owner phase, and the interface contracts. |
