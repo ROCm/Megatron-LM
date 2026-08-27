@@ -4,9 +4,9 @@
 > compatibility conclusion for each (rule R2.2 / R7.2). A pin bump is its own
 > commit and re-runs G1–G3 (rule R10.3).
 >
-> Status: **G1 is NOT green** — `fla` is pinned and its forward verified, but its
-> KDA backward does not compile on gfx950; see §2 and
-> `develop/notes/2026-08-27-fla-signature-check.md`.
+> Status: **G1 GREEN** — all five pins resolved, licenses recorded, and the
+> released `chunk_kda` call verified functionally (forward *and* backward) after
+> the triton 3.6.0 → 3.7.1 upgrade. See §2.
 > Last updated: 2026-08-27.
 
 ## 1. Pins
@@ -16,38 +16,36 @@
 | **ROCm/Megatron-LM** | `a1b00d4259e92dc4a07a0be2c24088fe827f4b6e` (`rocm_dev`) | local checkout; the branch `dev/wen/kimi-k3` is cut from it | yes — all pin contracts assert against it (`kimi_k3/model/core_patch.py`) |
 | **ROCm/TransformerEngine** | `2.12.0.dev0+40434cf6` (installed wheel) | version string carries the source SHA `40434cf6` | yes — `MXFP4BlockScaling`, `MXFP8BlockScaling`, `MXFP4Quantizer` located |
 | **AITER** | `e9e1278b1` (origin/main, 2026-08-27) | git; the workspace checkout was 5 months stale | **yes** — `kimik3_a8w4_tuned_fmoe.csv`, `ops/opus/moe_stage{1,2}_a8w4.py` and `ActivationType.Situv2` all present |
-| **fla** (flash-linear-attention) | git `5e02dd3` (0.6.0) — **forward OK, backward blocked** | git clone; the PyPI wheel ships no `fla/ops` | forward verified by running the released call; backward fails to compile on gfx950 (see §2) |
+| **fla** (flash-linear-attention) | git `5e02dd3` (0.6.0) | git clone; the PyPI wheel ships no `fla/ops` | **forward and backward both verified** on triton 3.7.1 by `tests/test_k3_p0_fla_contract.py` |
 | **HF moonshotai/Kimi-K3** | `a590ce090cb049c93a33dfe8c208ec652aa20503` (lastModified 2026-08-20) | HF model API | yes — config, modeling sources and shard headers read at this revision |
 
-## 2. `fla` — usable for forward, blocked for backward (G1 red)
+## 2. `fla` — resolved (G1 green)
 
-**Correction:** an earlier version of this section claimed the released
-`chunk_kda` call was silently mis-handled by `fla`. That was wrong; see
-`develop/notes/2026-08-27-fla-signature-check.md` §1 for the retraction.
+Two corrections led here, both recorded in
+`develop/notes/2026-08-27-fla-signature-check.md`:
 
-`fla` git `main` **accepts the released Kimi-K3 call exactly as written**:
-`A_log` and `dt_bias` are read from `**kwargs` when `use_gate_in_kernel=True`
-(and the function raises if `A_log` is missing without a `lower_bound`), and
-`transpose_state_layout` is an accepted alias for `state_v_first`. Verified by
-running it: forward produces correct-shaped output and perturbing `A_log`
-changes the result.
+1. The released Kimi-K3 `chunk_kda` call **is accepted as written**. `A_log` and
+   `dt_bias` are read from `**kwargs` when `use_gate_in_kernel=True`, the function
+   raises if `A_log` is missing without a `lower_bound`, and
+   `transpose_state_layout` is an accepted alias for `state_v_first`. The earlier
+   "silently ignored" reading was inferred from the signature and is retracted.
+2. The real blocker was **Triton**, not fla and not torch: `chunk_kda_bwd_intra`
+   failed to compile on gfx950 under triton 3.6.0. **Upgrading Triton alone to
+   3.7.1 fixes it** — forward and backward both run, with finite non-zero
+   gradients at `(T,H,K) = (128,4,64)` and `(2048,8,128)`. No torch change was
+   needed, which matters: TE, apex and AITER are all built against this torch.
 
-What is actually blocking:
+Pin: **git `5e02dd3`** (0.6.0). Install from git — the PyPI wheel ships only
+`fla/layers` and `fla/models`, no `fla/ops`.
 
-1. **The backward does not compile on gfx950.** `chunk_kda_bwd_intra` fails in
-   Triton's AMD backend (`fla/ops/kda/chunk_intra.py:395`, `TritonAMDGPUPipeline`,
-   `RuntimeError: PassManager::run failed`) with triton 3.6.0. Forward-only is
-   not enough to train.
-2. **The PyPI wheel is partial.** `flash-linear-attention==0.5.2` ships no
-   `fla/ops`, so install from git.
+`k3_kda_backend` nevertheless stays `eager` by default (rule R5.3): compiling is
+not the same as being *correct*, and the fla KDA-backward bug history (#807,
+#785) is why the FP32 oracle is permanent. G15 flips the default, at production
+shapes, against the oracle.
 
-Pin: **git `5e02dd3`** (version string 0.6.0), forward-verified, backward blocked.
-`k3_kda_backend` stays `eager` until the backward compiles and G15 is green
-(rule R5.3) — which does not block P2–P6, since the FP32 oracle is the contract.
-
-G1's check is **functional**: run the released call and compare against the
-oracle. A signature-based check would have failed on a working library, because
-`A_log` legitimately arrives through `**kwargs`.
+G1's check is **functional, never signature-based**
+(`tests/test_k3_p0_fla_contract.py`): a name-based check would have failed on a
+working library.
 
 ## 3. AITER — resolved
 
@@ -86,7 +84,7 @@ and built the numerics contract the kernels must match
 | Component | Version |
 |---|---|
 | torch | 2.10.0+git94c6e04 |
-| triton | 3.6.0 |
+| triton | **3.7.1** (upstream PyPI; 3.6.0 could not compile fla's KDA backward) |
 | transformer_engine | 2.12.0.dev0+40434cf6 |
 | GPUs | 8 × AMD Instinct MI355X (gfx950) |
 | fla | 0.6.0 (git `5e02dd3`), installed from source |

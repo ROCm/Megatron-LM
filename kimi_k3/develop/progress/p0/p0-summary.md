@@ -1,8 +1,6 @@
-# P0 — Feasibility gates (COMPLETE except G1)
+# P0 — Feasibility gates (COMPLETE)
 
-> Seven of eight gates are green. G1 is red on an external blocker with a
-> documented workaround, so **P0's exit condition is met for every downstream
-> phase**: nothing P1–P6 needs is gated on it. Format per rule R3.5.
+> **All eight gates are green.** Nothing is porting-blocked. Format per rule R3.5.
 
 ## 1. Objective
 
@@ -13,8 +11,9 @@ the optimizer memory model — plus close the open ground-truth questions.
 **Outcome:** all four are proven, three of them by measurement rather than
 argument. Two of the plan's own claims turned out to be stale rather than wrong
 (AITER), one of mine was wrong and is retracted (fla), and the one genuine
-blocker (fla's KDA backward not compiling on gfx950) has an in-tree workaround
-that was always the plan's default anyway.
+blocker (fla's KDA backward not compiling on gfx950) turned out to be a Triton
+version, fixed by upgrading Triton alone — no torch change, which matters because
+TE, apex and AITER are all built against this torch.
 
 ## 2. What changed
 
@@ -37,7 +36,7 @@ that was always the plan's default anyway.
 
 | Gate | Status | Numbers |
 |---|---|---|
-| **G1** — pins + licenses + fla | **RED** | All 5 pins + licenses recorded. fla pinned at git `5e02dd3`; the released `chunk_kda` call is accepted as written (the earlier "silently ignored" reading is **retracted**, D5). Blocker is the KDA **backward**, which fails to compile on gfx950 (D6); the PyPI wheel ships no `fla/ops` (D7) |
+| **G1** — pins + licenses + fla | **GREEN** | All 5 pins + licenses. The released `chunk_kda` call works as written (D5 retracted); the KDA backward was blocked by **Triton 3.6.0**, fixed by upgrading Triton alone to 3.7.1 (D6 resolved) — no torch change |
 | **G2** — release artefact audit | **GREEN** | 4/4 open items closed with evidence; fixture committed |
 | **G3** — config on the real inheritance path | **GREEN** | 9 tests |
 | **G4** — model construction, no transient core block | **GREEN** | 4 tests; constructor spy sees 0 core blocks; meta and cuda both build |
@@ -183,5 +182,5 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 
 | **c07ef0507** | P0 T0.8: MXFP4 quantiser, SiTU, one-expert QAT prototype, AITER/TE asset verification (G8 green) |
 
-**P0 closes here** with G2–G8 green and G1 red on an external blocker. Next: P1
-(scaffold, guard, CI wiring), then P2.
+**P0 closes here with all eight gates green.** Next: P1 (scaffold, guard, CI
+wiring), then P2.
