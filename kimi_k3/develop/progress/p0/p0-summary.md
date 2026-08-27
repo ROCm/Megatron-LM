@@ -181,4 +181,7 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 
 | **d6c51b7f1** | P0 T0.7: PP=2 packed-payload transport, bitwise exact (G7 green) |
 
-T0.8 continues in this phase and will extend this summary.
+| **c07ef0507** | P0 T0.8: MXFP4 quantiser, SiTU, one-expert QAT prototype, AITER/TE asset verification (G8 green) |
+
+**P0 closes here** with G2–G8 green and G1 red on an external blocker. Next: P1
+(scaffold, guard, CI wiring), then P2.
