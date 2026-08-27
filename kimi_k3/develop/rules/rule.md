@@ -134,9 +134,13 @@ parametrisations are marked `pytest.mark.slow` and run only in the nightly
 8-GPU job. **Never instantiate an official preset (4L/8L/93L) in a default-tier
 test** — 8L official is ≈215 B params and 93L is ≈2.78 T.
 
-### R4.3 — Official presets are validated analytically
-Official presets are checked by meta-device construction plus analytic parameter
-counting against the per-component table in
+### R4.3 — Official presets are validated analytically, and cannot be constructed
+**Amended 2026-08-27 (P2).** Meta device does *not* make construction free:
+Megatron and TE modules place parameters on `torch.cuda.current_device()`
+regardless of an ambient device context, so "build it on meta and count" would
+really allocate 2.78 T parameters at 93 L. `build_k3_model` refuses non-tiny
+presets unless the caller passes `allow_official=True`. Official presets are
+checked by analytic parameter counting alone, against the per-component table in
 [`../architecture/01-kimi-k3-architecture-deep-dive.md`](../architecture/01-kimi-k3-architecture-deep-dive.md),
 never by allocating weights.
 

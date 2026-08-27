@@ -35,11 +35,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T2.1 Final config + builder + args, full release→config mapping | | | |
-| [ ] | T2.2 Presets tiny / 4L / 8L / 93L | | | officials are meta-device only |
-| [ ] | T2.3 Layer specs (KDA vs MLA, dense vs MoE) | | | `+1` indexing from the literal list |
-| [ ] | T2.4 `core_patch.py` + `k3_gpt_model.py` | | | scoped rebinding, not a full `__init__` override |
-| [ ] | T2.5 `tools/mem_budget.py` analytic table | | | oracle for G13 |
+| [x] | T2.1 Final config + builder + args | TBD-p2 | 2026-08-27 | `config/arguments.py` with `add_kimi_k3_args`; every `k3_*` config field settable from the CLI (asserted); a preset **fills gaps without overruling explicit flags** (two-pass parse). Defaults are the released values, asserted field by field |
+| [x] | T2.2 Presets tiny / 4L / 8L / 93L | TBD-p2 | 2026-08-27 | officials are **analytic only** — meta device does not prevent allocation (finding A14), so `build_k3_model` refuses them without `allow_official=True` |
+| [x] | T2.3 Layer specs (KDA vs MLA, dense vs MoE) | TBD-p2 | 2026-08-27 | **G11 GREEN.** `specs/layer_specs.py` splits the *plan* (pure config, CPU-testable) from the spec; core takes heterogeneous `layer_specs` natively. 93L: 69 KDA / 24 MLA matching the literal list, layer 0 dense at 33792, tail `M M`, slots at 0/12/…/84. Local plan slices by PP stage |
+| [x] | T2.4 `core_patch.py` + `k3_gpt_model.py` + `model/build.py` | TBD-p2 | 2026-08-27 | **G12 GREEN.** `build_k3_model(preset)` is the single assembly path; layers are heterogeneous as the plan says; config type survives; AttnRes mixers present per layer + at the output |
+| [x] | T2.5 `tools/mem_budget.py` analytic table | TBD-p2 | 2026-08-27 | **G13 GREEN.** 4L 94.0 B / 8L 214.7 B / 93L 2.779 T, each within 2 % of target, and the per-component subtotals cross-checked against the layer plan |
 
 ## P3 — KDA (G14–G16)
 

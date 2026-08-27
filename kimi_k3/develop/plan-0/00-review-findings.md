@@ -48,6 +48,8 @@ those five.
 
 | **A13** | **HIGH** | **The local (non-TE) MLA path cannot be constructed at all at the pin.** `MLASelfAttention` unconditionally passes `k_channels` / `v_channels` to its `core_attention` submodule, and core's own `DotProductAttention` accepts neither and has no `**kwargs`, so any local MLA spec raises `TypeError` at construction. Consequences: (a) CPU-only CI cannot build an MLA-containing model from core specs, so the P0/P2 construction gates run on 1 GPU with the TE spec; (b) `K3GatedMLA(MLASelfAttention)` inherits the behaviour, so its `core_attention` submodule must be TE or must accept those kwargs. Found while building gate G4. | `megatron/core/transformer/multi_latent_attention.py:219-226`, `megatron/core/transformer/dot_product_attention.py:42-51` |
 
+| **A14** | **MED — found in P2** | **Meta-device construction does not avoid allocation.** Megatron and TE modules place parameters on `torch.cuda.current_device()` explicitly, ignoring an ambient `torch.device("meta")` context — on the tiny preset, 93 of 114 parameters land on the GPU anyway (only our own AttnRes mixers honour it). The incoming plan's "official presets are validated by meta-device construction + analytic parameter counting" is therefore half unavailable: attempting it at 93 L would try to materialise 2.78 T parameters. The analytic table is the whole answer, and `build_k3_model` now **refuses** to construct a non-tiny preset without an explicit `allow_official=True`. | observed while building G13; `kimi_k3/tests/test_k3_p2_construction.py` |
+
 ---
 
 ## B. Ground truth vs the released model

@@ -65,6 +65,10 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     k3_routed_expert_hidden_size: int = 3584
     """Latent width the routed experts run at; mirrored into moe_latent_size."""
 
+    k3_first_k_dense_replace: int = 1
+    """Leading layers that use a dense FFN (`ffn_hidden_size`) instead of MoE.
+    The release sets 1: layer 1 is KDA + dense FFN at intermediate 33792."""
+
     k3_latent_moe_use_norm: bool = True
     """RMSNorm(latent) applied to the combined expert output BEFORE the
     up-projection. Core's MoELayer.postprocess has no such norm, so K3MoELayer
