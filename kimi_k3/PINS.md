@@ -4,8 +4,9 @@
 > compatibility conclusion for each (rule R2.2 / R7.2). A pin bump is its own
 > commit and re-runs G1–G3 (rule R10.3).
 >
-> Status: **G1 is NOT green** — the `fla` pin is unresolved and blocking; see
-> §2 and `develop/notes/2026-08-27-fla-signature-check.md`.
+> Status: **G1 is NOT green** — `fla` is pinned and its forward verified, but its
+> KDA backward does not compile on gfx950; see §2 and
+> `develop/notes/2026-08-27-fla-signature-check.md`.
 > Last updated: 2026-08-27.
 
 ## 1. Pins
@@ -15,34 +16,38 @@
 | **ROCm/Megatron-LM** | `a1b00d4259e92dc4a07a0be2c24088fe827f4b6e` (`rocm_dev`) | local checkout; the branch `dev/wen/kimi-k3` is cut from it | yes — all pin contracts assert against it (`kimi_k3/model/core_patch.py`) |
 | **ROCm/TransformerEngine** | `2.12.0.dev0+40434cf6` (installed wheel) | version string carries the source SHA `40434cf6` | yes — `MXFP4BlockScaling`, `MXFP8BlockScaling`, `MXFP4Quantizer` located |
 | **AITER** | `f299f579a` (2026-04-03) — **stale, must be bumped** | local checkout at `/workspace/aiter` | **no** — the K3 a8w4 assets are absent at this SHA (see §3) |
-| **fla** (flash-linear-attention) | **UNRESOLVED — blocking** | PyPI 0.5.2 and GitHub `main` both mismatch the released call | **no** — see §2 |
+| **fla** (flash-linear-attention) | git `5e02dd3` (0.6.0) — **forward OK, backward blocked** | git clone; the PyPI wheel ships no `fla/ops` | forward verified by running the released call; backward fails to compile on gfx950 (see §2) |
 | **HF moonshotai/Kimi-K3** | `a590ce090cb049c93a33dfe8c208ec652aa20503` (lastModified 2026-08-20) | HF model API | yes — config, modeling sources and shard headers read at this revision |
 
-## 2. `fla` — why the pin is unresolved (G1 red)
+## 2. `fla` — usable for forward, blocked for backward (G1 red)
 
-The released `modeling_kimi_linear.py` calls:
+**Correction:** an earlier version of this section claimed the released
+`chunk_kda` call was silently mis-handled by `fla`. That was wrong; see
+`develop/notes/2026-08-27-fla-signature-check.md` §1 for the retraction.
 
-```python
-chunk_kda(q, k, v, g, beta,
-          A_log=self.A_log, dt_bias=self.dt_bias,
-          use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
-          use_beta_sigmoid_in_kernel=True, safe_gate=..., lower_bound=-5.0,
-          transpose_state_layout=True, cu_seqlens=cu_seqlens)
-```
+`fla` git `main` **accepts the released Kimi-K3 call exactly as written**:
+`A_log` and `dt_bias` are read from `**kwargs` when `use_gate_in_kernel=True`
+(and the function raises if `A_log` is missing without a `lower_bound`), and
+`transpose_state_layout` is an accepted alias for `state_v_first`. Verified by
+running it: forward produces correct-shaped output and perturbing `A_log`
+changes the result.
 
-`chunk_kda` on fla `main` accepts **neither `A_log` nor `dt_bias`**, and names the
-state-layout flag **`state_v_first`**, not `transpose_state_layout`. Its signature
-ends in `**kwargs`, so those three arguments are **silently swallowed** instead of
-raising — a call that looks correct would run with the decay parameters ignored.
+What is actually blocking:
 
-Consequences, in order:
+1. **The backward does not compile on gfx950.** `chunk_kda_bwd_intra` fails in
+   Triton's AMD backend (`fla/ops/kda/chunk_intra.py:395`, `TritonAMDGPUPipeline`,
+   `RuntimeError: PassManager::run failed`) with triton 3.6.0. Forward-only is
+   not enough to train.
+2. **The PyPI wheel is partial.** `flash-linear-attention==0.5.2` ships no
+   `fla/ops`, so install from git.
 
-1. The pin must be the revision (or fork) the release was built against — "latest"
-   is wrong and, worse, wrong *quietly*.
-2. `tools/check_fla_signature.py` must assert **by parameter name** against
-   `inspect.signature`, never by "the call did not raise".
-3. Until the pin is resolved, `k3_kda_backend` stays `eager` (rule R5.3) and the
-   FP32 oracle is the only KDA path. This does not block P2–P6.
+Pin: **git `5e02dd3`** (version string 0.6.0), forward-verified, backward blocked.
+`k3_kda_backend` stays `eager` until the backward compiles and G15 is green
+(rule R5.3) — which does not block P2–P6, since the FP32 oracle is the contract.
+
+G1's check is **functional**: run the released call and compare against the
+oracle. A signature-based check would have failed on a working library, because
+`A_log` legitimately arrives through `**kwargs`.
 
 ## 3. AITER — assets not present at the local SHA
 
@@ -73,4 +78,4 @@ descoped (review finding D1).
 | triton | 3.6.0 |
 | transformer_engine | 2.12.0.dev0+40434cf6 |
 | GPUs | 8 × AMD Instinct MI355X (gfx950) |
-| fla | **not installed** |
+| fla | 0.6.0 (git `5e02dd3`), installed from source |

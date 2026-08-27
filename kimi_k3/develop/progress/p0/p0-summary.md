@@ -31,7 +31,7 @@ the optimizer memory model — plus close the open ground-truth questions.
 
 | Gate | Status | Numbers |
 |---|---|---|
-| **G1** — pins + licenses + fla signature | **RED (blocked)** | 4/5 pins resolved; licenses recorded for all five. `fla` unresolved: `chunk_kda` on `main` takes neither `A_log` nor `dt_bias`, spells the layout flag `state_v_first`, and ends in `**kwargs` so the released call is silently accepted and wrong |
+| **G1** — pins + licenses + fla | **RED** | All 5 pins + licenses recorded. fla pinned at git `5e02dd3`; the released `chunk_kda` call is accepted as written (the earlier "silently ignored" reading is **retracted**, D5). Blocker is the KDA **backward**, which fails to compile on gfx950 (D6); the PyPI wheel ships no `fla/ops` (D7) |
 | **G2** — release artefact audit | **GREEN** | 4/4 open items closed with evidence; fixture committed |
 | **G3** — config on the real inheritance path | **GREEN** | 9 tests |
 | **G4** — model construction, no transient core block | **GREEN** | 4 tests; constructor spy sees 0 core blocks; meta and cuda both build |
@@ -102,7 +102,9 @@ send 2→3); no schedule was re-implemented, and the hook is bound only when PP 
 | id | severity | what |
 |---|---|---|
 | **A13** | HIGH | The local (non-TE) MLA path cannot be constructed at the pin: `MLASelfAttention` passes `k_channels`/`v_channels` to a `DotProductAttention` that accepts neither. Construction gates therefore run on 1 GPU with the TE spec. |
-| **D5** | CRIT | `fla`'s `chunk_kda` silently ignores `A_log`, `dt_bias` and `transpose_state_layout`. The signature check must compare parameter names, not "did it raise". |
+| ~~**D5**~~ | retracted | The "silently ignored kwargs" claim was wrong — drawn from the signature without running the call. fla handles all three deliberately. |
+| **D6** | HIGH | fla's KDA **backward** fails to compile on gfx950 (`chunk_intra.py:395`, TritonAMDGPUPipeline, triton 3.6.0). Forward works. |
+| **D7** | MED | The published fla wheel ships no `fla/ops`; pin git, not PyPI. |
 | **B5** | resolved | `A_log` is `[128]` with the last 32 exactly zero — measured, no longer assumed. |
 | **B7** | confirmed | The MLA LoRA norms really do use 1e-6. |
 

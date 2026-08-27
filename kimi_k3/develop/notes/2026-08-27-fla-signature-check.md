@@ -1,71 +1,93 @@
-# 2026-08-27 — `fla` `chunk_kda` signature does not match the release
+# 2026-08-27 — `fla` and `chunk_kda`: what is actually wrong (corrected)
 
-`troubleshooting` · blocks gate **G1** · owner: P0-T0.1
+`troubleshooting` · gate **G1** · owner: P0-T0.1
+**This note replaces an earlier version that was wrong. The retraction is §1.**
 
-## What the release calls
+## 1. Retraction
 
-`modeling_kimi_linear.py`, `KimiDeltaAttention.forward`:
+The first version of this note claimed that `fla`'s `chunk_kda` "silently ignores
+`A_log`, `dt_bias` and `transpose_state_layout`", on the grounds that they are
+absent from the signature while it ends in `**kwargs`. **That conclusion was
+wrong.** It was drawn from reading the signature alone and never running the call.
 
-```python
-chunk_kda(q=q, k=k, v=v, g=g, beta=beta,
-          A_log=self.A_log, dt_bias=self.dt_bias,
-          initial_state=recurrent_state, output_final_state=True,
-          use_qk_l2norm_in_kernel=True, use_gate_in_kernel=True,
-          use_beta_sigmoid_in_kernel=True,
-          safe_gate=self.gate_lower_bound is not None,
-          lower_bound=self.gate_lower_bound,          # -5.0
-          transpose_state_layout=True, cu_seqlens=cu_seqlens)
-```
-
-## What `fla` actually exposes
-
-`fla/ops/kda/chunk.py` on `main`:
+`fla` `main` (0.6.0, commit `5e02dd3`) handles all three **deliberately**:
 
 ```python
-def chunk_kda(q, k, v, g, beta, scale=None, initial_state=None,
-              output_final_state=False, use_qk_l2norm_in_kernel=False,
-              use_gate_in_kernel=False, use_beta_sigmoid_in_kernel=False,
-              allow_neg_eigval=False, safe_gate=False, lower_bound=None,
-              disable_recompute=False, return_intermediate_states=False,
-              state_v_first=False, cu_seqlens=None, cu_seqlens_cpu=None,
-              cp_context=None, **kwargs)
+# fla/ops/kda/chunk.py
+if 'transpose_state_layout' in kwargs:
+    state_v_first = kwargs.pop('transpose_state_layout')      # accepted alias
+...
+if use_gate_in_kernel:
+    A_log, dt_bias = kwargs.get("A_log"), kwargs.get("dt_bias")
+    if A_log is None and lower_bound is None:
+        raise ValueError("`A_log` must be provided when `use_gate_in_kernel=True` ...")
 ```
 
-Three mismatches:
+The docstring documents both, including the gate math
+`-exp(A_log) * softplus(g + dt_bias)` and the `lower_bound` variant, and the
+function *raises* rather than proceeding silently when `A_log` is missing.
 
-1. **no `A_log`** and **no `dt_bias`** — the decay parameters the release passes;
-2. **`state_v_first`**, not `transpose_state_layout`;
-3. the signature ends in **`**kwargs`**, so all three unknown arguments are
-   **silently accepted and ignored**. Nothing raises. `fla`'s own
-   `fla/layers/kda.py` calls the op with `state_v_first=True` and no `A_log`,
-   confirming which spelling that revision expects.
+Verified empirically on MI355X: the released Kimi-K3 call runs, and perturbing
+`A_log` changes the output (`max|Δ| = 0.079` on a tiny shape), so it is plainly
+not ignored.
 
-The PyPI wheel `flash-linear-attention==0.5.2` ships only `fla/layers` and
-`fla/models` — `fla/ops` is absent from the wheel entirely — so `pip install`
-of that version cannot satisfy the import either.
+**Correction to the method, too:** the earlier note said the check should compare
+parameter *names* via `inspect.signature`. That check would have **failed on a
+working library**, because `A_log` legitimately arrives through `**kwargs`. The
+right check is functional: call the op the way the release does and compare
+against the FP32 oracle.
 
-## Why this matters more than a normal version skew
+## 2. What is actually blocking G1
 
-A wrong-but-accepted call runs KDA with the learned decay ignored. There is no
-exception, no warning, and the loss still falls: exactly the class of failure the
-project's oracle-first rule exists to catch. It would surface as an unexplained
-parity gap in G15 — or not at all, if the fla backend were ever made the default
-before that gate was green.
+Two real problems, neither of them an API mismatch.
 
-## Actions
+### 2.1 The KDA **backward** does not compile on gfx950
 
-1. **G1's check asserts by parameter name.** `tools/check_fla_signature.py`
-   compares `inspect.signature(chunk_kda).parameters` against the released kwarg
-   set and fails on any missing name — never "the call did not raise".
-2. **Find the revision the release was built against.** Candidates: a Moonshot
-   fork, or an fla commit predating the `transpose_state_layout` → `state_v_first`
-   rename. The HF repo pins no fla version (no `requirements.txt`, no mention in
-   the model card), so this has to be established by bisecting the fla history for
-   a `chunk_kda` that takes `A_log`/`dt_bias`/`transpose_state_layout`.
-3. **Until then `k3_kda_backend` stays `eager`** (rule R5.3). The FP32 oracle is
-   defined by the *released call's semantics*, not by fla's current signature, so
-   P3 can proceed and G15 becomes the gate that consumes the resolved pin.
-4. If no such revision exists publicly, the fallback is to compute the decay from
-   `A_log`/`dt_bias` **outside** the kernel and pass the pre-gated `g`, matching
-   whatever `use_gate_in_kernel=False` expects — an eager/fla hybrid whose parity
-   is then G15's problem. Record the decision in `PINS.md` either way.
+Forward is fine. Backward dies inside Triton's AMD backend:
+
+```
+fla/ops/kda/chunk_intra.py:395:0: error: Failures have been detected while
+processing an MLIR pass pipeline
+  note: Pipeline failed while executing [`TritonAMDGPUPipeline` on 'builtin.module']
+RuntimeError: PassManager::run failed
+```
+
+reached through `chunk_kda_bwd` → `chunk_kda_bwd_intra`, with triton 3.6.0 and
+`gfx950`. So on this stack `fla` gives us inference-shaped KDA and no training
+KDA.
+
+This is the same risk the plan already carried (upstream fla KDA-backward issues
+#807 / #785) arriving by a different route: a compiler failure rather than a
+numerical one. It is loud, which is the good case.
+
+### 2.2 The published wheel is unusable
+
+`pip install flash-linear-attention==0.5.2` ships **only** `fla/layers` and
+`fla/models` — 154 files, no `fla/ops` at all — so `fla.layers.kda`'s own
+`from fla.ops.kda import chunk_kda` cannot resolve. Install from git.
+
+## 3. Where this leaves the pin
+
+| question | answer |
+|---|---|
+| Is there a usable revision? | **Yes for forward**: git `main`, 0.6.0 at `5e02dd3`. The released call is accepted as-is. |
+| Can we train with it today? | **No** — the backward fails to compile on gfx950 / triton 3.6.0. |
+| Does that block P2–P6? | No. `k3_kda_backend` stays `eager` (rule R5.3); the FP32 oracle is the contract, and it was always going to be permanent (rule R8.1). |
+| What unblocks it? | In order of cheapness: (a) a different triton build — try the ROCm-vendored triton and any newer 3.7+; (b) prune the failing autotune config in `chunk_intra`; (c) upstream the reproducer to Triton/fla; (d) our own backward. |
+
+## 4. Actions
+
+1. Pin `fla` at git `5e02dd3` in `PINS.md` with the forward-only caveat recorded.
+2. G1's check is **functional, not signature-based**: run the released call, assert
+   the forward matches the FP32 oracle, and assert the backward either matches or
+   fails loudly — never infer from `inspect.signature`.
+3. File the Triton reproducer under `repro/` when P3 starts; it is a clean,
+   minimal, and upstream-worthy failure.
+4. Re-run this note's checks at every pin bump (rule R10.3).
+
+## 5. Method lesson worth keeping
+
+Reading a signature is not running a function. The earlier conclusion was
+plausible, specific, and wrong, and it survived several documents before an
+actual call disproved it. Anything asserted about a dependency's *behaviour*
+gets executed before it is written down.

@@ -5,7 +5,7 @@
 > kept with `~~strike-through~~` plus a retirement date — they are the audit
 > trail. Rules are atomic and self-contained: pick the section, then read one rule.
 >
-> Last updated: 2026-08-27 (R10.4 branch naming).
+> Last updated: 2026-08-27 (R3.6 execute-don't-infer).
 
 ---
 
@@ -102,6 +102,16 @@ pinned SHA. A statement about Kimi K3 cites the released artefact
 (`config.json` field, `modeling_*.py` symbol, or a safetensors header shape).
 Statements taken from the K3 report are labelled **[report]** and are treated as
 weaker evidence than the release artefacts.
+
+### R3.6 — Claims about a dependency's behaviour are executed, not inferred
+**Added 2026-08-27 after a retraction.** A statement about what a third-party
+function *does* — ignores an argument, mis-handles a dtype, is slow — is written
+down only after running it. Reading a signature is not running a function:
+`chunk_kda` was declared to "silently ignore `A_log`" on the strength of its
+signature, and the claim reached four documents before an actual call disproved
+it (`../notes/2026-08-27-fla-signature-check.md` §1). Signature-shaped evidence
+is admissible for *structure* (a symbol exists, a parameter is accepted); only
+execution is admissible for *behaviour*.
 
 ### R3.5 — Per-phase summary file
 Every phase that ships work closes with `develop/progress/p<id>/p<id>-summary.md`
