@@ -66,11 +66,33 @@ def test_every_value_lands_on_the_e2m1_grid(x):
 
 
 def test_exactly_representable_values_survive_unchanged():
-    """A group built from E2M1 levels times a power of two must round-trip exactly."""
-    levels = torch.tensor(FP4_E2M1_VALUES)
-    row = torch.cat([levels, -levels, levels, -levels]) * 2.0**-3
+    """A group whose peak is a power of two round-trips exactly."""
+    levels = torch.tensor([v for v in FP4_E2M1_VALUES if v <= 4.0])  # seven of the eight
+    row = torch.cat([levels, -levels] * 2 + [torch.zeros(MX_GROUP - 4 * levels.numel())])
+    row = row * 2.0**-3
+    assert row.numel() == MX_GROUP
     packed, scale = quantize_mxfp4(row.unsqueeze(0))
     assert torch.equal(dequantize_mxfp4(packed, scale).squeeze(0), row)
+
+
+def test_a_group_peaking_at_6_does_not_round_trip_and_that_is_the_format():
+    """The one case exact round-trip fails, stated rather than discovered later.
+
+    The scale targets the group peak at 4.0 and rounds the exponent to nearest,
+    with 1.5 as the midpoint. A peak of `6 * 2**k` puts `amax / 4` at exactly
+    `1.5 * 2**(k-1)` -- the tie -- and the released rule rounds it **up**. The
+    grid then doubles, and the smallest level in the group falls off it.
+
+    This is a property of the released format, not of this implementation:
+    `develop/results/mxfp4_scale_rule.md` measures the rule off real weights.
+    """
+    levels = torch.tensor(FP4_E2M1_VALUES)
+    row = torch.cat([levels, -levels] * 2) * 2.0**-3
+    packed, scale = quantize_mxfp4(row.unsqueeze(0))
+    back = dequantize_mxfp4(packed, scale).squeeze(0)
+    assert not torch.equal(back, row)
+    assert back.abs().amax() == row.abs().amax(), "the peak itself is still exact"
+    assert back[1] == 0.0, "the 0.5 level is what falls off the doubled grid"
 
 
 def test_zero_group_is_handled():
@@ -86,12 +108,19 @@ def test_error_ordering_is_sane(x):
     assert e8 < e4 < 0.25, (e8, e4)
 
 
-def test_scale_keeps_groups_in_range(x):
-    """After scaling, no element should be clamped away from its group's peak."""
+def test_scaling_never_clamps(x):
+    """The reason the released rule targets 4.0 instead of 6.0.
+
+    Rounding `amax / 4` to the nearest power of two leaves the scaled peak in
+    `[4/sqrt(2), 4*sqrt(2)] = [2.83, 5.66]`, always below E2M1's 6.0. The OCP
+    formula `2**(floor(log2(amax)) - 2)` instead leaves it in `[4, 8)`, so any
+    group whose peak has a mantissa above 1.5 gets clamped -- up to 25 % error on
+    the group's largest element.
+    """
     scale = compute_e8m0_scale(x)
     scaled = x.unflatten(-1, (-1, MX_GROUP)) / dequantize_e8m0(scale).unsqueeze(-1)
-    # OCP's rule allows the peak to exceed 6.0 by up to 2x before clamping
-    assert scaled.abs().amax() <= 2 * FP4_E2M1_VALUES[-1]
+    assert scaled.abs().amax() <= FP4_E2M1_VALUES[-1]
+    assert scaled.abs().amax() >= 2.8
 
 
 def test_ste_forward_is_quantised_and_backward_is_identity(x):

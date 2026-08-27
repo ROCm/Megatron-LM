@@ -23,8 +23,9 @@ import torch
 # E2M1: the eight representable magnitudes, and the max normal.
 FP4_E2M1_VALUES = (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0)
 FP4_MAX = 6.0
-#: E2M1's largest normal is 6.0 = 1.5 x 2^2, so the shared scale targets exponent 2.
-FP4_MAX_EXP = 2
+#: E2M1's largest normal is 6.0; its largest *power of two* is 4.0, and that is
+#: what the shared scale targets. See `compute_e8m0_scale` for why it matters.
+FP4_MAX_POW2 = 4.0
 E8M0_BIAS = 127
 MX_GROUP = 32
 
@@ -33,21 +34,49 @@ def _e2m1_levels(device, dtype=torch.float32) -> torch.Tensor:
     return torch.tensor(FP4_E2M1_VALUES, device=device, dtype=dtype)
 
 
+def f32_to_e8m0(x: torch.Tensor) -> torch.Tensor:
+    """Round a positive float to the nearest power of two, as an e8m0 byte.
+
+    Bit-for-bit AITER's `fp4_utils.f32_to_e8m0`: take the exponent field, and
+    round up when the top mantissa bit is set. Note the midpoint is a mantissa of
+    1.5, not the geometric mean 1.414 -- that is what the hardware does, and
+    matching it is the point.
+    """
+    u32 = x.float().contiguous().view(torch.int32)
+    exponent = ((u32 >> 23) & 0xFF).to(torch.uint8)
+    round_up = ((u32 & 0x400000) > 0) & (
+        ((u32 & 0x200000) > 0) | ((u32 & 0x1FFFFF) > 0) | (exponent > 0)
+    )
+    return torch.where(round_up, exponent + 1, exponent)
+
+
 def compute_e8m0_scale(x: torch.Tensor, group_size: int = MX_GROUP) -> torch.Tensor:
     """Shared exponent per group, as an e8m0 byte. ``x`` is ``[..., N]``.
 
-    OCP MX: take the group's max magnitude, keep its exponent, and shift so the
-    largest element lands at E2M1's top exponent. Returns ``uint8`` of shape
-    ``[..., N / group_size]``.
+    The scale puts the group's largest magnitude at **4.0** -- E2M1's largest
+    *power of two* -- and then rounds the exponent to nearest. It does **not**
+    use the OCP formula `2**(floor(log2(amax)) - emax_elem)` with `emax_elem = 2`,
+    which targets the largest *normal* (6.0) by flooring. That formula clips: a
+    group whose max is 3.99 gets `X = 2**-1`, scaling the max to 7.98, which is
+    past E2M1's 6.0 and clamps back to 3.0 -- a 25 % error on the group's largest
+    element.
+
+    Which rule the release used is not a matter of preference, and it was
+    measured rather than chosen (`develop/results/mxfp4_scale_rule.md`). Across a
+    real released expert's 344,064 groups the per-group max magnitude is 3.0 for
+    25.75 %, 4.0 for 55.10 % and 6.0 for 19.15 %. The floor-to-6.0 rule can only
+    ever produce 4.0 or 6.0, so **25.75 % of the released groups are impossible
+    under it**. The target-4.0 rule predicts 30.7 / 51.5 / 17.8 % for a
+    log-uniform mantissa, which is what is there.
+
+    Returns ``uint8`` of shape ``[..., N / group_size]``.
     """
     assert x.shape[-1] % group_size == 0, (x.shape, group_size)
     grouped = x.float().unflatten(-1, (-1, group_size))
     amax = grouped.abs().amax(dim=-1)
-    exp = torch.floor(torch.log2(amax.clamp(min=torch.finfo(torch.float32).tiny)))
-    exp = exp - FP4_MAX_EXP
-    # amax == 0 -> a scale of 1.0 keeps the group at zero and stays in range.
-    exp = torch.where(amax == 0, torch.zeros_like(exp), exp)
-    return (exp + E8M0_BIAS).clamp(0, 255).to(torch.uint8)
+    scale = f32_to_e8m0(amax / FP4_MAX_POW2)
+    # amax == 0 -> a scale of 1.0 keeps the group at zero and stays in range
+    return torch.where(amax == 0, torch.full_like(scale, E8M0_BIAS), scale)
 
 
 def dequantize_e8m0(scale_u8: torch.Tensor) -> torch.Tensor:
