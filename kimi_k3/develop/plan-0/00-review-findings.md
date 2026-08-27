@@ -1,0 +1,118 @@
+# 00 — Review of the incoming "rev 2" Kimi-K3 plan
+
+> Reviewed 2026-08-26 against **`ROCm/Megatron-LM @ a1b00d4259e92dc4a07a0be2c24088fe827f4b6e`**
+> (the pin the plan itself names) and against the **released
+> `HF moonshotai/Kimi-K3`** `config.json` + `modeling_kimi_linear.py`, plus the
+> TransformerEngine (2.12.0.dev0+40434cf6) and AITER (`f299f579a`, 2026-04-03)
+> checkouts present in this workspace.
+> Every finding below carries the evidence that produced it. Line numbers are at
+> the pinned SHA.
+
+Severity legend:
+
+| Tag | Meaning |
+|---|---|
+| **CRIT** | Following the plan as written produces an incorrect model, silently wrong gradients, or a wasted phase |
+| **HIGH** | Design or scope error: significantly more (or less) work than needed, or a gate that cannot pass as specified |
+| **MED** | Correctness-adjacent detail that will surface as a parity failure or a maintenance liability |
+| **LOW** | Wording / hygiene / traceability |
+
+**Bottom line.** The rev-2 plan is a good plan: the core-isolation strategy, the
+config-builder bypass, the router-injection path, the VPP descope, the
+tolerance policy and the STE/gradcheck reasoning all check out against the
+source. Three things are wrong in ways that matter — the **AttnRes pipeline
+transport design (A1–A4)**, the **Muon capacity model (A6)**, and the **absence
+of `attn_res_block_size = 12` and the AttnRes math from the ground-truth section
+(B1, B2)** — and two are stale (**D1, D2**). Everything else is detail. The
+restructured plan in this directory keeps the good parts verbatim and rebuilds
+those five.
+
+---
+
+## A. Core mechanics (verified against the pin)
+
+| ID | Sev | Finding | Evidence |
+|---|---|---|---|
+| **A1** | **CRIT** | **A multi-tensor pipeline payload silently loses its gradient.** `backward_step` back-props **only** `output_tensor[0]` with `output_tensor_grad[0]` — the code even says "can handle at most one skip connection". Extra tensors sent over P2P (the distillation use case) are forward-only. The plan's "the schedule carries both `prefix_sum` and `block_residual` **(and their gradients)**" cannot be implemented as two tensors: `block_residual`'s grad would be received and dropped, and training would proceed with a wrong-but-plausible loss. **Fix: the payload must be ONE packed tensor** (concatenate along the sequence axis so the P2P shape stays a `(seq, mbs, hidden)` triple), unpacked inside the block. | `megatron/core/pipeline_parallel/schedules.py:451-493` (`backward_step`), `:459-460` (the comment), `:2164-2183` |
+| **A2** | **HIGH** | **Do not wrap or replace `get_forward_backward_func`.** Core already accepts `adjust_tensor_shapes_fn(recv_shapes, send_shapes)` in the 1F1B schedule and applies it after `get_tensor_shapes()`. It is evaluated *per rank*, so a stage can legally declare a different recv shape than its send shape — which is exactly what a monotonically growing `block_residual` needs. What is missing is only the **binding**: `train_step` passes it only when NVIDIA-modelopt distillation is active. Binding it from our own entry point is a few lines; re-implementing 1F1B is hundreds and re-breaks on every IFU. | `schedules.py:2019` (parameter), `:2180-2183` (application), `:1975-2004` (`get_tensor_shapes`), `megatron/training/training.py:1815-1822, 1853` |
+| **A3** | **HIGH** | The same knob is **asserted `None`** in the no-pipelining schedule and in the interleaved (VPP) schedule. So the binding must be conditional on `PP > 1`, or every tiny single-GPU test (the entire CI stage 1) fails with an assertion the moment AttnRes is enabled. The plan's VPP descope is correct and now has a line number. | `schedules.py:631-632` (no-pipelining), `:949-950` (interleaved) |
+| **A4** | **CRIT** | **The AttnRes payload is up to 9× the normal pipeline tensor, and the plan budgets nothing for it.** `block_residual` is `[B*S, K, H]` with `K` growing by one slot every 12 layers (8 slots total, §6 of the architecture deep-dive). At the last stage boundary the payload is `(1 + 8) × S × B × H`. At `S=8192, B=1, H=7168, bf16` that is 117 MB → **1.06 GB per in-flight microbatch**, multiplied by the 1F1B in-flight count. This is a first-order constraint on PP depth and is the strongest argument for context parallelism, yet it appears nowhere in the plan. | `HF Kimi-K3:modeling_kimi_linear.py` (`KimiLinearModel.forward`, `_forward_attn_residual`), `config.json:text_config.attn_res_block_size = 12` |
+| **A5** | **HIGH** | **Fully overriding `GPTModel.__init__` is unnecessary and is a permanent IFU liability.** `__init__` spans ~190 lines (embedding, four rotary variants, MTP, output layer, weight tying, offloading); duplicating it means re-porting every upstream change to that surface forever. The plan's actual requirement — "instantiate `K3TransformerBlock`, with no transient core block allocated" — is met by scoped rebinding of the module attribute `gpt_model.TransformerBlock` around `super().__init__()`, which produces **no diff under `megatron/**`** and is guard-clean. Keep the plan's constructor-spy test either way; add a pin-contract test that the symbol still exists and that `GPTModel` still constructs it. | `megatron/core/models/gpt/gpt_model.py:34` (module-level import), `:86-274` (`__init__`), `:209-216` (`self.decoder = TransformerBlock(...)`) |
+| **A6** | **CRIT** | **The Muon capacity model is wrong, and every number derived from it is wrong.** The plan reads `assert not args.use_distributed_optimizer` as "Muon cannot shard optimizer state" and builds a flat **14 B/param** model, from which it derives 38.9 TB for 93 L, a "17-node raw HBM floor", deletion of the 16-node configuration, and the claim that "no full-model node count is claimed". But `--optimizer dist_muon` selects `LayerWiseDistributedOptimizer`, which **shards master weights and optimizer state across the DP (and expert-DP) ranks** by whole-tensor ping-pong assignment, keeps full grads in the DDP buffer, and all-gathers parameters after the step. The correct per-GPU model is roughly `2 (bf16 weight) + 4 (fp32 main grad) + (4 master + 4 momentum)/DP_shard`, i.e. **6 + 8/DP** B/param for the Muon group, plus the Adam group for non-2-D params. At DP=8 that is 7 B/param, not 14. Two qualifications, so the finding is not overstated: the `38.9 TB` / "17-node raw floor" arithmetic **is** correct at DP = 1 (there is nothing to shard), and it is the *conclusions* that break — the premise that no sharded Muon recipe exists, the flat application of 14 B/param at every DP, and the fact that the whole table is cluster-total-only and never shows the per-GPU view where **EP shards 98 % of the parameters**. | `megatron/core/optimizer/muon.py:373-386` (`layer_wise_distributed_optimizer` → `LayerWiseDistributedOptimizer`), `megatron/core/optimizer/layer_wise_optimizer.py:26-40` (docstring), `:105-158` (`shard_params`), `megatron/training/training.py:1668` (`'dist' in config.optimizer`), `megatron/training/arguments.py:1546-1555` |
+| **A7** | **MED** | **Muon's parameter split needs an explicit K3 policy.** Only 2-D, non-`is_embedding_or_output_parameter` weights go to Muon; everything else goes to the scalar optimizer (`--muon-scalar-optimizer`, default adam). For K3 that means `A_log [96]`, `dt_bias [12288]`, the three `[12288, 1, 4]` conv weights, every RMSNorm, and the two AttnRes `Linear(7168, 1)` projections land in the Adam group — while `b_proj [96, 7168]` and the AttnRes projections' transpose do not. Two consequences the plan misses: the memory model is **two-group**, and the QK-clip/per-head work in T3.3 must know the split. Also `is_qkv` is detected by the literal name `linear_qkv.weight` with an explicit `TODO(deyuf): support MLA` — per-head Muon for MLA/KDA must supply its own head-split, so T3.3 is a real implementation, not a thin wrapper. | `muon.py:283-302` (split), `:274-282` (`is_qkv` + TODO), `:335-347` (bf16 master-weight wrapping) |
+| **A8** | **MED** | **QK-clip already exists in core** (`--qk-clip`, `--qk-clip-alpha`, `--qk-clip-threshold`, `clip_qk(model)`), gated on TE ≥ 2.9 and driven by `self_attention.clip_qk` + `core_attention.current_max_attn_logits`. T3.3 should *expose the hook on the K3 MLA module* and reuse core, not re-implement clipping. Note `clip_qk` walks `model_chunk.module.module.decoder.layers` and skips layers without the attribute — KDA layers are skipped for free, but our block must keep a `.layers` attribute with that exact name. | `megatron/core/optimizer/qk_clip.py:8-45`, `megatron/training/arguments.py:1288-1294`, `megatron/core/transformer/multi_latent_attention.py:1172-1180` |
+| **A9** | **HIGH** | **Core MLA has no NoPE mode.** `rope_type` accepts only `"rope"` and `"yarn"` and raises otherwise, and the MLA forward always applies rotary. K3 asserts `use_nope`, sets `rotary_emb = None`, and *expands* an un-rotated shared `k_rot` across heads. Additionally `scaling = q_head_dim ** -0.5 = 192**-0.5` (not `128**-0.5`) and the output gate multiplies **before** `o_proj`. T1.3 is therefore a real subclass with an overridden rotary/scale path, not a config flip. | `megatron/core/transformer/multi_latent_attention.py:193-215`, `megatron/core/transformer/transformer_config.py:2311`; `HF Kimi-K3:KimiMLAAttention` |
+| **A10** | **HIGH** | **Core LatentMoE is *almost* what K3 needs but not quite.** `postprocess()` does `fc2_latent_proj(output)` with **no normalisation**, while K3 applies `routed_expert_norm = RMSNorm(3584, eps=1e-5)` to the combined expert output *before* the up-projection. The plan lists LatentMoE under "core consumed as-is". Fix is small and clean (subclass `MoELayer`, override `postprocess`), but it must be planned. The shared-expert-overlap assertion the plan mentions is real (`:422-424`) and TE is required for the latent projections (`:244`). | `megatron/core/transformer/moe/moe_layer.py:243-274`, `:418-425`, `:505-515`; `HF Kimi-K3:KimiSparseMoeBlock.forward` |
+| **A11** | **LOW** | Latent projections are built with `parallel_mode="duplicated"` — they are **not** TP-sharded, so each TP rank holds a full `7168×3584` pair per MoE layer (51.4 M params × 92 layers ≈ 4.7 B replicated per TP rank). Worth a line in the capacity model and a possible upstream proposal later; not a v1 blocker. | `moe_layer.py:252-274` |
+| **A12** | — | **Confirmed as stated by the plan** (no action): `core_transformer_config_from_args` unconditionally replaces the caller's `config_class` with `MLATransformerConfig` when `args.multi_latent_attention` is set (`arguments.py:1230-1232`); `MoESubmodules.router` is a builder field defaulting to `TopKRouter`, so router injection via the submodule spec is real (`moe_layer.py:136-142`, `:236-240`); `router_replay.py`, `muon.py`, `qk_clip.py`, `experimental_attention_variant/{dsa,absorbed_mla}.py` all exist; the experimental-attention spec factory supports only `"gated_delta_net"` (`experimental_attention_variant_module_specs.py:139-140, 285-288`). | — |
+
+---
+
+## B. Ground truth vs the released model
+
+| ID | Sev | Finding |
+|---|---|---|
+| **B1** | **CRIT** | **`attn_res_block_size = 12` is absent from the plan's ground-truth section.** Slots are appended at 0-indexed `layer_idx % 12 == 0` → 8 slots at layers 0/12/24/36/48/60/72/84, and the final block is 9 layers. Every PP-layout, payload-size, and AttnRes-test decision depends on this number; the plan's tiny preset ("block size 2") is fine but the official value was never stated. |
+| **B2** | **CRIT** | **The AttnRes math is under-specified.** The real mechanism is: two mixes per layer (before attention and before the MLP) plus one at model output; each mix is a **softmax over `K+1` slots** of a score formed from an RMS-normalised slot dotted with `norm.weight * proj.weight`; the whole mix runs in **fp32**; and `prefix_sum` is **reset to `None` at a block boundary** so the residual stream restarts per block. "The block carries `prefix_sum` and `block_residual`" is not enough to build the oracle the plan requires. Verbatim code is now in `../architecture/01-kimi-k3-architecture-deep-dive.md` §6. |
+| **B3** | **HIGH** | **KDA has two gates and the plan conflates them.** `f_a_proj(7168→128) → f_b_proj(128→12288)` is the low-rank **decay** gate consumed *inside* `chunk_kda` (with `lower_bound=-5`, `safe_gate`); `g_proj(7168→12288)` is the **full-rank output** gate consumed by `o_norm = FusedRMSNormGated(128, activation='sigmoid')` *after* the kernel. The plan's "gate form CLOSED — beta-sigmoid + lower-bound gating inside `chunk_kda`" describes only the first and then lists "sigmoid output gate" as if it were the same object. |
+| **B4** | **MED** | The pinned `chunk_kda` kwarg list in the plan is incomplete: the release also passes **`use_qk_l2norm_in_kernel=True`** (so the q/k L2 normalisation the plan describes as a module step happens *in-kernel*), plus `initial_state`, `output_final_state=True`, `cu_seqlens`. The signature-check script must assert the full set. |
+| **B5** | **MED** | **`A_log` shape is contradictory**: modeling code declares `Parameter(log(uniform(1,16)))` of shape `[num_heads] = [96]`; the plan asserts the released shard header shows `[128]` with the last 32 zero. Both can be true (kernel-alignment padding), but the plan states the padded form as a settled invariant. Resolve from the actual shard header in P0, then assert. `dt_bias = [12288]` is consistent either way. |
+| **B6** | **HIGH** | **Shared experts run on `hidden = 7168`, not on the latent.** Only the *routed* experts run at 3584. Per-layer shared-expert params are therefore `3 × 7168 × 6144 = 132.1 M`, not `3 × 3584 × 6144 = 66.1 M`. The plan states the intermediate size correctly but never states the input width; getting it wrong doubles/halves a 12 B slice of the model and breaks checkpoint load. |
+| **B7** | **MED** | `q_a_layernorm` and `kv_a_layernorm` are constructed **without** an `eps` argument, so they use `KimiRMSNorm`'s class default rather than `rms_norm_eps = 1e-5`. If that default is 1e-6, the plan's blanket "RMSNorm ε = 1e-5" introduces a parity error that no kernel tolerance will explain. Read the default in P0 and, if it differs, carry a separate config field. |
+| **B8** | **MED** | The release is `KimiK3ForConditionalGeneration`: the text config is nested under **`text_config`**, and the shards contain `vision_tower.*` / `mm_projector.*` alongside the language model. The mapping spec must strip the nesting, name the vision prefixes as **explicitly skipped** (the plan's "zero unmapped tensors" gate fails otherwise), and account for `media_placeholder_token_id = 163605` in the tokenizer/vocab checks. |
+| **B9** | **LOW** | Router details worth writing into the config mapping table verbatim (they map cleanly onto core's `TopKRouter`, which is good news): fp32 logits → `sigmoid` → `+ e_score_correction_bias` **for selection only** → top-16 → weights gathered from the **unbiased** scores → renormalised → `× routed_scaling_factor = 1.0`; `num_expert_group = topk_group = 1` (no group routing despite `use_grouped_topk: true`). |
+| **B10** | **LOW** | `use_full_rank_gate` is a **KDA** config field (`linear_attn_config`); the plan attributes "full-rank sigmoid output gate" to MLA. MLA's gate is also full-rank (`g_proj → 96·128`) but for an unrelated reason (`mla_use_output_gate`). Two flags, two modules — a test written from the plan's wording would check the wrong one. |
+
+---
+
+## C. Missing engineering content
+
+| ID | Sev | Finding |
+|---|---|---|
+| **C1** | **HIGH** | **There is no performance work in the plan at all** — no baseline trace, no bottleneck report, no kernel budget, no perf gate. K3 has a large, *predictable* non-GEMM bottleneck: the AttnRes mixer materialises `(T, K+1, H)` fp32 twice per layer, ~120 GB of reads per forward at production shape (architecture §6.1), which a fused kernel removes. Plan-0 adds a measurement-driven phase (P11) modelled on the DeepSeek-V4 plan-5 discipline: trace → ranked bottlenecks → per-phase budget → post-phase trace. |
+| **C2** | **HIGH** | No process scaffolding: no status tracker, no gate numbering, no per-phase close-out convention, no correctness ratchet, no banned-warning ratchet, no rules file. Supplied here (`../rules/rule.md`, `../progress/status.md`, `05-test-strategy.md`). |
+| **C3** | **MED** | The CI ladder does not test the *core mechanisms we ride*. Five of them (`adjust_tensor_shapes_fn`, `MoESubmodules.router`, `gpt_model.TransformerBlock`, `clip_qk`, `LayerWiseDistributedOptimizer`) are what an IFU will break first, silently. Plan-0 adds `test_k3_p1_pin_contracts.py` to CI stage 0 (R4.5). |
+| **C4** | **MED** | No parallelism layout math: 93 layers is not divisible by any plausible PP degree, AttnRes wants stage boundaries aligned to multiples of 12, and CP is the natural mitigation for A4 — none of this is worked. Now in `06-capacity-and-parallelism.md`. |
+| **C5** | **MED** | The twin-run protocol (T3.1) is described but not owned by a tool. The noise band, the comparison statistic and the dataset hash need a committed script or the protocol will drift between runs. |
+| **C6** | **LOW** | Converter subtlety worth stating: after `dequantize_on_import`, a BF16 continued-pretrain run starts from **MXFP4-quantised-then-dequantised** weights, not from the original BF16 weights (which were never released). Checkpoint-anchored parity is therefore parity against a dequantised reference — the plan's byte-exact-roundtrip caveat is right, but the *semantic* caveat should be stated wherever "matches the released model" appears. |
+
+---
+
+## D. Stale or unverifiable external claims
+
+| ID | Sev | Finding |
+|---|---|---|
+| **D1** | **HIGH** | **The AITER K3 assets could not be found.** The AITER checkout in this workspace (`f299f579a`, 2026-04-03) contains neither `aiter/configs/model_configs/kimik3_a8w4_tuned_fmoe.csv` nor `aiter/ops/opus/` (the directory does not exist), and no `Situv2` / `ActivationType` match. The plan states these as verified facts of `AITER main`. They may well exist on a newer `main` — but Phase 0 must **fail closed** on their absence rather than discover it in T4.2. |
+| **D2** | **HIGH** | **The TE MXFP4 path in the plan does not match the installed TE.** In `transformer_engine 2.12.0.dev0+40434cf6`: `MXFP4BlockScaling` and `MXFP8BlockScaling` recipes exist (`common/recipe/__init__.py:542, :288`), and `MXFP4Quantizer` exists at **`pytorch/tensor/mxfp4_tensor.py:40`** — but `pytorch/custom_recipes/` contains `quantization_nvfp4.py`, **not** `quantization_mxfp4.py`, and no NumPy reference implementation is present. T4.1's acceptance criterion ("exact vs TE's NumPy reference") has no oracle as written; it must be re-specified (write the OCP-MX reference ourselves and cross-check round-trip against `MXFP4Quantizer`). |
+| **D3** | **MED** | `fla` is **not installed** in this environment. The pinned-`chunk_kda`-signature check is therefore the first blocking task of the project, not a formality. |
+| **D4** | **LOW** | The upstream watch list (Megatron KDA PR #5769, AttnRes issue #4016 / PR #4398, Bridge #4910, fla KCP #691) was not re-verified. Keep as watch items; never plan a phase around an unmerged PR. |
+
+---
+
+## E. What the plan gets right (kept verbatim; do not relitigate)
+
+1. Fork-local `kimi_k3/` with a guard and a two-file allowlist — the right call for a repo that takes regular IFUs.
+2. Bypassing `core_transformer_config_from_args()` with our own builder — the substitution is real and would silently discard our config subclass.
+3. Router injection through the MoE submodule spec — real, verified, clean.
+4. VPP descope for AttnRes — matches an explicit assertion in core.
+5. Component-specific tolerances established from a measured eager-fp32-vs-bf16 floor, three statistics, rationale in the docstring. This is better practice than the fixed 1e-5/1e-4 thresholds most plans carry.
+6. `gradcheck` only for true-autograd modules and **never** for STE; STE validated against an explicit fake-quant reference. Correct by construction.
+7. Tiny-preset-by-default with analytic validation of official presets; never instantiating a 215 B or 2.78 T model in a unit test.
+8. Escalation policy: no core edit without an `upstream_proposals/` patch + issue draft + sign-off.
+9. Checkpoint parity against a *deliberately truncated* HF reference for the 4-layer slice — the only honest way to anchor a partial model.
+10. The QAT reading (a8w4 forward + high-precision STE backward; no Hadamard because SiTU soft-caps; RNE default with SR behind an off flag; no a8w4 dgrad because the transposed-scale weight copy does not exist).
+11. Provenance **plus recorded license conclusion** for every ported reference file.
+
+---
+
+## F. Consequences for phase sequencing
+
+The findings change P0 (the gated feasibility phase) in four ways:
+
+1. **F4 (optimizer memory) must measure `dist_muon` with DP-sharding**, both param groups separately, and must produce a `B/param(DP)` curve — not a single scalar (A6, A7).
+2. **A new F7 (AttnRes payload sizing)**: measure the packed payload bytes per stage boundary and the fp32 mixer temporaries at tiny and at production widths, before any PP design is frozen (A4, B1, C1).
+3. **A new F8 (external asset verification)**: hard-fail if the AITER K3 kernels, the TE MXFP4 quantizer path, or the `fla` `chunk_kda` signature are not present at the pinned SHAs (D1, D2, D3).
+4. **F5 (PP prototype) is re-specified** around the packed-single-tensor payload plus `adjust_tensor_shapes_fn`, with a gradient-flow assertion that would catch A1 (a test that fails if payload gradients are dropped).
+
+The rest of the rev-2 phase structure survives; `01-roadmap.md` carries it forward
+renumbered, with the perf phase (P11) and the process scaffolding added.
