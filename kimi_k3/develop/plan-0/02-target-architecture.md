@@ -343,41 +343,45 @@ quantisation and ordinary autograd — **never `gradcheck`** (R4.4).
 | Routing determinism | `moe/router_replay.py` | reproducible expert assignment in tests |
 | Checkpointing | dist-checkpointing / `sharded_state_dict` | all new modules implement it |
 
-## 9. State-dict mapping (P8, sketch)
+## 9. State-dict mapping (P8)
 
-Release keys are nested under the multimodal wrapper; the text tower is what we
-map, and vision keys are **explicitly skipped, not ignored by omission**
-(finding B8).
+Key names below are **read from the released index** (P0-T0.2, gate G2), not
+guessed. The text tower is nested under `language_model.`; `vision_tower.*` (165
+tensors) and `mm_projector.*` (3) are **explicitly skipped and counted** -- 168
+of 497,220.
 
-| Release key (per 0-indexed layer `i`) | Megatron key |
+Two naming facts that a guess gets wrong: **KDA and gated MLA both live under
+`self_attn`** (layer kind is told apart by which tensors exist), and the MoE
+module is **`block_sparse_moe`** while the dense layer 0 uses `mlp`.
+
+| Release key (`language_model.model.` + per 0-indexed layer `i`) | Megatron key |
 |---|---|
-| `model.language_model.layers.{i}.self_attn.q_a_proj.weight` | `decoder.layers.{i}.self_attention.linear_q_down_proj.weight` |
-| `…self_attn.q_a_layernorm.weight` | `…self_attention.q_layernorm.weight` |
-| `…self_attn.q_b_proj.weight` | `…self_attention.linear_q_up_proj.weight` |
-| `…self_attn.kv_a_proj_with_mqa.weight` | `…self_attention.linear_kv_down_proj.weight` |
-| `…self_attn.kv_a_layernorm.weight` | `…self_attention.kv_layernorm.weight` |
-| `…self_attn.kv_b_proj.weight` | `…self_attention.linear_kv_up_proj.weight` |
-| `…self_attn.g_proj.weight` | `…self_attention.output_gate.weight` |
-| `…self_attn.o_proj.weight` | `…self_attention.linear_proj.weight` |
-| `…linear_attn.{q,k,v}_proj.weight` | `…self_attention.{q,k,v}_proj.weight` |
-| `…linear_attn.{q,k,v}_conv1d.weight` | `…self_attention.{q,k,v}_conv1d.weight` |
-| `…linear_attn.A_log` | `…self_attention.A_log` — **assert `[96:] == 0`, trim `[128]→[96]`; zero-pad on export** |
-| `…linear_attn.dt_bias` | `…self_attention.dt_bias` (`[12288]`) |
-| `…linear_attn.{f_a,f_b,g,b}_proj.weight` | `…self_attention.{f_a,f_b,g,b}_proj.weight` |
-| `…linear_attn.o_norm.weight` | `…self_attention.o_norm.weight` |
-| `…self_attention_res_{norm,proj}.weight` | `…attn_res_attn.{norm,proj}.weight` |
-| `…mlp_res_{norm,proj}.weight` | `…attn_res_mlp.{norm,proj}.weight` |
-| `…mlp.gate.weight` / `…gate.e_score_correction_bias` | `…mlp.router.weight` / `…mlp.router.expert_bias` |
-| `…mlp.routed_expert_down_proj.weight` | `…mlp.fc1_latent_proj.weight` |
-| `…mlp.routed_expert_norm.weight` | `…mlp.routed_expert_norm.weight` |
-| `…mlp.routed_expert_up_proj.weight` | `…mlp.fc2_latent_proj.weight` |
-| `…mlp.experts.{e}.w1/w3.weight` (MXFP4-packed + `weight_scale`) | `…mlp.experts.linear_fc1.weight{e}` (gate slot first, up second; dequantised on import) |
-| `…mlp.experts.{e}.w2.weight` | `…mlp.experts.linear_fc2.weight{e}` |
-| `…mlp.shared_experts.w1/w3/w2.weight` | `…mlp.shared_experts.linear_fc{1,1,2}.weight` |
-| `model.language_model.embed_tokens.weight` / `norm.weight` / `lm_head.weight` | `embedding.word_embeddings.weight` / `decoder.final_layernorm.weight` / `output_layer.weight` |
-| `model.language_model.output_attn_res_{norm,proj}.weight` | `decoder.output_attn_res.{norm,proj}.weight` |
-| `vision_tower.*`, `mm_projector.*` | **skipped by an explicit rule**, counted and reported |
+| `layers.{i}.self_attn.q_proj.weight` / `k_proj` / `v_proj` | `decoder.layers.{i}.self_attention.{q,k,v}_proj.weight` (KDA) |
+| `layers.{i}.self_attn.{q,k,v}_conv1d.weight` (F32 `[12288,1,4]`) | `…self_attention.{q,k,v}_conv1d.weight` |
+| `layers.{i}.self_attn.A_log` (F32 `[128]`) | `…self_attention.A_log` — **assert `[96:] == 0`, trim to `[96]`; zero-pad on export** |
+| `layers.{i}.self_attn.dt_bias` (F32 `[12288]`) | `…self_attention.dt_bias` |
+| `layers.{i}.self_attn.f_a_proj` / `f_b_proj` | `…self_attention.f_{a,b}_proj.weight` (decay gate) |
+| `layers.{i}.self_attn.g_proj.weight` | `…self_attention.g_proj.weight` (output gate; **also present on MLA layers**) |
+| `layers.{i}.self_attn.b_proj.weight` | `…self_attention.b_proj.weight` (beta) |
+| `layers.{i}.self_attn.o_norm.weight` (F32 `[128]`) | `…self_attention.o_norm.weight` |
+| `layers.{i}.self_attn.o_proj.weight` | `…self_attention.o_proj.weight` (KDA) / `…self_attention.linear_proj.weight` (MLA) |
+| `layers.{i}.self_attn.q_a_proj` / `q_a_layernorm` / `q_b_proj` | `…self_attention.linear_q_down_proj` / `q_layernorm` / `linear_q_up_proj` |
+| `layers.{i}.self_attn.kv_a_proj_with_mqa` / `kv_a_layernorm` / `kv_b_proj` | `…self_attention.linear_kv_down_proj` / `kv_layernorm` / `linear_kv_up_proj` |
+| `layers.{i}.input_layernorm` / `post_attention_layernorm` | `decoder.layers.{i}.input_layernorm` / `pre_mlp_layernorm` |
+| `layers.{i}.self_attention_res_{norm,proj}` (`[1, 7168]`) | `decoder.layers.{i}.attn_res_attn.{norm,proj}.weight` |
+| `layers.{i}.mlp_res_{norm,proj}` | `decoder.layers.{i}.attn_res_mlp.{norm,proj}.weight` |
+| `layers.0.mlp.{gate,up,down}_proj.weight` (dense layer) | `decoder.layers.0.mlp.linear_fc{1,1,2}.weight` (gate slot first) |
+| `layers.{i}.block_sparse_moe.gate.weight` / `.e_score_correction_bias` | `…mlp.router.weight` / `…mlp.router.expert_bias` |
+| `layers.{i}.block_sparse_moe.routed_expert_down_proj.weight` | `…mlp.fc1_latent_proj.weight` |
+| `layers.{i}.block_sparse_moe.routed_expert_norm.weight` | `…mlp.routed_expert_norm.weight` (K3MoELayer, §6) |
+| `layers.{i}.block_sparse_moe.routed_expert_up_proj.weight` | `…mlp.fc2_latent_proj.weight` |
+| `layers.{i}.block_sparse_moe.experts.{e}.w1/w3.weight_packed` + `.weight_scale` | `…mlp.experts.linear_fc1.weight{e}` (gate slot first, up second; dequantised on import) |
+| `layers.{i}.block_sparse_moe.experts.{e}.w2.weight_packed` + `.weight_scale` | `…mlp.experts.linear_fc2.weight{e}` |
+| `layers.{i}.block_sparse_moe.shared_experts.{gate,up,down}_proj.weight` (`[6144, 7168]`) | `…mlp.shared_experts.linear_fc{1,1,2}.weight` |
+| `embed_tokens.weight` / `norm.weight` / `output_attn_res_{norm,proj}.weight` | `embedding.word_embeddings.weight` / `decoder.final_layernorm.weight` / `decoder.output_attn_res.{norm,proj}.weight` |
+| `language_model.lm_head.weight` | `output_layer.weight` |
+| `vision_tower.*`, `mm_projector.*` | **skipped by an explicit rule**, counted and reported (168 tensors) |
 
-Exact key prefixes are read from the released `model.safetensors.index.json` in
-P8-T1; the table above is the shape of the mapping, and the dry run
-(**G30**) is what proves it.
+MXFP4 packing, verified from the headers: `w1`/`w3` are `U8 [3072, 1792]`
+(logical `[3072, 3584]`, two nibbles per byte) with `U8 [3072, 112]` e8m0 scales
+(one per 32-wide group); `w2` is `U8 [3584, 1536]` with `U8 [3584, 96]` scales.

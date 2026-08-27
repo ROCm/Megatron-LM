@@ -12,10 +12,10 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T0.1 `PINS.md` (5 SHAs + LICENSES) + `check_fla_signature.py` | | | G1; `fla` is **not installed** in the current container — this is the first blocking task |
-| [ ] | T0.2 Release artefact audit (`A_log` shape, `KimiRMSNorm` eps, key prefixes + vision count, tokenizer ids) | | | G2; CPU-only, needs `config.json` + index + one shard header |
-| [ ] | T0.3 Config on the real inheritance path | | | G3; core substitutes `MLATransformerConfig` at `arguments.py:1230-1232` |
-| [ ] | T0.4 Meta-device model construction + analytic param count | | | G4; constructor spy must see zero core `TransformerBlock` |
+| [-] | T0.1 `PINS.md` (5 SHAs + LICENSES) + `check_fla_signature.py` | TBD-p0 | 2026-08-27 | **G1 RED.** 4/5 pins + all licenses recorded in `kimi_k3/PINS.md`. `fla` unresolved: `chunk_kda` on main takes neither `A_log` nor `dt_bias`, spells the layout flag `state_v_first`, and ends in `**kwargs` so the released call is silently accepted and wrong — see `notes/2026-08-27-fla-signature-check.md` |
+| [x] | T0.2 Release artefact audit (`A_log` shape, `KimiRMSNorm` eps, key prefixes + vision count, tokenizer ids) | TBD-p0 | 2026-08-27 | **G2 GREEN.** `A_log` F32 `[128]`, `[96:]` exactly 0; `KimiRMSNorm` default eps **1e-6** (LoRA norms confirmed); 497,220 tensors / 96 shards, 168 vision+projector keys to skip; KDA and MLA both under `self_attn`, MoE under `block_sparse_moe`. Fixture: `tests/fixtures/release_shapes.json` |
+| [x] | T0.3 Config on the real inheritance path | TBD-p0 | 2026-08-27 | **G3 GREEN**, 9 tests. Type survives, MLA fields populated, core builder sentinel never fires, layer pattern + slot schedule pinned |
+| [x] | T0.4 Meta-device model construction + analytic param count | TBD-p0 | 2026-08-27 | **G4 GREEN**, 4 tests. Constructor spy sees 0 core blocks; rebinding does not leak; 93L analytic total 2.779 T, every per-component formula matches the released headers. Needs 1 GPU (TE spec) because of finding A13 |
 | [ ] | T0.5 Optimizer memory measurement incl. `dist_muon` | | | G5; per parameter group, as a function of DP |
 | [ ] | T0.6 AttnRes payload + mixer-temporary sizing | | | G6; feeds `06-capacity-and-parallelism.md` §3 |
 | [ ] | T0.7 PP=2 packed-payload prototype + payload-gradient assertion | | | G7; the finding-A1 guard |

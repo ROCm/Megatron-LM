@@ -37,7 +37,7 @@ integration trains the text tower only.**
 | `num_hidden_layers` | 93 | 93 = 3 × 31; PP splits are never even (see `06-capacity-and-parallelism.md`). |
 | `vocab_size` | 163840 | |
 | `tie_word_embeddings` | **false** | Separate `lm_head`; 2.35 B embedding params. |
-| `rms_norm_eps` | 1e-5 | But see §5 ❓ (MLA LoRA norms may not receive it). |
+| `rms_norm_eps` | 1e-5 | Everywhere **except** the two MLA LoRA norms, which take `KimiRMSNorm`'s 1e-6 default (§5 ✅). |
 | `max_position_embeddings` | 1048576 | v1 trains ≤ 64 k; 1 M is descoped. |
 | `num_nextn_predict_layers` | 0 | **No MTP.** |
 | `attn_res_block_size` | **12** | The single most consequential number for pipeline design (§6). |
@@ -71,7 +71,7 @@ that convention** — the conformance test (G11) pins it.
 projection_size = head_dim * num_heads         # 128 * 96 = 12288
 q_proj, k_proj, v_proj : Linear(7168, 12288, bias=False)
 q_conv1d, k_conv1d, v_conv1d : ShortConvolution(12288, kernel_size=4, activation='silu')
-A_log   : Parameter(log(uniform(1, 16)))       # declared [num_heads] = [96]  (see ❓ below)
+A_log   : Parameter(log(uniform(1, 16)))       # declared [96]; stored [128] zero-padded (§3.1 ✅)
 f_a_proj: Linear(7168, 128)   f_b_proj: Linear(128, 12288)     # low-rank DECAY gate
 dt_bias : Parameter(empty(12288), dtype=fp32)
 b_proj  : Linear(7168, 96)                                      # beta, cast to fp32
@@ -109,12 +109,14 @@ o, recurrent_state = chunk_kda(
 `g_proj` (full rank) is the *output* gate consumed by `o_norm`. Any document or
 test that says "the KDA gate" without saying which one is ambiguous and wrong.
 
-**❓ open item — `A_log` shape.** The modeling code declares `[num_heads] = [96]`;
-the incoming plan reports the released first-shard header as `[128]` with the
-last 32 values zero. Both can hold if the checkpoint pads for kernel alignment.
-**G2 resolves this from the actual shard header** and the converter asserts the
-outcome (trim `[128]→[96]` on import with `A_log[96:] == 0` asserted, zero-pad on
-export) instead of guessing. `dt_bias` is `[12288]` in both readings.
+**✅ §3.1 — `A_log` is stored `[128]`, zero-padded.** The modeling code declares
+`[num_heads] = [96]`; the checkpoint stores `F32 [128]` per KDA layer with
+`A_log[96:] == 0` exactly (verified on layer 12, `max|·| = 0.0`;
+`exp(A_log[:96])` spans 0.626 – 2.736). Converter rule: assert then trim
+`[128] → [96]` on import, zero-pad on export. `dt_bias` is `F32 [12288]`,
+unpadded. `A_log`, `dt_bias`, the conv weights and `o_norm` are all stored **F32**
+while the projections are bf16. Evidence:
+[`../notes/2026-08-27-release-audit.md`](../notes/2026-08-27-release-audit.md).
 
 `ShortConvolution` (from `fla`) applies `silu` after a causal depthwise conv of
 width 4 over the *projected* q/k/v — not over the hidden state.
@@ -124,10 +126,10 @@ width 4 over the *projected* q/k/v — not over the hidden state.
 ## 4. Gated MLA with NoPE (✅ verbatim)
 
 ```python
-q_a_proj  : Linear(7168, 1536)        q_a_layernorm : KimiRMSNorm(1536)   # eps NOT passed ❓
+q_a_proj  : Linear(7168, 1536)        q_a_layernorm : KimiRMSNorm(1536)   # eps NOT passed -> 1e-6 ✅
 q_b_proj  : Linear(1536, 96*192)      # q_head_dim = qk_nope(128) + qk_rope(64) = 192
 kv_a_proj_with_mqa : Linear(7168, 512 + 64)
-kv_a_layernorm     : KimiRMSNorm(512)                                     # eps NOT passed ❓
+kv_a_layernorm     : KimiRMSNorm(512)                                     # eps NOT passed -> 1e-6 ✅
 kv_b_proj : Linear(512, 96*(128+128))
 o_proj    : Linear(96*128, 7168)
 g_proj    : Linear(7168, 96*128)      # mla_use_output_gate = true
@@ -154,12 +156,13 @@ Every layer: `input_layernorm`, `post_attention_layernorm`, plus the two AttnRes
 norms (§6). All `KimiRMSNorm` with `eps = rms_norm_eps = 1e-5` **except**
 `q_a_layernorm` / `kv_a_layernorm`, which are constructed **without** an `eps`
 argument and therefore take `KimiRMSNorm`'s class default.
-**❓ G12 reads that default out of the released modeling file and, if it differs
-from 1e-5, the K3 config carries a separate `mla_lora_norm_eps` field.** This is
-a classic silent-parity-drift trap: a 1e-6 vs 1e-5 epsilon on a 1536-wide norm
-moves logits far more than any kernel tolerance we set.
-
----
+**✅ Confirmed: the default is 1e-6.** `KimiRMSNorm.__init__(self, hidden_size,
+eps=1e-6)` (modeling_kimi_linear.py:227), and the two LoRA norms are the only
+K3 norms constructed without an explicit `eps`. Everything else is passed
+`config.rms_norm_eps = 1e-5`. The config carries `k3_mla_lora_norm_eps = 1e-6`
+and `test_k3_p0_config.py` pins it. This is the kind of gap no kernel tolerance
+would ever explain: a 1e-6 vs 1e-5 epsilon on a 1536-wide norm moves logits far
+more than any parity bound we set.
 
 ## 6. AttnRes — Attention Residuals (✅ verbatim; the design driver)
 
