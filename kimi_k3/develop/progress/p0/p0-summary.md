@@ -156,4 +156,6 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 
 | **187ac2c01** | P0 T0.6: AttnRes mixer oracle, payload protocol, sizing (G6 green); P11 budget set |
 
-T0.7–T0.8 continue in this phase and will extend this summary.
+| **d6c51b7f1** | P0 T0.7: PP=2 packed-payload transport, bitwise exact (G7 green) |
+
+T0.8 continues in this phase and will extend this summary.
