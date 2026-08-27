@@ -33,6 +33,36 @@ Verified at `(T, H, K) = (128, 4, 64)` and `(2048, 8, 128)`.
    the shadowed version: 52 passed, TE fine.
 3. Only then installed it for real. Revert is `pip install triton==3.6.0`.
 
+## Does the Triton upgrade break `torch.compile`?
+
+A fair question, because inductor generates Triton code against Triton's internal
+APIs — and because **Megatron puts `torch.compile` on the default training path**,
+not an opt-in one: `megatron/core/jit.py` sets `jit_fuser = torch.compile` for
+torch >= 2.2, and that decorator is applied across `fusions/fused_bias_swiglu`,
+`fused_bias_dropout`, `activations`, `torch_norm`, `moe/router`,
+`moe/token_dispatcher` and `ssm/gated_delta_net`. If torch and Triton disagreed,
+ordinary K3 training would break, not just a future experiment.
+
+Checked on torch 2.10.0+git94c6e04 + triton 3.7.1, all green:
+
+| check | result |
+|---|---|
+| `torch.utils._triton.has_triton()` / `torch._inductor.runtime.triton_compat` | OK |
+| compiled elementwise + reduction, forward and backward | OK, matches eager |
+| compiled softmax | OK |
+| **`mode="max-autotune"`** matmul, fwd+bwd | OK — 37 Triton MM choices autotuned with AMD-specific params (`matrix_instr_nonkdim`, `waves_per_eu`, `kpack`), max diff 1.95e-3 vs eager, i.e. bf16 noise |
+| Megatron's `jit_fuser` path (`bias_swiglu_impl`) fwd+bwd | OK |
+| the whole `kimi_k3` suite | 58 passed |
+
+Our own code calls `torch.compile` nowhere today; the exposure is entirely
+through core's fusions, and through P11 if the fused AttnRes mixer takes the
+`torch.compile` route (which is the cheap baseline to try before a hand-written
+kernel).
+
+`tests/test_k3_p0_torch_compile_contract.py` keeps this checked continuously —
+including an assertion that core still routes its fusions through
+`torch.compile`, so if that changes we find out rather than assume.
+
 ## Caveats worth carrying
 
 * **This is upstream PyPI Triton, not the ROCm-vendored build.** The ROCm index

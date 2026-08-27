@@ -84,7 +84,7 @@ and built the numerics contract the kernels must match
 | Component | Version |
 |---|---|
 | torch | 2.10.0+git94c6e04 |
-| triton | **3.7.1** (upstream PyPI; 3.6.0 could not compile fla's KDA backward) |
+| triton | **3.7.1** (upstream PyPI; 3.6.0 could not compile fla's KDA backward). `torch.compile` re-verified on it — including inductor's Triton MM templates under `max-autotune` and Megatron's `jit_fuser` fusion path, which is `torch.compile` by default. Guarded by `tests/test_k3_p0_torch_compile_contract.py` |
 | transformer_engine | 2.12.0.dev0+40434cf6 |
 | GPUs | 8 × AMD Instinct MI355X (gfx950) |
 | fla | 0.6.0 (git `5e02dd3`), installed from source |
