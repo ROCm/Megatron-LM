@@ -125,11 +125,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [-] | T11.1 EP=8 proxy + trace | `ca5beca90` | 2026-08-27 | **G42 PARTIAL.** Harness validated end to end; ran at official widths, **2 layers**, EP=4, seq 512 — steady **1747.6 ms**, peak 140 GiB/rank. EP=8 is blocked: the node is shared and another tenant holds ~232 GB |
+| [x] | T11.1 EP=8 proxy + trace | TBD-g42 | 2026-08-27 | **G42 GREEN.** 4 L official, **EP=8**, seq 512: steady **2653.5 ms** (spread 2643–2659), peak **193.6 GiB**/rank, 321 k launches. The earlier 2-layer run is kept as a depth cross-check — the ranking is unchanged |
 | [x] | T11.2 Baseline report + budgets | TBD-p11 | 2026-08-27 | `profile/profile-baseline-2026-08-27.md`. **The prediction was wrong**: AttnRes is 0.1 % of device time, the Muon step is 21 % |
 | [x] | T11.3 Fused (chunked) AttnRes mixer | `92db9d6fc` | 2026-08-27 | **G43 GREEN.** Forward and per-token gradients **bit-identical**; the shared `[H]` gain gradient differs by fp32 accumulation order only, and the error does not grow with chunk count. Behind `--k3-attn-res-fused`, default off |
-| [ ] | T11.4 Whatever the ranking says next | — | — | **rescoped.** Under R9.4 nothing at this geometry authorises an AttnRes perf fix; the ranking is not yet the production one (2 layers means ≤1 residual slot against 8 at 93 L) |
-| [ ] | T11.5 Post-phase trace | — | — | **G44/G45 owed** — need an unshared node |
+| [x] | T11.4 Whatever the ranking says next | TBD-g42 | 2026-08-27 | **rescoped and settled.** Muon step **21.1 %**, AttnRes **0.09 %** — the ranking held across a 2x depth change, retiring the caveat that 21 % was overstated. Under R9.4 no AttnRes fix is authorised |
+| [x] | T11.5 Post-phase trace | TBD-g42 | 2026-08-27 | **G45 GREEN**, **G44 has nothing to meet.** Fused vs baseline at EP=8: **0.00 GiB** memory delta, −0.15 % time (noise). The temporary the chunking removes is **29 MB** at this geometry, not 109 GiB — that figure is production shape, which no single node can run |
 
 ## P12 — Scale-out preparation (G46–G47)
 

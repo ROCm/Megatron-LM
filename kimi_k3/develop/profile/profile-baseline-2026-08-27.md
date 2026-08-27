@@ -1,10 +1,64 @@
 # P11 baseline — where the time actually goes, and why the phase rescoped
 
-> `HIP_VISIBLE_DEVICES=4,5,6,7 torchrun --nproc_per_node=4 -m kimi_k3.tools.proxy_ep8 \`
-> `    --preset 4L --ep 4 --layers 2 --seq 512 --iterations 8 --trace-dir ...`
-> Raw: `results/raw/proxy_ep8_raw.jsonl`. Trace: untracked, see `notes/deletion-requests.md`.
+> `torchrun --nproc_per_node=8 -m kimi_k3.tools.proxy_ep8 --preset 4L --ep 8 --seq 512 --iterations 8`
+> and the same with `--fused-attn-res`. Raw: `results/raw/proxy_ep8_raw.jsonl`.
+> Traces are gitignored run artefacts; the numbers below are what is kept.
+>
+> The first version of this report was taken at EP=4 / 2 layers, because the node
+> was shared at the time. Both sets are here — the second is the gate, the first
+> is now a depth cross-check that happens to confirm it.
 
-## What was actually run, and what it is not
+## The EP=8 baseline (added after the node was freed)
+
+The full configuration the gate asks for: 4 L official, **EP=8**, seq 512,
+`dist_muon`, full recompute, all eight GPUs.
+
+| | EP=8, 4 layers | EP=4, 2 layers (first run) |
+|---|---|---|
+| cold iteration | 18.45 s | 11.48 s |
+| **steady iteration** (median of 5) | **2653.5 ms** | 1747.6 ms |
+| spread across the 5 | 2643–2659 ms | — |
+| peak HBM per rank | **193.6 GiB** | 139.8 GiB |
+| kernel launches | 321,116 | 213,113 |
+| **`Optimizer.step#TensorParallelMuon.step`** | **21.1 %** | 21.0 % |
+| `aten::addmm` | 12.3 % | 12.3 % |
+| collectives | 6.6 % | 8.5 % |
+| **`k3.attn_res`** | **0.09 %** | 0.1 % |
+
+**The ranking is stable across a 2x change in depth.** That was not guaranteed —
+the 2-layer report warned that the optimizer's 21 % was probably overstated,
+because Muon scales with parameters while only two layers of activation work
+competed with it. It was not overstated: doubling the layers doubled both, and
+the ratio did not move. The caveat was reasonable a priori and the measurement
+retired it.
+
+What did *not* change is the conclusion: the AttnRes mixer is **0.09 %** of device
+time, and the Muon optimizer step is the single largest row in the model.
+
+## G44 / G45 — the chunked mixer, measured
+
+Same configuration, `--k3-attn-res-fused`:
+
+| | baseline | fused | delta |
+|---|---|---|---|
+| steady iteration | 2653.5 ms | **2649.6 ms** | −0.15 % (noise) |
+| peak HBM | 193.63 GiB | **193.63 GiB** | **0.00** |
+| kernel launches | 321,116 | 321,163 | +47 |
+
+**No change, and none was possible.** The temporary the chunking removes is
+`[T, K+1, H]` in fp32 — at 4 layers and seq 512 that is `512 x 2 x 7168 x 4` =
+**29 MB**, against a 193 GiB peak. The 109.6 GiB figure it was built for is
+*production* geometry: 93 layers (K = 8) at seq 8192, which is 8x the slots and
+16x the sequence, and which does not fit on this node.
+
+So **G45 is green** — no time regression, no memory regression, no new warnings —
+and **G44 has nothing to meet**, because no budget was set for AttnRes under R9.4
+once the trace put it at 0.1 %. The mixer keeps its default-off flag. This is the
+honest closing position: the optimisation is correct (G43, bit-identical) and
+currently pointless, and it becomes useful only at a geometry no single node can
+run.
+
+## What was actually run first, and what it is not
 
 Official widths (hidden 7168, 896 experts, 96 heads) at **2 layers**, EP=4, seq
 512, `dist_muon`, full recompute. Not the EP=8 configuration the gate asks for.
@@ -69,18 +123,20 @@ claimed. The chunked mixer that landed in P11 stands on its **memory** measureme
 (`results/attn_res.md`: 109.6 GiB per forward, and G43's bit-identical forward),
 not on this trace.
 
-## Improvement budgets, for whenever the 8-GPU run is possible
+## Improvement budgets
 
-Recorded so the later gates have something to be measured against, per R9.3:
+Recorded so the later gates have something to be measured against, per R9.3.
+These are set against the **EP=8** numbers above; the AttnRes row has been settled
+(G44) and the rest are open.
 
 | target | current | budget | why |
 |---|---|---|---|
-| Muon step | 21.0 % / 960 ms | −30 % of that row | per-head Newton-Schulz (P9) makes many small orthogonalisations out of few large ones; whether that is faster or slower on this part is **unmeasured** and is the first thing to check |
-| collectives | 8.5 % / 390 ms | −20 % | overlap: `overlap_grad_reduce` is off in `build_optimizer` |
-| `aten::add_`, 9,614 calls | 3.6 % | fewer launches | 213 k launches per iteration is high; the AttnRes prefix accumulation is one contributor |
-| AttnRes mixer | 0.1 % **at 2 layers** | no budget | R9.4: not a target until a deeper trace ranks it |
+| Muon step | **21.1 % / 1503 ms** | −30 % of that row | per-head Newton-Schulz (P9) makes many small orthogonalisations out of few large ones; whether that is faster or slower on this part is **unmeasured** and is the first thing to check |
+| collectives | **6.6 % / 467 ms** | −20 % | overlap: `overlap_grad_reduce` is off in `build_optimizer` |
+| `aten::add_`, 14,449 calls | 3.6 % | fewer launches | **321 k** launches per iteration is high; the AttnRes prefix accumulation is one contributor |
+| AttnRes mixer | **0.09 % at EP=8** | no budget — **settled** | R9.4. G44 measured the chunked mixer at this geometry: 0.00 GiB and −0.15 % time, because the temporary it removes is 29 MB here |
 
-## Warnings seen (G45's "no banned warnings")
+## Warnings seen (G45)
 
 Two, both from core and both worth a decision rather than suppression:
 
@@ -113,5 +169,6 @@ waiting for the box to clear.
 
 ## Owed
 
-The EP=8 run at 4 L (blocked on the shared node), and a >= 13-layer proxy across
-nodes before any AttnRes performance claim. G44 and G45 stay open.
+A >= 13-layer proxy **across nodes** — the only geometry at which the AttnRes
+mixer can be ranked, or its chunking shown to pay. Everything runnable on one node
+has now been run.

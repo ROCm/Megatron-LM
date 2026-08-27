@@ -58,7 +58,7 @@ kimi_k3/develop/
 | **P8** | complete | converter both directions, 497,220 tensors accounted for, anchored parity on real layer-0 weights (cosine 0.999973) |
 | **P9** | complete | twin-run noise band, per-head Muon, QK-clip, bitwise resume under PP=2 (found A15: dist_muon could not resume at all) |
 | **P10** | complete (G41 owed) | MXFP4 scale rule corrected against the released weights (A16); a8w4 forward at rel-L2 1.66e-3; STE gradients exact |
-| **P11** | partial | chunked AttnRes mixer bit-identical (G43); baseline trace says the Muon step is 21 % and AttnRes 0.1 % — phase rescoped. EP=8 blocked on a shared node |
+| **P11** | complete | EP=8 baseline: steady 2653.5 ms, peak 193.6 GiB. Muon step **21.1 %**, AttnRes **0.09 %** — the predicted bottleneck is not one, and the phase rescoped (G42–G45) |
 | **P12** | complete (T12.5 owed) | 93 L configs validated: floor 28 nodes, PP capped at 8 by AttnRes block alignment (G46); dispatcher A/B plan (G47, found A17) |
 
 The decoder is complete and trains end to end: 30 steps on a fixed batch drive the

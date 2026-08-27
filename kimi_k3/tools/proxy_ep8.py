@@ -68,13 +68,15 @@ def build(args, rank: int, world: int):
     )
     tensor_parallel.model_parallel_cuda_manual_seed(1234)
     overrides = {}
+    if args.fused_attn_res:
+        overrides.update(k3_attn_res_fused=True, k3_attn_res_chunk=args.attn_res_chunk)
     if args.layers:
         # k3_kda_layers is 1-indexed and preset-wide, so it has to be trimmed too
         from kimi_k3.config.presets import preset as get_preset
 
         kda = get_preset(args.preset)["config"]["k3_kda_layers"]
-        overrides = {"num_layers": args.layers,
-                     "k3_kda_layers": tuple(n for n in kda if n <= args.layers)}
+        overrides.update(num_layers=args.layers,
+                         k3_kda_layers=tuple(n for n in kda if n <= args.layers))
     model = build_k3_model(
         args.preset, allow_official=args.preset != "tiny",
         expert_model_parallel_size=args.ep,
@@ -145,6 +147,9 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=10)
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--optimizer", default="dist_muon")
+    ap.add_argument("--fused-attn-res", action="store_true",
+                    help="run with the chunked AttnRes mixer (G44/G45)")
+    ap.add_argument("--attn-res-chunk", type=int, default=4096)
     ap.add_argument("--trace-dir", default=None)
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
@@ -162,7 +167,7 @@ def main() -> None:
     from kimi_k3.config.presets import preset as get_preset
 
     row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
-           "rank": rank, "layers": args.layers}
+           "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res}
     torch.cuda.reset_peak_memory_stats()
     try:
         model, ddp, opt = build(args, rank, world)
