@@ -121,22 +121,23 @@
 | [x] | T10.3 Checkpointing of packed data + scales + masters | `de2d10b1e` | 2026-08-27 | landed in P0 with the expert prototype; packed caches are buffers and ride the checkpoint |
 | [ ] | T10.4 QAT-vs-BF16 twin, serve parity | — | — | **G41 owed** — 8-GPU scheduled tier, per the P9 twin protocol |
 
-## P11 — Perf baseline and fused AttnRes (G42–G45)
+## P11 — Performance baseline and AttnRes optimisation (G42–G45)
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T11.1 EP=8 proxy + trace | | | G42 |
-| [ ] | T11.2 Baseline report + per-task budgets | | | G42; forensic attribution before any fix |
-| [ ] | T11.3 `attn_res_fused.py` | | | G43, G44 |
-| [ ] | T11.4 Next-ranked target (10 % rule) | | | |
-| [ ] | T11.5 Post-phase trace + perf tables | | | G45 |
+| [-] | T11.1 EP=8 proxy + trace | `ca5beca90` | 2026-08-27 | **G42 PARTIAL.** Harness validated end to end; ran at official widths, **2 layers**, EP=4, seq 512 — steady **1747.6 ms**, peak 140 GiB/rank. EP=8 is blocked: the node is shared and another tenant holds ~232 GB |
+| [x] | T11.2 Baseline report + budgets | TBD-p11 | 2026-08-27 | `profile/profile-baseline-2026-08-27.md`. **The prediction was wrong**: AttnRes is 0.1 % of device time, the Muon step is 21 % |
+| [x] | T11.3 Fused (chunked) AttnRes mixer | `92db9d6fc` | 2026-08-27 | **G43 GREEN.** Forward and per-token gradients **bit-identical**; the shared `[H]` gain gradient differs by fp32 accumulation order only, and the error does not grow with chunk count. Behind `--k3-attn-res-fused`, default off |
+| [ ] | T11.4 Whatever the ranking says next | — | — | **rescoped.** Under R9.4 nothing at this geometry authorises an AttnRes perf fix; the ranking is not yet the production one (2 layers means ≤1 residual slot against 8 at 93 L) |
+| [ ] | T11.5 Post-phase trace | — | — | **G44/G45 owed** — need an unshared node |
 
-## P12 — Scale-out preparation (G46–G47) **[CLUSTER]**
+## P12 — Scale-out preparation (G46–G47)
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T12.1 93 L configs on measured recipes | | | G46 |
-| [ ] | T12.2 PP layouts aligned to AttnRes blocks | | | boundaries at layer ≡ 11 (mod 12) |
-| [ ] | T12.3 EP ladder configs + QB load template | | | G47 |
-| [ ] | T12.4 Dispatcher A/B matrix | | | plan only |
-| [ ] | T12.5 Continued-pretrain flatness scripts | | | |
+| [x] | T12.1 93 L configs from the measured recipe | `a5c3a9f62` | 2026-08-27 | **G46 GREEN.** Floor is **28 nodes** (pp8 x ep28: 19.25 B params/GPU, 141 GiB state + 82 GiB measured headroom). `results/scaleout_93l.md` |
+| [x] | T12.2 PP layouts + legality test | `a5c3a9f62` | 2026-08-27 | **PP cannot exceed 8** with aligned boundaries — 93 layers give seven whole AttnRes blocks, so eight cut points. Every `pp16` candidate is flagged, not silently emitted |
+| [x] | T12.3 EP ladder | `a5c3a9f62` | 2026-08-27 | 8/16/28/32/56, each asserted to divide 896 |
+| [ ] | T12.4 Dispatcher A/B matrix | — | — | **G47 owed** — a plan, not an implementation |
+| [ ] | T12.5 Continued-pretrain flatness scripts | — | — | owed |
+
