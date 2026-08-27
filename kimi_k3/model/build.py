@@ -54,7 +54,13 @@ def build_k3_model(
         if post_process is None:
             post_process = parallel_state.is_pipeline_last_stage()
 
-    ctx = torch.device(device) if device else torch.device("cpu")
+    # Default to the device core's own modules force themselves onto. Megatron and
+    # TE place parameters on torch.cuda.current_device() regardless of an ambient
+    # context (finding A14), so defaulting to CPU here would silently build a
+    # mixed-device model whose first matmul fails.
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+    ctx = torch.device(device)
     with ctx:
         return K3GPTModel(
             config=config,

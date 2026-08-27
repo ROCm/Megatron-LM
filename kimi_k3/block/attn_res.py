@@ -25,16 +25,7 @@ from typing import Optional
 
 import torch
 
-
-def _hi(dtype: torch.dtype) -> torch.dtype:
-    """The dtype the mix runs in: fp32, or the input dtype when it is wider.
-
-    The release writes ``.float()``, which is an upcast for the bf16 it actually
-    runs on. Promoting instead of casting keeps that behaviour bit-for-bit while
-    letting an fp64 test input stay fp64 -- without which `gradcheck` compares a
-    float64 numerical Jacobian against a float32 analytical one and fails.
-    """
-    return torch.promote_types(dtype, torch.float32)
+from ..numerics import hi_dtype as _hi
 
 
 def score_vector(norm_weight: torch.Tensor, proj_weight: torch.Tensor) -> torch.Tensor:

@@ -45,11 +45,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T3.1 `kda_eager_fp32.py` FP32 oracle | | | must place the q/k L2 norm where the kernel does |
-| [ ] | T3.2 `kda.py` + `kda_backends.py` (two gates, released kwargs) | | | eager default until G15 green at production shapes |
-| [ ] | T3.3 Tolerance floors + bounds recorded | | | seq {1k, 8k, 64k} |
-| [ ] | T3.4 `sharded_state_dict` + state layout round-trip | | | G16 |
-| [ ] | T3.5 Behavioural tests (causality, lower-bound clamp, safe_gate) | | | |
+| [x] | T3.1 `kda_eager_fp32.py` FP32 oracle | TBD-p3 | 2026-08-27 | **G14 GREEN.** **Bit-identical** to fla's own `naive_recurrent_kda`; 7e-7 vs `chunk_kda` and `fused_recurrent_kda`; fp64 gradcheck passes. Gate and recurrence both read from fla source, not from the paper |
+| [x] | T3.2 `kda.py` + `kda_backends.py` (two gates, released kwargs) | TBD-p3 | 2026-08-27 | module parameter count equals `mem_budget.kda_layer_params` exactly, which was itself checked against the released checkpoint. `K3KDASelfAttention` adapts to Megatron's sequence-first interface; KDA layers in a real model now use real KDA |
+| [x] | T3.3 Tolerance floors + bounds recorded | TBD-p3 | 2026-08-27 | **G15 GREEN** at tiny/mid. fp32 7.0e-7 · bf16 4.3e-3 against a **3.3e-3 dtype floor** · bwd 2.9e-5 fp32 / 6.1e-3 bf16. Error does **not** grow with sequence length — the `-5` gate bounds accumulation. Report: `results/kda_parity.md`. Production geometry owed to the nightly |
+| [x] | T3.4 `sharded_state_dict` + state layout round-trip | TBD-p3 | 2026-08-27 | **G16 GREEN.** State carries across a split sequence; `transpose_state_layout` inverts; state dict round-trips |
+| [x] | T3.5 Behavioural tests | TBD-p3 | 2026-08-27 | causality, gate bounds incl. saturation at both ends, softplus branch, the epsilon-inside-the-sqrt L2 norm, batch independence under the seq-first transpose |
 
 ## P4 — Gated MLA with NoPE (G17–G18)
 

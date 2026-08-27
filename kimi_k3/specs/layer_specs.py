@@ -16,6 +16,7 @@ core's MLA spec. The *plan* is already correct, so `test_k3_p2_specs.py` can pin
 the pattern now and P3 flips one branch.
 """
 
+import copy
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
@@ -85,15 +86,21 @@ def local_layer_plan(
 def _layer_spec_for(config, entry: K3LayerPlan) -> ModuleSpec:
     """One layer's ModuleSpec.
 
-    P3 replaces the KDA branch with the real `KimiDeltaAttention` submodules and
-    P4 replaces the MLA branch with `K3GatedMLA`; the dense/MoE split below is
-    already final.
+    The dense/MoE split is final. The attention half is now real for KDA layers
+    (P3); the MLA branch is still core's stock MLA until P4 replaces it with
+    `K3GatedMLA` (NoPE, `192**-0.5` scale, full-rank sigmoid output gate).
     """
-    return get_gpt_layer_with_transformer_engine_spec(
+    spec = get_gpt_layer_with_transformer_engine_spec(
         num_experts=None if entry.ffn == DENSE else config.num_moe_experts,
         moe_grouped_gemm=config.moe_grouped_gemm,
-        multi_latent_attention=True,  # placeholder for KDA layers until P3
+        multi_latent_attention=True,
     )
+    if entry.is_kda:
+        from kimi_k3.attention.kda import K3KDASelfAttention
+
+        spec = copy.deepcopy(spec)
+        spec.submodules.self_attention = ModuleSpec(module=K3KDASelfAttention)
+    return spec
 
 
 def get_k3_layer_specs(

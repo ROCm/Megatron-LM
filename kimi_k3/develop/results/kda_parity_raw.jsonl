@@ -1,0 +1,20 @@
+{"seq": 256, "geometry": "tiny", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.0032793183345347643, "max_abs": 0.00040478259325027466, "cosine": 0.9999946355819702}
+{"seq": 256, "geometry": "tiny", "comparison": "fla fp32 vs eager fp32", "rel_l2": 6.89843204781937e-07, "max_abs": 8.195638656616211e-08, "cosine": 0.9999998807907104}
+{"seq": 256, "geometry": "tiny", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 2.91523574560415e-05, "which": "dt_bias"}
+{"seq": 256, "geometry": "tiny", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.004255669191479683, "max_abs": 0.00048828125, "cosine": 0.9999909996986389}
+{"seq": 256, "geometry": "tiny", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.006078054197132587, "which": "v"}
+{"seq": 1024, "geometry": "tiny", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.0033648114185780287, "max_abs": 0.0005644485354423523, "cosine": 0.9999943375587463}
+{"seq": 1024, "geometry": "tiny", "comparison": "fla fp32 vs eager fp32", "rel_l2": 7.019934287200158e-07, "max_abs": 1.0133953765034676e-07, "cosine": 0.9999999403953552}
+{"seq": 1024, "geometry": "tiny", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 1.9961829821113497e-05, "which": "dt_bias"}
+{"seq": 1024, "geometry": "tiny", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.004328264854848385, "max_abs": 0.0009765625, "cosine": 0.999990701675415}
+{"seq": 1024, "geometry": "tiny", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.006113046780228615, "which": "v"}
+{"seq": 1024, "geometry": "mid", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.003294649999588728, "max_abs": 0.0002538710832595825, "cosine": 0.9999945759773254}
+{"seq": 1024, "geometry": "mid", "comparison": "fla fp32 vs eager fp32", "rel_l2": 7.012358764768578e-07, "max_abs": 7.636845111846924e-08, "cosine": 1.0}
+{"seq": 1024, "geometry": "mid", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 1.7623542589717545e-05, "which": "dt_bias"}
+{"seq": 1024, "geometry": "mid", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.004275336861610413, "max_abs": 0.00048828125, "cosine": 0.9999909400939941}
+{"seq": 1024, "geometry": "mid", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.005992463789880276, "which": "v"}
+{"seq": 4096, "geometry": "mid", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.0032979240640997887, "max_abs": 0.0003876015543937683, "cosine": 0.9999945163726807}
+{"seq": 4096, "geometry": "mid", "comparison": "fla fp32 vs eager fp32", "rel_l2": 7.060586426632653e-07, "max_abs": 7.636845111846924e-08, "cosine": 1.0}
+{"seq": 4096, "geometry": "mid", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 1.627288293093443e-05, "which": "g"}
+{"seq": 4096, "geometry": "mid", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.004299631807953119, "max_abs": 0.00048828125, "cosine": 0.9999908208847046}
+{"seq": 4096, "geometry": "mid", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.00607250677421689, "which": "v"}
