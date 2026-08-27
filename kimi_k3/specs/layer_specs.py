@@ -86,20 +86,22 @@ def local_layer_plan(
 def _layer_spec_for(config, entry: K3LayerPlan) -> ModuleSpec:
     """One layer's ModuleSpec.
 
-    The dense/MoE split is final. The attention half is now real for KDA layers
-    (P3); the MLA branch is still core's stock MLA until P4 replaces it with
-    `K3GatedMLA` (NoPE, `192**-0.5` scale, full-rank sigmoid output gate).
+    Both attention branches are now real: KDA from P3, gated NoPE MLA from P4.
+    The dense/MoE split was final from the start.
     """
-    spec = get_gpt_layer_with_transformer_engine_spec(
-        num_experts=None if entry.ffn == DENSE else config.num_moe_experts,
-        moe_grouped_gemm=config.moe_grouped_gemm,
-        multi_latent_attention=True,
-    )
-    if entry.is_kda:
-        from kimi_k3.attention.kda import K3KDASelfAttention
+    from kimi_k3.attention.gated_mla import K3GatedMLASelfAttention
+    from kimi_k3.attention.kda import K3KDASelfAttention
 
-        spec = copy.deepcopy(spec)
-        spec.submodules.self_attention = ModuleSpec(module=K3KDASelfAttention)
+    spec = copy.deepcopy(
+        get_gpt_layer_with_transformer_engine_spec(
+            num_experts=None if entry.ffn == DENSE else config.num_moe_experts,
+            moe_grouped_gemm=config.moe_grouped_gemm,
+            multi_latent_attention=True,
+        )
+    )
+    spec.submodules.self_attention = ModuleSpec(
+        module=K3KDASelfAttention if entry.is_kda else K3GatedMLASelfAttention
+    )
     return spec
 
 
