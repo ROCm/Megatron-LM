@@ -1,4 +1,4 @@
-# P7 — Trainer (PARTIAL: tiny end-to-end green, official-width owed)
+# P7 — Trainer (COMPLETE)
 
 ## 1. Objective
 
@@ -17,7 +17,7 @@ Turn the completed decoder into something that trains, and measure what it costs
 | Gate | Status | Evidence |
 |---|---|---|
 | **G27** — it trains | **GREEN at tiny** | 30 steps on a fixed batch drive the loss from 8.36 to ~0.0 under **both** `dist_muon` and `adam`; on fresh random tokens it sits at `ln(4096) = 8.32`, i.e. chance |
-| **G28** — memory report | **owed** | the 4 L official run needs 8 GPUs and belongs to the nightly job; the analytic model and the G5 measurements stand in until then |
+| **G28** — memory report | **GREEN** | the 4 L official config **fits on one node**: 16.31 B params/rank, peak 188.7–202.2 GiB of 288 GB, three steps with finite losses on all 8 ranks, no fallbacks needed (`results/official_smoke.md`) |
 | **G29** — checkpoint round-trip | **GREEN** | save, rebuild from a *different* init, load, and the forward matches bitwise |
 
 `pytest kimi_k3/tests/ -q` → **168 passed, 1 skipped**.
@@ -39,18 +39,30 @@ Both pass under `dist_muon` and `adam`, which also confirms the Muon parameter
 split does not strand any tensor: every parameter is in exactly one group and
 each group's optimizer moves it.
 
-## 5. What is honestly not done
+## 5. The official-width run
 
-The 4 L official config (94 B parameters, 8 GPUs, EP=8) has not been run. That is
-G28's substance, and with it the plan's documented fallbacks (seq 4 k, higher
-grad-accum, precision-aware Adam). It needs a multi-GPU launch and a real time
-budget, so it belongs to the nightly job rather than to an interactive session.
+It fits, and the analytic model was exact: `06-capacity-and-parallelism.md`
+predicted **16.3 B parameters per rank** for 4 L at EP = 8, and the measurement is
+16.31 B. Peak memory is 188.7–202.2 GiB of 288 GB at `seq = 512` with full
+recompute, so none of the documented fallbacks were needed.
 
-Also unfinished from earlier phases, and unchanged: production-geometry KDA
+The optimizer figure (8.78–9.08 B/param) sits *above* G5's 7.87 and should:
+under EP = 8 with a world size of 8, the expert-parallel DP group has size 1, so
+`dist_muon` shards only the non-expert 2 % of the model. G5 measured the opposite
+corner (DP = 8, EP = 1). Both follow from the same model of what
+`LayerWiseDistributedOptimizer` shards.
+
+What it does not establish: `seq = 512`, three steps, mock data. Sequence-length
+scaling is activation-dominated and the AttnRes payload grows with it, so 8 k
+needs its own measurement.
+
+## 6. Still owed elsewhere
+
+Unchanged from earlier phases: production-geometry KDA
 parity (G15 nightly), the 8-rank EP exercise (G26), and the AITER kernel path
 (P10) which needs the workspace checkout bumped and rebuilt.
 
-## 6. Commit chain
+## 7. Commit chain
 
 | commit | scope |
 | --- | --- |

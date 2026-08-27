@@ -88,8 +88,8 @@
 | --- | --- | --- | --- | --- |
 | [x] | T7.1 `pretrain_kimi_k3.py` end to end | `110c84c69` | 2026-08-27 | **G27 GREEN at tiny.** 30 steps on a fixed batch drive the loss 8.36 → ~0.0 under **both** `dist_muon` and `adam`; on fresh random tokens it sits at `ln(4096) = 8.32` (chance), which catches both a broken model and a label leak |
 | [x] | T7.2 `tools/tokenizer.py` | `110c84c69` | 2026-08-27 | tiktoken ranks + special ids asserted against the released `config.json` |
-| [ ] | T7.3 4 L official config on the measured recipe | | | **owed to the nightly**: 94 B parameters, 8 GPUs, EP=8, plus the documented fallbacks |
-| [ ] | T7.4 Memory report | | | **G28 owed** with T7.3; the analytic model and the G5 measurements stand in |
+| [x] | T7.3 4 L official config on the measured recipe | TBD-p7b | 2026-08-27 | **It fits.** 8× MI355X, EP=8, seq 512, `dist_muon`, full recompute: **16.31 B params/rank** (the analytic model predicted 16.3 B), peak **188.7–202.2 GiB** of 288 GB, three steps with finite losses on all ranks. None of the documented fallbacks were needed |
+| [x] | T7.4 Memory report | TBD-p7b | 2026-08-27 | **G28 GREEN.** `results/official_smoke.md`. 12.43–13.32 B/param at peak; 8.78–9.08 after optimizer construction — above G5's 7.87 because at EP=8 with world 8 the expert-DP group is size 1, so `dist_muon` shards only the non-expert 2 %. Seq 8 k and the EP ladder remain the nightly's |
 | [x] | T7.5 Checkpoint save/load | `110c84c69` | 2026-08-27 | **G29 GREEN.** Save, rebuild from a *different* init, load, forward matches bitwise |
 
 ## P8 — Converter and anchored parity (G30–G33)
