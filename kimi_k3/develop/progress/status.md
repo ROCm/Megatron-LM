@@ -25,11 +25,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [x] | T1.1 Branch + skeleton | TBD-p1 | 2026-08-27 | branch `dev/wen/kimi-k3`; package skeleton + `kimi_k3/README.md` |
-| [x] | T1.2 `no_core_diff_guard.sh` + allowlist | TBD-p1 | 2026-08-27 | **G9 GREEN.** Passes on the branch (59 files, all in `kimi_k3/`), rejects a staged core edit with exit 1, honours exactly the two allowlisted root files, rejects any other root file, and compares against the **merge-base** so an IFU rebase does not flag upstream's own core commits. 6 hermetic tests in a throwaway repo |
-| [x] | T1.3 `test_k3_p1_pin_contracts.py` (IFU tripwire) | TBD-p1 | 2026-08-27 | **8 contracts**, each its own test with a message saying what to re-check: block injection, `adjust_tensor_shapes_fn` (accepted by 1F1B, rejected by VPP/no-PP), single-tensor `backward_step`, router injection + `postprocess`, `clip_qk`, `dist_muon` sharding + dist-opt rejection, config substitution, MLA `k_channels` (A13) |
-| [x] | T1.4 `test_env.py` + `tools/capture_env.py` | TBD-p1 | 2026-08-27 | **G10 GREEN.** torch 2.10 / triton **3.7.1** (asserted >=3.7 with the reason) / TE 2.12 / fla 0.6.0 / 8x MI355X. AITER K3 kernels skip with a pointer until the checkout is bumped (P10) |
-| [x] | T1.5 Pre-commit hook + CI workflow | TBD-p1 | 2026-08-27 | `.pre-commit-config.yaml` gains a local `kimi-k3-no-core-diff` hook; `.github/workflows/kimi_k3.yml` wires CI stages 0 and 1. Both YAML files validated. **Human action needed:** `pre-commit install`, and set the runner labels + container image (marked `TODO(maintainer)`) |
+| [x] | T1.1 Branch + skeleton | `c96fad823` | 2026-08-27 | branch `dev/wen/kimi-k3`; package skeleton + `kimi_k3/README.md` |
+| [x] | T1.2 `no_core_diff_guard.sh` + allowlist | `c96fad823` | 2026-08-27 | **G9 GREEN.** Passes on the branch (59 files, all in `kimi_k3/`), rejects a staged core edit with exit 1, honours exactly the two allowlisted root files, rejects any other root file, and compares against the **merge-base** so an IFU rebase does not flag upstream's own core commits. 6 hermetic tests in a throwaway repo |
+| [x] | T1.3 `test_k3_p1_pin_contracts.py` (IFU tripwire) | `c96fad823` | 2026-08-27 | **8 contracts**, each its own test with a message saying what to re-check: block injection, `adjust_tensor_shapes_fn` (accepted by 1F1B, rejected by VPP/no-PP), single-tensor `backward_step`, router injection + `postprocess`, `clip_qk`, `dist_muon` sharding + dist-opt rejection, config substitution, MLA `k_channels` (A13) |
+| [x] | T1.4 `test_env.py` + `tools/capture_env.py` | `c96fad823` | 2026-08-27 | **G10 GREEN.** torch 2.10 / triton **3.7.1** (asserted >=3.7 with the reason) / TE 2.12 / fla 0.6.0 / 8x MI355X. AITER K3 kernels skip with a pointer until the checkout is bumped (P10) |
+| [x] | T1.5 Pre-commit hook + CI workflow | `c96fad823` | 2026-08-27 | `.pre-commit-config.yaml` gains a local `kimi-k3-no-core-diff` hook; `.github/workflows/kimi_k3.yml` wires CI stages 0 and 1. Both YAML files validated. **Human action needed:** `pre-commit install`, and set the runner labels + container image (marked `TODO(maintainer)`) |
 
 ## P2 — Config, presets, model construction (G11–G13)
 

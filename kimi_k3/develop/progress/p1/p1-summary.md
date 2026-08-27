@@ -59,4 +59,8 @@ their own test files.
 
 ## 7. Commit chain
 
-_pending review (rule R1.1)._
+| commit | scope |
+| --- | --- |
+| **c96fad823** | P1 T1.1–T1.5: guard, pin contracts, env checks, CI wiring; G9 and G10 green |
+
+**P1 closes here.** Next: P2 (config, presets, model construction; G11–G13).
