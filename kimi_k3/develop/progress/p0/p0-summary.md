@@ -136,4 +136,6 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
 
 | **73114c73a** | P0 T0.5: optimizer-memory measurement (G5 green); capacity section regenerated from data |
 
-T0.6–T0.8 (all GPU) continue in this phase and will extend this summary.
+| **187ac2c01** | P0 T0.6: AttnRes mixer oracle, payload protocol, sizing (G6 green); P11 budget set |
+
+T0.7–T0.8 continue in this phase and will extend this summary.
