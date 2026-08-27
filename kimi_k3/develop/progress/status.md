@@ -55,11 +55,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [x] | T4.1 `K3GatedMLA`: rotary bypassed, `192**-0.5` scale | TBD-p4 | 2026-08-27 | **G17 GREEN.** Own module, not a subclass: once rotary is gone, the scale changes and a gate is inserted, nothing of core's MLA forward survives (and core has no NoPE mode — A9). Shape contract preserved so the converter stays a rename |
-| [x] | T4.2 Full-rank sigmoid output gate + fp32 attention output | TBD-p4 | 2026-08-27 | gate placement pinned by construction: zeroing `g_proj` makes sigmoid exactly 0.5, so a gate *before* `o_proj` must scale its output by exactly 0.5 |
-| [x] | T4.3 `clip_qk` hook exposed | TBD-p4 | 2026-08-27 | present on both the module and the Megatron adapter; core's walker skips layers without it |
-| [x] | T4.4 Fused backend at 192/128 | TBD-p4 | 2026-08-27 | **G18 GREEN.** SDPA fwd+bwd in bf16 at the real head-dim asymmetry, V padded to `q_head_dim` and sliced back exactly as the release does for FlashAttention |
-| [x] | T4.5 LoRA-norm epsilon | TBD-p4 | 2026-08-27 | 1e-6, asserted, and shown to matter: changing it changes the output |
+| [x] | T4.1 `K3GatedMLA`: rotary bypassed, `192**-0.5` scale | `231544065` | 2026-08-27 | **G17 GREEN.** Own module, not a subclass: once rotary is gone, the scale changes and a gate is inserted, nothing of core's MLA forward survives (and core has no NoPE mode — A9). Shape contract preserved so the converter stays a rename |
+| [x] | T4.2 Full-rank sigmoid output gate + fp32 attention output | `231544065` | 2026-08-27 | gate placement pinned by construction: zeroing `g_proj` makes sigmoid exactly 0.5, so a gate *before* `o_proj` must scale its output by exactly 0.5 |
+| [x] | T4.3 `clip_qk` hook exposed | `231544065` | 2026-08-27 | present on both the module and the Megatron adapter; core's walker skips layers without it |
+| [x] | T4.4 Fused backend at 192/128 | `231544065` | 2026-08-27 | **G18 GREEN.** SDPA fwd+bwd in bf16 at the real head-dim asymmetry, V padded to `q_head_dim` and sliced back exactly as the release does for FlashAttention |
+| [x] | T4.5 LoRA-norm epsilon | `231544065` | 2026-08-27 | 1e-6, asserted, and shown to matter: changing it changes the output |
 
 ## P5 — AttnRes block and pipeline transport (G19–G22)
 

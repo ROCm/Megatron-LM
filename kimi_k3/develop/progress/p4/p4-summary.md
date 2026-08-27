@@ -62,4 +62,8 @@ it should be stated rather than rediscovered.
 
 ## 7. Commit chain
 
-_pending._
+| commit | scope |
+| --- | --- |
+| **231544065** | P4 T4.1–T4.5: gated NoPE MLA, oracle, fused backend; G17/G18 green |
+
+**P4 closes here.** Next: P5 (faithful AttnRes layer placement).
