@@ -37,7 +37,7 @@ the optimizer memory model — plus close the open ground-truth questions.
 | **G4** — model construction, no transient core block | **GREEN** | 4 tests; constructor spy sees 0 core blocks; meta and cuda both build |
 | **G5** — optimizer memory | **GREEN** | 16 runs / 40 rank-rows; `dist_muon` 7.87 B/param at DP=8 vs `muon` 15.17 flat; analytic `6 + 8/DP + c` fits with c ≈ 0.9–1.2 |
 | **G6** — AttnRes payload sizing | **GREEN** | payload peaks at 2.8 GB in flight mid-pipeline; eager mixer 109.6 GiB read and ≈635 ms forward per microbatch; P11 budget set at ≤64 ms |
-| **G7** — PP=2 packed payload + gradient assertion | not started | needs 2 GPUs |
+| **G7** — PP=2 packed payload + gradient assertion | **GREEN** | bitwise match against PP=1 (loss 0.0, grads 0.0 / 131 params); negative control gives identical loss with gradients wrong by 8.1e-4 |
 | **G8** — external assets + one-expert QAT | not started | AITER pin known stale (finding D1) |
 
 `pytest kimi_k3/tests/ -q` → **22 passed**.
@@ -86,6 +86,17 @@ the eager AttnRes forward alone is the same order. Recompute is mandatory
 (saving the fp32 stacks would cost ≈236 GB per microbatch), and P11's fused mixer
 now has a budget: ≤10 % of the eager forward and no fp32 stack in HBM.
 
+### Pipeline transport (G7)
+
+PP=2 with the packed payload is **bitwise identical** to the single-stage run —
+loss and all 131 parameter gradients. The negative control (block-residual slots
+detached at creation, emulating a two-tensor payload) returns an **identical
+loss** with gradients wrong by 8.1e-4: a loss-only check would have passed it.
+That is finding A1 reproduced on demand, and the reason G20 asserts gradient flow.
+
+Core's own `adjust_tensor_shapes_fn` supplied the per-stage shapes (recv 1→2,
+send 2→3); no schedule was re-implemented, and the hook is bound only when PP > 1.
+
 ## 5. Findings added to the register
 
 | id | severity | what |
@@ -127,6 +138,13 @@ Reference downloads (config, modeling sources, 60 MB index) stay outside the tre
   exclude them.
 - `dist_muon` shard balance is ±4 % at DP=8 on the probe's shape mix; re-measure
   at 4 L official shapes with grouped-GEMM experts (G28).
+- Determinism traps for any future parity harness: `hidden_dropout` /
+  `attention_dropout` default to 0.1, and the router's expert-bias accumulator
+  mutates during forward. Both make two "identical" runs differ by ~1e-4, which
+  would inflate a measured floor and hide a real defect.
+- The P0 block is transport-faithful but layer-approximate (it wraps a stock
+  `TransformerLayer` rather than splitting the mixes around attention and MLP).
+  P5 makes it faithful; no parity gate may cite it until then.
 
 ## 9. Commit chain
 
