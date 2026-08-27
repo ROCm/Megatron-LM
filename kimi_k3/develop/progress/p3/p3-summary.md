@@ -74,4 +74,8 @@ against something independent, measure the floor, then set a bound.
 
 ## 7. Commit chain
 
-_pending._
+| commit | scope |
+| --- | --- |
+| **157d86a18** | P3 T3.1–T3.5: oracle, module, backends, tolerances; G14/G15/G16 green |
+
+**P3 closes here.** Next: P4 (gated MLA with NoPE).
