@@ -25,3 +25,6 @@ docs/apidocs
 
 # Git worktrees
 .worktrees/
+# Chrome traces are hundreds of MB; they are run artefacts, not source.
+# The report derived from them is what belongs in the repo.
+kimi_k3/develop/profile/traces/

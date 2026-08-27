@@ -1,0 +1,20 @@
+config                  GPUs  nodes  params/GPU  state GiB  +headroom  fits  note
+---------------------------------------------------------------------------------
+93L-tp1-pp4-ep8           32    4.0      99.27B      727.6      809.6 False  
+93L-tp1-pp4-ep16          64    8.0      56.73B      415.8      497.8 False  
+93L-tp1-pp4-ep28         112   14.0      38.50B      282.2      364.2 False  
+93L-tp1-pp4-ep32         128   16.0      35.46B      259.9      341.9 False  
+93L-tp1-pp4-ep56         224   28.0      26.34B      193.1      275.1  True  
+93L-tp1-pp8-ep8           64    8.0      49.64B      363.8      445.8 False  
+93L-tp1-pp8-ep16         128   16.0      28.36B      207.9      289.9 False  
+93L-tp1-pp8-ep28         224   28.0      19.25B      141.1      223.1  True  
+93L-tp1-pp8-ep32         256   32.0      17.73B      129.9      211.9  True  
+93L-tp1-pp8-ep56         448   56.0      13.17B       96.5      178.5  True  
+93L-tp1-pp16-ep8         128   16.0      24.82B      181.9      263.9  True  pp=16 exceeds the 8 aligned cut points that 93 layers at blo
+93L-tp1-pp16-ep16        256   32.0      14.18B      103.9      185.9  True  pp=16 exceeds the 8 aligned cut points that 93 layers at blo
+93L-tp1-pp16-ep28        448   56.0       9.62B       70.5      152.5  True  pp=16 exceeds the 8 aligned cut points that 93 layers at blo
+93L-tp1-pp16-ep32        512   64.0       8.86B       65.0      147.0  True  pp=16 exceeds the 8 aligned cut points that 93 layers at blo
+93L-tp1-pp16-ep56        896  112.0       6.59B       48.3      130.3  True  pp=16 exceeds the 8 aligned cut points that 93 layers at blo
+
+pp=4 layout [24, 24, 24, 21] boundaries [24, 48, 72] payload slots [2, 4, 6]
+pp=8 layout [12, 12, 12, 12, 12, 12, 12, 9] boundaries [12, 24, 36, 48, 60, 72, 84] payload slots [1, 2, 3, 4, 5, 6, 7]

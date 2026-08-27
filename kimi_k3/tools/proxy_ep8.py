@@ -67,10 +67,19 @@ def build(args, rank: int, world: int):
         expert_model_parallel_size=args.ep,
     )
     tensor_parallel.model_parallel_cuda_manual_seed(1234)
+    overrides = {}
+    if args.layers:
+        # k3_kda_layers is 1-indexed and preset-wide, so it has to be trimmed too
+        from kimi_k3.config.presets import preset as get_preset
+
+        kda = get_preset(args.preset)["config"]["k3_kda_layers"]
+        overrides = {"num_layers": args.layers,
+                     "k3_kda_layers": tuple(n for n in kda if n <= args.layers)}
     model = build_k3_model(
         args.preset, allow_official=args.preset != "tiny",
         expert_model_parallel_size=args.ep,
         recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1,
+        **overrides,
     ).bfloat16()
     return (model,) + build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True)
 
@@ -130,6 +139,9 @@ def main() -> None:
     ap.add_argument("--preset", default="4L")
     ap.add_argument("--ep", type=int, default=8)
     ap.add_argument("--seq", type=int, default=512)
+    ap.add_argument("--layers", type=int, default=None,
+                    help="override the preset's layer count; the proxy trades depth "
+                         "for fitting on the GPUs actually available")
     ap.add_argument("--iterations", type=int, default=10)
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--optimizer", default="dist_muon")
@@ -149,7 +161,8 @@ def main() -> None:
     instrument()
     from kimi_k3.config.presets import preset as get_preset
 
-    row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world, "rank": rank}
+    row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
+           "rank": rank, "layers": args.layers}
     torch.cuda.reset_peak_memory_stats()
     try:
         model, ddp, opt = build(args, rank, world)
