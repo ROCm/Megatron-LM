@@ -68,6 +68,15 @@ class K3GatedMLA(torch.nn.Module):
         #: Read by core's `optimizer/qk_clip.py:clip_qk`, which skips modules
         #: without it. KDA layers are skipped for free; MLA layers are not.
         self.clip_qk = self._clip_qk
+        #: Core's helper reads the max logit off `self_attention.core_attention`.
+        #: We have no such submodule -- SDPA is called directly -- so this is the
+        #: one attribute of it that core actually touches, and nothing more.
+        self.core_attention = torch.nn.Module()
+        self.core_attention.current_max_attn_logits = None
+        self.track_max_attn_logits = bool(
+            getattr(config, "qk_clip", False) or getattr(config, "log_max_attn_logit", False)
+        )
+        self.max_logit_chunk = getattr(config, "k3_max_logit_chunk", 1024)
 
     def weights(self) -> dict:
         w = {
@@ -83,9 +92,75 @@ class K3GatedMLA(torch.nn.Module):
             w["g_proj"] = self.g_proj.weight
         return w
 
-    def _clip_qk(self, *args, **kwargs):
-        """Hook presence is the contract; the clipping itself is P9 (T9.4)."""
-        raise NotImplementedError("QK-clip lands in P9; core only needs the attribute to exist")
+    # --- QK-clip (P9 / T9.4) ------------------------------------------------
+
+    @torch.no_grad()
+    def _record_max_attn_logits(self, query: torch.Tensor, key: torch.Tensor) -> None:
+        """Per-head max attention logit over the causal region.
+
+        Core reads this off `self.core_attention.current_max_attn_logits`, which
+        on its own path is filled in by the attention kernel. Ours comes from
+        `scaled_dot_product_attention`, which returns no logits, so it is
+        recomputed here -- and that is a real cost: another `[b, h, s, s]` score
+        matmul. It only runs when `qk_clip` or `log_max_attn_logit` is on.
+
+        ponytail: query-chunked to bound memory at `[b, h, chunk, s]`; get it from
+        the kernel instead if this ever shows up in a profile.
+        """
+        b, h, s, _ = query.shape
+        running = query.new_zeros(h, dtype=torch.float32)
+        for start in range(0, s, self.max_logit_chunk):
+            stop = min(start + self.max_logit_chunk, s)
+            scores = torch.matmul(query[:, :, start:stop].float(), key.float().transpose(-1, -2))
+            scores = scores * self.scale
+            # causal: query t may only see keys <= t
+            rows = torch.arange(start, stop, device=scores.device).unsqueeze(1)
+            scores = scores.masked_fill(rows < torch.arange(s, device=scores.device), float("-inf"))
+            running = torch.maximum(running, scores.amax(dim=(0, 2, 3)))
+        previous = self.core_attention.current_max_attn_logits
+        self.core_attention.current_max_attn_logits = (
+            running if previous is None else torch.maximum(previous, running)
+        )
+
+    @torch.no_grad()
+    def _clip_qk(self) -> None:
+        """Rescale the per-head q/k weights so the max logit falls to the threshold.
+
+        The head's logit is `q . k`, so splitting the correction between the two
+        as `eta**alpha` and `eta**(1 - alpha)` scales the logit by exactly `eta`.
+
+        The `qk_pos_emb_head_dim` slice is the exception. K3 is NoPE, but `k_rot`
+        is still produced by `kv_a_proj_with_mqa` and **shared across heads**, so
+        there is no per-head k weight to scale -- the whole correction for that
+        slice has to go on the query side, at full `eta`. This is the released
+        MLA form of QK-clip, and getting it wrong silently under-clips.
+        """
+        if not self.config.qk_clip:
+            raise ValueError("qk_clip option needs to be enabled")
+        logits = self.core_attention.current_max_attn_logits
+        if logits is None:
+            raise ValueError("current_max_attn_logits is None")
+        assert logits.shape == (self.num_heads,), f"expected [{self.num_heads}], got {list(logits.shape)}"
+
+        eta = torch.clamp(self.config.qk_clip_threshold / logits, max=1.0)
+        if bool((eta >= 1.0).all()):
+            self.core_attention.current_max_attn_logits = None
+            return
+
+        alpha = self.config.qk_clip_alpha
+        for weight in (self.q_b_proj.weight, getattr(self.q_b_proj.weight, "main_param", None)):
+            if weight is None:
+                continue
+            view = weight.data.view(self.num_heads, self.q_head_dim, -1)
+            view[:, : self.qk_head_dim].mul_(eta.to(view.dtype).pow(alpha).view(-1, 1, 1))
+            view[:, self.qk_head_dim :].mul_(eta.to(view.dtype).view(-1, 1, 1))
+        for weight in (self.kv_b_proj.weight, getattr(self.kv_b_proj.weight, "main_param", None)):
+            if weight is None:
+                continue
+            view = weight.data.view(self.num_heads, self.qk_head_dim + self.v_head_dim, -1)
+            view[:, : self.qk_head_dim].mul_(eta.to(view.dtype).pow(1 - alpha).view(-1, 1, 1))
+
+        self.core_attention.current_max_attn_logits = None
 
     # --- attention ----------------------------------------------------------
 
@@ -132,6 +207,8 @@ class K3GatedMLA(torch.nn.Module):
         k_rot = k_rot.view(b, 1, s, self.qk_pos_emb_head_dim).expand(*k_pass.shape[:-1], -1)
         key = torch.cat((k_pass, k_rot), dim=-1)
 
+        if self.track_max_attn_logits:
+            self._record_max_attn_logits(q, key)
         attn = self._sdpa(q, key, value)
         out = attn.transpose(1, 2).reshape(b, s, self.num_heads * self.v_head_dim)
         if self.fp32_attention_output:
@@ -154,6 +231,11 @@ class K3GatedMLASelfAttention(torch.nn.Module):
     @property
     def clip_qk(self):
         return self.mla.clip_qk
+
+    @property
+    def core_attention(self):
+        """Core's `clip_qk` helper reaches through `self_attention.core_attention`."""
+        return self.mla.core_attention
 
     def forward(self, hidden_states: torch.Tensor, attention_mask=None, **kwargs):
         out = self.mla(hidden_states.transpose(0, 1).contiguous())

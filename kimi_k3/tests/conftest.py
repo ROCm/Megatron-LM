@@ -77,3 +77,12 @@ def tiny_spec():
         moe_grouped_gemm=False,
         multi_latent_attention=True,
     )
+
+
+@pytest.fixture()
+def tiny_config():
+    """The ``tiny`` preset as a K3 transformer config."""
+    from kimi_k3.config.k3_config_builder import config_from_preset
+    from kimi_k3.config.presets import preset
+
+    return config_from_preset(preset("tiny")["config"])

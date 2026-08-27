@@ -52,6 +52,10 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     k3_mla_fp32_attn_output: bool = True
     """[report] attention output is kept in fp32 during training."""
 
+    k3_max_logit_chunk: int = 1024
+    """Query-block size when recomputing the max attention logit for QK-clip.
+    Purely a memory knob -- the statistic is identical at any value (P9/G36)."""
+
     # ---- Attention residuals ------------------------------------------------
     k3_attn_res_block_size: int = 12
     """A block-residual slot is appended by every layer whose 0-indexed
