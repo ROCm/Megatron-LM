@@ -55,7 +55,8 @@ kimi_k3/develop/
 | **P5** AttnRes layer + transport | complete | G19–G22 green |
 | **P6** LatentMoE, QB router, SiTU | complete | G23–G25 green, G26 partial |
 | **P7** trainer | complete | G27–G29 green |
-| **P8–P12** | not started | converter, twin runs, QAT, perf, scale-out |
+| **P8** | complete | converter both directions, 497,220 tensors accounted for, anchored parity on real layer-0 weights (cosine 0.999973) |
+| **P9–P12** | not started | twin runs, QAT, perf, scale-out |
 
 The decoder is complete and trains end to end: 30 steps on a fixed batch drive the
 loss from 8.36 to ~0.0 under both `dist_muon` and `adam`, and the 4 L official

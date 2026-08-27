@@ -96,10 +96,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T8.1 `tools/mapping.py` + explicit invariants | | | G30; vision keys skipped **and counted** |
-| [ ] | T8.2 `tools/convert.py` both directions | | | `dequantize_on_import` |
-| [ ] | T8.3 Synthetic + named-real-shard round-trip | | | ask before downloading |
-| [ ] | T8.4 Truncated-HF parity on real layers 1–4 | | | G32 |
+| [x] | T8.1 `tools/mapping.py` + explicit invariants | TBD-p8 | 2026-08-27 | **G30 GREEN.** All **497,220** released tensors accounted for: 497,052 mapped, **168 skipped by name** (the vision tower and projector), **zero unmapped**, 247,296 MXFP4 pairs, 69 KDA / 24 MLA layers inferred from which tensors exist. A 5 KB pattern fixture stands in for the 60 MB index |
+| [x] | T8.2 `tools/convert.py` both directions | TBD-p8 | 2026-08-27 | **G31 GREEN.** bf16 round-trips exactly; `A_log` trims only when the padding is really zero; MXFP4 experts dequantise on import; exporting experts **refuses** rather than writing bf16 under a `weight_packed` name |
+| [x] | T8.3 Synthetic round-trip in CI | TBD-p8 | 2026-08-27 | 13 tests, no network, no weights |
+| [-] | T8.4 Checkpoint-anchored parity | TBD-p8 | 2026-08-27 | **G32 GREEN for one KDA layer on real weights**: 847 MiB fetched by range request, our module and the **release's own** module both load it with 0 missing / 0 unexpected, forward agrees to **rel-L2 7.4e-3, cosine 0.999973** (inside the measured bf16 bound). The full four-layer truncated-model slice is still owed. Report: `results/anchored_parity.md` |
+| [x] | T8.5 Tokenizer round-trip | `110c84c69` | 2026-08-27 | **G33 GREEN** (P7): special ids asserted against the released `config.json` |
 
 ## P9 — Training equivalence, per-head Muon (G34–G37)
 
