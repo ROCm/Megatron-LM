@@ -77,10 +77,10 @@
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
 | [x] | T6.1 `situ.py` (fp32, β=4, β₂=25) | `c07ef0507` | 2026-08-27 | **G23 GREEN** (P0/G8): matches the release formula; both branches tanh-capped |
-| [x] | T6.2 `k3_moe_layer.py` postprocess override | TBD-p6 | 2026-08-27 | **G24 GREEN.** The latent norm is demonstrably in the path — changing its gain changes the model output. Routed experts at 3584, shared at 7168 (finding B6), only layer 1 dense |
-| [x] | T6.3 `k3_router.py` QB router + estimator | TBD-p6 | 2026-08-27 | **G25 GREEN.** Routing matches the transcription (bias steers selection, weights come from the **unbiased** scores). Balancing is **our formulation** — the report names QB but publishes no algorithm — gated on exact agreement with an independent reference, estimator error (2e-2 @ 64 bins, 2e-3 @ 1024) and behaviour (skewed load ratio 2.0 → <1.6). No test claims release parity |
-| [-] | T6.4 EP path + `router_replay` determinism | TBD-p6 | 2026-08-27 | **G26 partial**: single-rank paths green; the 8-rank exercise belongs to the nightly job |
-| [x] | T6.5 Grouped-GEMM smoke | TBD-p6 | 2026-08-27 | tiny preset runs the MoE stack end to end with gradients |
+| [x] | T6.2 `k3_moe_layer.py` postprocess override | `06216dc08` | 2026-08-27 | **G24 GREEN.** The latent norm is demonstrably in the path — changing its gain changes the model output. Routed experts at 3584, shared at 7168 (finding B6), only layer 1 dense |
+| [x] | T6.3 `k3_router.py` QB router + estimator | `06216dc08` | 2026-08-27 | **G25 GREEN.** Routing matches the transcription (bias steers selection, weights come from the **unbiased** scores). Balancing is **our formulation** — the report names QB but publishes no algorithm — gated on exact agreement with an independent reference, estimator error (2e-2 @ 64 bins, 2e-3 @ 1024) and behaviour (skewed load ratio 2.0 → <1.6). No test claims release parity |
+| [-] | T6.4 EP path + `router_replay` determinism | `06216dc08` | 2026-08-27 | **G26 partial**: single-rank paths green; the 8-rank exercise belongs to the nightly job |
+| [x] | T6.5 Grouped-GEMM smoke | `06216dc08` | 2026-08-27 | tiny preset runs the MoE stack end to end with gradients |
 
 ## P7 — Single-node trainer (G27–G29)
 

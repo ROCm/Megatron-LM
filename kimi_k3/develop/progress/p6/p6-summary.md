@@ -61,4 +61,8 @@ must carry `use_distributed_optimizer` too or the first step dies in
 
 ## 6. Commit chain
 
-_pending._
+| commit | scope |
+| --- | --- |
+| **06216dc08** | P6 T6.1–T6.5: LatentMoE norm, QB router, SiTU; G23/G24/G25 green, G26 partial |
+
+**P6 closes here.** The decoder is complete. Next: P7 (trainer).
