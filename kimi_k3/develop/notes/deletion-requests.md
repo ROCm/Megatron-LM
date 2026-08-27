@@ -26,8 +26,10 @@ No files are currently proposed for removal.
 ## 2026-08-27 — chrome trace, 241 MB (P11)
 
 `kimi_k3/develop/profile/traces/proxy_ep4_4L_rank0.json` — 241 MB, produced by an
-EP=4 proxy run that then OOM'd, so the trace is of an incomplete iteration and has
-no value. It was briefly committed and rejected by GitHub's 100 MB limit; it is
-now **untracked and gitignored**, but per the no-deletion rule it is still on
-disk. Safe to delete. Any later `traces/` contents are the same: run artefacts,
-with the report in `develop/profile/` being what is kept.
+EP=4 proxy run that then OOM'd, so the trace was of an incomplete iteration and
+had no value. It was briefly committed and rejected by GitHub's 100 MB limit, then
+untracked and gitignored.
+
+**Approved and deleted 2026-08-27.** The directory is kept (still gitignored) so
+later runs have somewhere to write. Any later `traces/` contents are the same kind
+of thing: run artefacts, with the report in `develop/profile/` being what is kept.
