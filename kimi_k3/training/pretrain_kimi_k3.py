@@ -110,6 +110,7 @@ def train_smoke(
     bf16: bool = False,
     seed: int = 0,
     fixed_batch: bool = False,
+    overrides: Optional[dict] = None,
 ) -> List[float]:
     """Run `iterations` real training steps and return the losses.
 
@@ -129,7 +130,7 @@ def train_smoke(
     tensor_parallel.model_parallel_cuda_manual_seed(seed)
 
     spec = get_preset(preset)
-    model = build_k3_model(preset)
+    model = build_k3_model(preset, **(overrides or {}))
     if bf16:
         model = model.bfloat16()
     ddp, opt = build_optimizer(model, optimizer=optimizer, lr=lr, bf16=bf16)
