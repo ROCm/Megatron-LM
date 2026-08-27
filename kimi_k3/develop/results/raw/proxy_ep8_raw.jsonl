@@ -1,0 +1,16 @@
+{"preset": "4L", "ep": 8, "seq": 512, "world": 8, "rank": 0, "status": "OutOfMemoryError", "error": "HIP out of memory. Tried to allocate 41.34 GiB. GPU 0 has a total capacity of 287.98 GiB of which 18.09 GiB is free. Of the allocated memory 49.79 GiB is allocated by PyTorch, and 2.67 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (http", "peak_gib": 62.95}
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+{"preset": "4L", "ep": 8, "seq": 512, "world": 8, "rank": 0, "status": "OutOfMemoryError", "error": "HIP out of memory. Tried to allocate 41.34 GiB. GPU 0 has a total capacity of 287.98 GiB of which 18.09 GiB is free. Of the allocated memory 49.79 GiB is allocated by PyTorch, and 2.67 GiB is reserved by PyTorch but unallocated. If reserved but unallocated memory is large try setting PYTORCH_ALLOC_CONF=expandable_segments:True to avoid fragmentation.  See documentation for Memory Management  (http", "peak_gib": 62.95}
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]
+[[null, false], [null, true]]

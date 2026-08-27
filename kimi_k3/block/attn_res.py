@@ -93,3 +93,61 @@ class AttnResMixer(torch.nn.Module):
         return attn_res_mix(
             prefix_sum, block_residual, self.weight, self.proj, self.eps, self.fp32
         )
+
+
+#: Rows per chunk in the fused mixer. Purely a memory knob: the mix is
+#: independent per token, so any value gives bit-identical results (G43).
+ATTN_RES_CHUNK = 4096
+
+
+def attn_res_mix_fused(
+    prefix_sum: torch.Tensor,
+    block_residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    proj_weight: torch.Tensor,
+    eps: float,
+    chunk: int = ATTN_RES_CHUNK,
+) -> torch.Tensor:
+    """The same mix, without ever holding a full `[T, K+1, H]` fp32 stack.
+
+    The eager mixer materialises that stack twice -- once for the concatenation
+    and once for the normalised copy `k` -- and at production shape that is the
+    dominant non-GEMM memory cost in the model: **109.6 GiB per forward**
+    (`results/attn_res.md`). Every token's mix is independent of every other, so
+    the whole thing can be done a block of rows at a time, and the peak fp32
+    temporary drops by `T / chunk`.
+
+    The arithmetic is untouched: each chunk runs exactly the eager op sequence on
+    exactly the same values in the same order, so the forward is **bit-identical**,
+    not approximately equal, and so are the gradients of everything that belongs
+    to a single token.
+
+    The one exception is `norm_weight`. It is `[H]`, shared by every token, so its
+    gradient is a sum over all `T` rows -- and chunking changes the order of that
+    sum. The result differs by fp32 accumulation noise (~1e-5 relative), and the
+    error does not grow with the number of chunks, which is the difference between
+    reordering a sum and losing precision. Both are tested.
+
+    ponytail: the next rung is dropping the concatenation as well -- computing
+    each candidate's score and output contribution from `block_residual` and
+    `prefix_sum` separately, so the `[T, K+1, H]` stack never exists at any size.
+    It saves roughly another half, and it is *not* bit-identical, because the
+    output reduction stops being a single matmul over `K+1`. Worth doing only if
+    a trace says this row still matters after chunking.
+    """
+    if block_residual.shape[1] == 0:
+        return prefix_sum
+    if chunk <= 0 or prefix_sum.shape[0] <= chunk:
+        return attn_res_mix(prefix_sum, block_residual, norm_weight, proj_weight, eps)
+
+    return torch.cat(
+        [
+            attn_res_mix(
+                prefix_sum[start : start + chunk],
+                block_residual[start : start + chunk],
+                norm_weight, proj_weight, eps,
+            )
+            for start in range(0, prefix_sum.shape[0], chunk)
+        ],
+        dim=0,
+    )
