@@ -22,3 +22,12 @@ No files are currently proposed for removal.
 |---|---|
 | `/tmp/claude-0/.../scratchpad/k3ref/` | 60 MB of downloaded release artefacts (`model.safetensors.index.json` and the modeling sources). Outside the repo, scratch only, regenerable with `curl`. Left in place. |
 | `/tmp/fla`, `/tmp/triton371` | reference clone and the isolated Triton used to test the upgrade. Outside the repo. Left in place. |
+
+## 2026-08-27 — chrome trace, 241 MB (P11)
+
+`kimi_k3/develop/profile/traces/proxy_ep4_4L_rank0.json` — 241 MB, produced by an
+EP=4 proxy run that then OOM'd, so the trace is of an incomplete iteration and has
+no value. It was briefly committed and rejected by GitHub's 100 MB limit; it is
+now **untracked and gitignored**, but per the no-deletion rule it is still on
+disk. Safe to delete. Any later `traces/` contents are the same: run artefacts,
+with the report in `develop/profile/` being what is kept.
