@@ -39,13 +39,33 @@ kimi_k3/develop/
 
 ## Current Status
 
-- [x] **Step 1** — architecture ground truth (see `architecture/`), verified against
-      the released `moonshotai/Kimi-K3` `config.json` + modeling sources and
-      against `ROCm/Megatron-LM @ a1b00d4259e92dc4a07a0be2c24088fe827f4b6e`.
-- [x] **Step 2** — development plan (see `plan-0/`), incorporating the review of
-      the incoming "rev 2" plan (`plan-0/00-review-findings.md`).
-- [ ] **Step 3** — code development. Next action: **P0 feasibility gates**
-      (`plan-0/04-phase-details.md` § P0). Nothing may be ported before P0 is green.
+- [x] **Step 1** — architecture ground truth (`architecture/`), verified against the
+      released `moonshotai/Kimi-K3` and against `ROCm/Megatron-LM @ a1b00d4`.
+- [x] **Step 2** — development plan (`plan-0/`), incorporating the review of the
+      incoming "rev 2" plan (`plan-0/00-review-findings.md`).
+- [-] **Step 3** — code development, in progress:
+
+| phase | state | gates |
+|---|---|---|
+| **P0** feasibility | complete | G1–G8 green |
+| **P1** scaffold, guard, CI | complete | G9–G10 green |
+| **P2** config, presets, construction | complete | G11–G13 green |
+| **P3** KDA | complete | G14–G16 green |
+| **P4** gated MLA (NoPE) | complete | G17–G18 green |
+| **P5** AttnRes layer + transport | complete | G19–G22 green |
+| **P6** LatentMoE, QB router, SiTU | complete | G23–G25 green, G26 partial |
+| **P7** trainer | complete | G27–G29 green |
+| **P8–P12** | not started | converter, twin runs, QAT, perf, scale-out |
+
+The decoder is complete and trains end to end: 30 steps on a fixed batch drive the
+loss from 8.36 to ~0.0 under both `dist_muon` and `adam`, and the 4 L official
+config (94 B parameters) trains on a single node at EP = 8, peaking at 189–202 GiB
+of 288. `pytest kimi_k3/tests/ -q` → **168 passed, 1 skipped**.
+
+Owed to a nightly job rather than an interactive session: production-geometry KDA
+parity (G15), the 8-rank EP exercise (G26), sequence-length memory scaling beyond
+512, and the AITER a8w4 kernel path (P10 — needs the workspace checkout bumped
+and rebuilt).
 
 Task-level tracking: [`progress/status.md`](progress/status.md).
 
