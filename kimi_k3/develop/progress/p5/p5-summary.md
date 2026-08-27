@@ -70,4 +70,8 @@ lacks, the quantile-balancing router, and SiTU experts.
 
 ## 8. Commit chain
 
-_pending._
+| commit | scope |
+| --- | --- |
+| **f405615d2** | P5 T5.3/T5.4/T5.6: faithful layer placement, recompute, behavioural gates |
+
+**P5 closes here.** Next: P6 (LatentMoE, quantile-balancing router, SiTU experts).

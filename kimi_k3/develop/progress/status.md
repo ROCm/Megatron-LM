@@ -67,10 +67,10 @@
 | --- | --- | --- | --- | --- |
 | [x] | T5.1 `attn_res.py` fp32 mixer oracle | `187ac2c01` | 2026-08-27 | **G19 GREEN** (P0): bit-for-bit against the released `_apply_attn_res`; fp64 gradcheck |
 | [x] | T5.2 `attn_res_pp.py` protocol | `187ac2c01` | 2026-08-27 | single packed tensor; module docstring is the spec |
-| [x] | T5.3 `k3_transformer_layer.py` (two mixes, slot append, prefix reset) | TBD-p5 | 2026-08-27 | **G22 GREEN.** Every layer matches a **verbatim transcription** of `_forward_attn_residual`, driven with the same weights, after perturbing the mixer projections off their zero init so a uniform mix cannot hide a misplacement |
-| [x] | T5.4 `k3_transformer_block.py` state + recompute | TBD-p5 | 2026-08-27 | recompute written, not inherited: core's `_checkpointed_forward` assumes one hidden tensor and would drop the block residual. Output within 1e-6 and every gradient within 1e-4 of the non-recomputed run |
+| [x] | T5.3 `k3_transformer_layer.py` (two mixes, slot append, prefix reset) | `f405615d2` | 2026-08-27 | **G22 GREEN.** Every layer matches a **verbatim transcription** of `_forward_attn_residual`, driven with the same weights, after perturbing the mixer projections off their zero init so a uniform mix cannot hide a misplacement |
+| [x] | T5.4 `k3_transformer_block.py` state + recompute | `f405615d2` | 2026-08-27 | recompute written, not inherited: core's `_checkpointed_forward` assumes one hidden tensor and would drop the block residual. Output within 1e-6 and every gradient within 1e-4 of the non-recomputed run |
 | [x] | T5.5 `pipeline/k3_schedule.py` | `d6c51b7f1` | 2026-08-27 | **G20/G21 GREEN** (G7): bitwise PP=2 parity; the negative control gives an identical loss with gradients wrong by 8.1e-4 |
-| [x] | T5.6 Behavioural tests | TBD-p5 | 2026-08-27 | slot appended only at boundaries; prefix restarts there; the slot is the prefix *before* attention; determinism (tiny preset now sets dropout to 0 — the trap from the G7 report came back and cost a test) |
+| [x] | T5.6 Behavioural tests | `f405615d2` | 2026-08-27 | slot appended only at boundaries; prefix restarts there; the slot is the prefix *before* attention; determinism (tiny preset now sets dropout to 0 — the trap from the G7 report came back and cost a test) |
 
 ## P6 — LatentMoE, QB router, SiTU (G23–G26)
 
