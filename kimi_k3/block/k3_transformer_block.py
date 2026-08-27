@@ -1,17 +1,13 @@
 """K3 decoder block — owns the attention-residual state.
 
-Scope note: this is the **transport-faithful, layer-approximate** version built
-for gate G7. It carries `(prefix_sum, block_residual)` through the layer loop,
-appends a slot at every block boundary, packs the pair into a single tensor at a
-pipeline stage boundary and unpacks it on the far side — all exactly as the
-release and as `attn_res_pp` specify.
+It carries `(prefix_sum, block_residual)` through the layer loop, packs the pair
+into a single tensor at a pipeline stage boundary and unpacks it on the far side
+— exactly as `attn_res_pp` specifies — and applies the model-level output mix on
+the last stage.
 
-What it does *not* yet do is split the two mixes around the attention and the MLP
-halves of each layer: it wraps a stock `TransformerLayer` and mixes before and
-after it instead. P5 (`K3TransformerLayer`) makes the placement faithful. The
-distinction does not affect anything G7 tests — payload shapes, packing, and
-gradient flow are identical either way — but it does mean **this block is not yet
-numerically K3**, and no parity gate may cite it.
+The mixes themselves live in `K3TransformerLayer`, placed around the attention
+and MLP halves the way the release places them: the block owns the *state*, the
+layer owns the *math*.
 
 `self.layers` keeps its inherited name: core's `optimizer/qk_clip.py:clip_qk`
 walks `decoder.layers` and skips modules without a `clip_qk` attribute.
@@ -39,14 +35,8 @@ class K3TransformerBlock(TransformerBlock):
         hidden = cfg.hidden_size
         eps = cfg.layernorm_epsilon
         fp32 = getattr(cfg, "k3_attn_res_fp32", True)
-        n = len(self.layers)
-        self.attn_res_attn = torch.nn.ModuleList(
-            [AttnResMixer(hidden, eps, fp32) for _ in range(n)]
-        )
-        self.attn_res_mlp = torch.nn.ModuleList(
-            [AttnResMixer(hidden, eps, fp32) for _ in range(n)]
-        )
-        # The model-level mix lives on the last stage only.
+        # Per-layer mixes belong to K3TransformerLayer; only the model-level mix
+        # is the block's, and it lives on the last stage.
         self.output_attn_res = AttnResMixer(hidden, eps, fp32) if self.post_process else None
         self._detach_slots_for_test = False
 
@@ -67,7 +57,7 @@ class K3TransformerBlock(TransformerBlock):
         return slots_before(self.global_layer_index(len(self.layers) - 1) + 1, self.block_size)
 
     def _mix(self, mixer, prefix: torch.Tensor, slots: torch.Tensor) -> torch.Tensor:
-        """Apply one mix on ``[S, B, H]`` state against ``[S, B, K, H]`` slots."""
+        """Apply the model-level mix on ``[S, B, H]`` against ``[S, B, K, H]``."""
         if slots.shape[2] == 0:
             return prefix
         s, b, h = prefix.shape
@@ -92,26 +82,20 @@ class K3TransformerBlock(TransformerBlock):
     def forward(self, hidden_states, attention_mask=None, **kwargs):
         prefix, slots = self._initial_state(hidden_states)
 
-        for i, layer in enumerate(self.layers):
-            layer_idx = self.global_layer_index(i)
-
-            mixed = self._mix(self.attn_res_attn[i], prefix, slots)
-
-            if layer_idx % self.block_size == 0:
-                new_slot = prefix.unsqueeze(2)
-                if self._detach_slots_for_test:
-                    # Emulates the failure mode of a two-tensor payload: the slot
-                    # travels forward but its gradient never comes back.
-                    new_slot = new_slot.detach()
-                slots = torch.cat([slots, new_slot], dim=2)
-                prefix = None
-
-            out = layer(mixed, attention_mask, **kwargs)
-            if isinstance(out, tuple):
-                out = out[0]
-
-            prefix = out if prefix is None else prefix + out
-            prefix = self._mix(self.attn_res_mlp[i], prefix, slots)
+        recompute = (
+            self.training
+            and self.config.recompute_granularity == "full"
+            and torch.is_grad_enabled()
+        )
+        for layer in self.layers:
+            if self._detach_slots_for_test and slots.shape[2] > 0:
+                # Emulates the failure mode of a two-tensor payload: the slots
+                # travel forward but their gradient never comes back (gate G20).
+                slots = slots.detach()
+            if recompute:
+                prefix, slots = self._checkpointed_layer(layer, prefix, slots, attention_mask, kwargs)
+            else:
+                prefix, slots = layer(prefix, attention_mask, block_residual=slots, **kwargs)
 
         if not self.post_process:
             return pack(prefix, slots)
@@ -120,6 +104,23 @@ class K3TransformerBlock(TransformerBlock):
         if self.final_layernorm is not None:
             hidden = self.final_layernorm(hidden)
         return hidden
+
+    def _checkpointed_layer(self, layer, prefix, slots, attention_mask, kwargs):
+        """Recompute one layer, carrying **both** state tensors.
+
+        Core's own `_checkpointed_forward` assumes a single hidden-state tensor,
+        so it cannot be reused: the block residual would be dropped from the
+        saved inputs and silently recomputed from the wrong thing. AttnRes is
+        recompute-mandatory at production width (the mixer's fp32 stacks would
+        cost ~236 GB per microbatch to keep -- see develop/results/attn_res.md),
+        so this path is not optional.
+        """
+        from megatron.core import tensor_parallel
+
+        def run(prefix_in, slots_in):
+            return layer(prefix_in, attention_mask, block_residual=slots_in, **kwargs)
+
+        return tensor_parallel.checkpoint(run, False, prefix, slots)
 
     # --- introspection used by the probes and gates -------------------------
 

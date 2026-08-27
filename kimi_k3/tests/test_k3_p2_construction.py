@@ -33,12 +33,18 @@ def test_layers_are_heterogeneous_as_the_plan_says(single_rank_world):
 
 
 def test_attn_res_mixers_exist_per_layer_and_at_the_output(single_rank_world):
+    """Two per layer plus one at the model output -- the released checkpoint's
+    187 `*_res_proj` tensors for 93 layers (93 x 2 + 1).
+
+    The per-layer mixes live on the layer (P5) and the model-level one on the
+    block, which is what the release does too.
+    """
     model = build_k3_model("tiny", device="meta")
-    n = len(model.decoder.layers)
-    assert len(model.decoder.attn_res_attn) == n
-    assert len(model.decoder.attn_res_mlp) == n
-    assert model.decoder.output_attn_res is not None  # last stage
-    # matches the released checkpoint's 187 = 93 x 2 + 1 for the official preset
+    for layer in model.decoder.layers:
+        assert hasattr(layer, "attn_res_attn") and hasattr(layer, "attn_res_mlp")
+    assert model.decoder.output_attn_res is not None  # last stage only
+    mixers = sum(1 for name, _ in model.named_modules() if name.endswith(("attn_res_attn", "attn_res_mlp")))
+    assert mixers == 2 * len(model.decoder.layers)
     assert 2 * 93 + 1 == 187
 
 

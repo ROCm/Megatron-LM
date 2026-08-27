@@ -70,6 +70,11 @@ PRESETS: Dict[str, dict] = {
             layernorm_epsilon=1e-5,
             add_bias_linear=False,
             gated_linear_unit=True,
+            # Megatron defaults both to 0.1. With dropout on, two identical
+            # forwards differ by ~1e-4 and every determinism check becomes a
+            # measurement of the RNG instead (see the G7 record).
+            hidden_dropout=0.0,
+            attention_dropout=0.0,
             ffn_hidden_size=512,
             q_lora_rank=128,
             kv_lora_rank=64,

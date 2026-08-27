@@ -102,6 +102,10 @@ def _layer_spec_for(config, entry: K3LayerPlan) -> ModuleSpec:
     spec.submodules.self_attention = ModuleSpec(
         module=K3KDASelfAttention if entry.is_kda else K3GatedMLASelfAttention
     )
+    # the layer itself owns the attention-residual mixes (P5)
+    from kimi_k3.block.k3_transformer_layer import K3TransformerLayer
+
+    spec.module = K3TransformerLayer
     return spec
 
 
