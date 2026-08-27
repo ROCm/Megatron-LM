@@ -36,7 +36,7 @@ the optimizer memory model — plus close the open ground-truth questions.
 | **G3** — config on the real inheritance path | **GREEN** | 9 tests |
 | **G4** — model construction, no transient core block | **GREEN** | 4 tests; constructor spy sees 0 core blocks; meta and cuda both build |
 | **G5** — optimizer memory | **GREEN** | 16 runs / 40 rank-rows; `dist_muon` 7.87 B/param at DP=8 vs `muon` 15.17 flat; analytic `6 + 8/DP + c` fits with c ≈ 0.9–1.2 |
-| **G6** — AttnRes payload sizing | not started | needs 1 GPU |
+| **G6** — AttnRes payload sizing | **GREEN** | payload peaks at 2.8 GB in flight mid-pipeline; eager mixer 109.6 GiB read and ≈635 ms forward per microbatch; P11 budget set at ≤64 ms |
 | **G7** — PP=2 packed payload + gradient assertion | not started | needs 2 GPUs |
 | **G8** — external assets + one-expert QAT | not started | AITER pin known stale (finding D1) |
 
@@ -70,6 +70,21 @@ Routed experts are **98.0 %** of all parameters.
 `dist_muon` at DP = 8 is **1.93×** cheaper than plain `muon`, and identical to it
 at DP = 1. The capacity tables in `plan-0/06-capacity-and-parallelism.md` §2 are
 now generated from these rows rather than from an assumed 14 B/param.
+
+### AttnRes cost (G6)
+
+| metric | measured |
+|---|---:|
+| payload per boundary | 224 MB → 896 MB |
+| worst in-flight payload | **2.8 GB** (stage 3 of 8; ×2 with saved input+output) |
+| one mix at K+1=9 | 7.1 GB fwd / 12.2 GB fwd+bwd; 5.15 / 15.65 ms |
+| whole model, per microbatch | 186 mixes, mean K+1 5.39, **109.6 GiB read**, ≈635 ms eager forward |
+| fp32 tax vs a bf16 mix | 2.3× memory, ≈1.5× time |
+
+For scale, all of the routed-expert GEMMs are ≈800 ms per microbatch at 40 % MFU:
+the eager AttnRes forward alone is the same order. Recompute is mandatory
+(saving the fp32 stacks would cost ≈236 GB per microbatch), and P11's fused mixer
+now has a budget: ≤10 % of the eager forward and no fp32 stack in HBM.
 
 ## 5. Findings added to the register
 

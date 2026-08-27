@@ -95,57 +95,44 @@ utilisation that is **25–31 nodes at DP = 1**, falling as DP rises because
 replicate. `tools/mem_budget.py` computes the curve; no configuration quotes a
 node count that is not backed by a row in `../results/opt_mem.md`.
 
-## 3. AttnRes memory **[estimates — confirm with G6]**
+## 3. AttnRes memory — MEASURED (gate G6, 2026-08-27)
 
-Symbols: `T = S·B` tokens per microbatch, `H = 7168`, `K` = slots (0…8),
-`block_size = 12`.
+Full tables: [`../results/attn_res.md`](../results/attn_res.md). Production
+width, `H = 7168`, `S = 8192`, `B = 1`, bf16, PP = 8.
 
 ### 3.1 Pipeline payload
 
-Packed payload per stage boundary = `(1 + K) × S × B × H × 2 B`.
-At `S = 8192, B = 1`: base tensor 117 MB, so 235 MB … **1.06 GB** as `K` grows.
+Packed payload per boundary is `(1 + K) × S × B × H × 2 B`, i.e. 224 MB at the
+first boundary rising to 896 MB at the last. Under 1F1B the in-flight microbatch
+count falls as the payload grows, so the product **peaks in the middle of the
+pipeline**: 2.8 GB at stage 3, ≈ 5.6 GB counting saved input and output tensors.
+Both the `[12]×7 + 9` and the even `[12,12,12,12,12,11,11,11]` layouts produce the
+same multipliers, so pick the even one for compute balance.
 
-Recommended PP=8 layout for 93 layers — stage boundaries placed **immediately
-before** an append layer, which is where the payload is smallest:
-
-| stage | 0-indexed layers | layers | sends `1+K` | payload @ S=8192 |
-|---:|---|---:|---:|---:|
-| 0 | 0–11 | 12 | 2 | 235 MB |
-| 1 | 12–23 | 12 | 3 | 352 MB |
-| 2 | 24–35 | 12 | 4 | 470 MB |
-| 3 | 36–47 | 12 | 5 | 587 MB |
-| 4 | 48–59 | 12 | 6 | 704 MB |
-| 5 | 60–71 | 12 | 7 | 822 MB |
-| 6 | 72–83 | 12 | 8 | 939 MB |
-| 7 | 84–92 | **9** | — | (last stage: output mix + final norm + head + loss) |
-
-The last stage is deliberately short: it also carries the output AttnRes mix, the
-final norm, the LM head and the loss. In 1F1B the in-flight microbatch count at
-stage *s* is `PP − s`, so the per-stage in-flight payload is roughly flat at
-**≈ 2 GB/GPU at S = 8192** (≈ 4 GB counting saved input *and* output tensors) —
-significant but not disqualifying. **Context parallelism divides `S` and
-therefore divides this directly**, which is why CP is the first mitigation to
-reach for rather than reducing PP.
+Context parallelism divides `S` and therefore divides this line directly — it is
+the first mitigation to reach for, ahead of reducing PP depth.
 
 ### 3.2 Mixer temporaries — the real cost
 
-`_apply_attn_res` upcasts `cat(slots, prefix)` to fp32:
-`(K+1) × T × H × 4 B` per mix, twice per layer.
+One mix at `K+1 = 9`: **7.1 GB** peak forward, **12.2 GB** peak forward+backward,
+5.15 ms / 15.65 ms. Cost is linear in `K+1`.
 
-At `T = 8192`, `H = 7168`: 1.29 GB per mix at the average `K+1 ≈ 5.5`, and
-**2.1 GB** at `K+1 = 9`. Two such tensors are live at once (`v_float` and the
-normalised `k`).
+Across the model — 186 mixes, mean `K+1` = 5.39 — that is **109.6 GiB read per
+forward** and an eager mixer forward of **≈ 635 ms per microbatch**, against
+≈ 800 ms for *all* the routed-expert GEMMs at 40 % MFU. The AttnRes mixer is the
+single largest non-GEMM cost in the model, exactly as predicted, and now with a
+number attached.
 
-- **With full recompute** the peak is bounded by the live pair (~2.6–4.2 GB) but
-  the traffic is paid twice.
-- **Without recompute**, saving one tensor per mix for backward costs
-  `93 × 2 × 1.29 GB ≈ 240 GB` per microbatch — impossible. So at production
-  width the AttnRes mixer is **recompute-mandatory until it is fused** (P11), and
-  the fused kernel's value is (a) it never materialises the fp32 concat and
-  (b) it makes non-recomputed AttnRes affordable.
-- Read traffic across a whole forward: `≈ 186 mixes × T × (K+1) × H × 2 B ≈
-  120 GB` per microbatch at `S = 8192`. This is the largest non-GEMM term in the
-  model and is P11's headline target.
+Consequences:
+
+1. **Recompute is mandatory at production width.** Saving each mix's fp32 stack
+   for backward would cost ≈ 236 GB per microbatch. With recompute the peak is
+   one live pair (4–12 GB by `K`), and the traffic is paid twice.
+2. **The fp32 upcast costs 2.3× memory and ≈1.5× time** (measured against the
+   same mix kept in bf16). We keep fp32 — it is the release's semantics — but a
+   fused kernel can accumulate in registers and pay neither.
+3. **P11 budget, set here:** ≤ 10 % of the eager forward (≤ 64 ms per microbatch)
+   and no fp32 stack resident in HBM.
 
 ## 4. Pipeline layout rules
 
