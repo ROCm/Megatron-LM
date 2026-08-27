@@ -78,18 +78,33 @@ class AttnResMixer(torch.nn.Module):
     checkpoint (93 x 2 + 1).
     """
 
-    def __init__(self, hidden_size: int, eps: float = 1e-5, fp32: bool = True):
+    def __init__(
+        self,
+        hidden_size: int,
+        eps: float = 1e-5,
+        fp32: bool = True,
+        fused: bool = False,
+        chunk: int = 4096,
+    ):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(hidden_size))
         self.proj = torch.nn.Parameter(torch.zeros(1, hidden_size))
         self.eps = eps
         self.fp32 = fp32
+        #: `--k3-attn-res-fused`. Off by default: the eager path is the oracle,
+        #: and the chunked one turns on once G44 records a measured win (R5.3).
+        self.fused = fused
+        self.chunk = chunk
 
     def forward(
         self, prefix_sum: torch.Tensor, block_residual: Optional[torch.Tensor]
     ) -> torch.Tensor:
         if block_residual is None:
             return prefix_sum
+        if self.fused and self.fp32:
+            return attn_res_mix_fused(
+                prefix_sum, block_residual, self.weight, self.proj, self.eps, self.chunk
+            )
         return attn_res_mix(
             prefix_sum, block_residual, self.weight, self.proj, self.eps, self.fp32
         )

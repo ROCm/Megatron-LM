@@ -123,3 +123,27 @@ def test_no_slots_is_a_no_op_in_both():
     prefix, _, norm, proj = operands(*FAST)
     empty = torch.zeros(FAST[0], 0, FAST[2], device="cuda", dtype=prefix.dtype)
     assert torch.equal(attn_res_mix_fused(prefix, empty, norm, proj, 1e-6), prefix)
+
+
+def test_the_flag_selects_the_path_and_the_model_agrees(single_rank_world):
+    """G43 end to end: the whole model with `--k3-attn-res-fused` matches without it.
+
+    The mixer is used at three sites per model (two per layer plus the output),
+    so a flag that reaches only some of them would still pass a unit test.
+    """
+    from kimi_k3.model.build import build_k3_model
+
+    torch.manual_seed(0)
+    eager = build_k3_model("tiny")
+    fused = build_k3_model("tiny", k3_attn_res_fused=True, k3_attn_res_chunk=4)
+    fused.load_state_dict(eager.state_dict(), strict=False)
+
+    mixers = [m for m in fused.modules() if hasattr(m, "fused")]
+    assert len(mixers) == 2 * 4 + 1, len(mixers)
+    assert all(m.fused for m in mixers), "the flag did not reach every site"
+
+    tokens = torch.randint(0, 4096, (1, 16), device="cuda")
+    with torch.no_grad():
+        a = eager(input_ids=tokens, position_ids=None, attention_mask=None)
+        b = fused(input_ids=tokens, position_ids=None, attention_mask=None)
+    torch.testing.assert_close(b, a, rtol=0, atol=0)

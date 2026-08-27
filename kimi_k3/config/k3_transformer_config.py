@@ -63,7 +63,12 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     k3_attn_res_fp32: bool = True
     k3_attn_res_fused: bool = False
-    """P11 fused mixer; off until its parity gate (G43) is green."""
+    """Chunked mixer (P11). Off by default: the eager path is the oracle, and this
+    turns on once G44 records a measured win (R5.3). Parity is G43."""
+
+    k3_attn_res_chunk: int = 4096
+    """Rows per chunk in the fused mixer. A memory knob only -- the forward is
+    bit-identical at any value."""
 
     # ---- MoE ----------------------------------------------------------------
     k3_routed_expert_hidden_size: int = 3584

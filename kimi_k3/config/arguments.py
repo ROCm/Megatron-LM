@@ -40,6 +40,8 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
                        help="q_a/kv_a layernorms take KimiRMSNorm's 1e-6 default, not rms_norm_eps")
     group.add_argument("--k3-mla-fp32-attn-output", action=argparse.BooleanOptionalAction,
                        default=True, help="[report] fp32 attention output during training")
+    group.add_argument("--k3-attn-res-chunk", type=int, default=4096,
+                       help="rows per chunk in the fused AttnRes mixer; memory only")
     group.add_argument("--k3-max-logit-chunk", type=int, default=1024,
                        help="query-block size for the QK-clip max-logit recompute; memory only")
 
