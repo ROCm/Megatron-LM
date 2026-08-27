@@ -52,4 +52,9 @@ parity (G15 nightly), the 8-rank EP exercise (G26), and the AITER kernel path
 
 ## 6. Commit chain
 
-_pending._
+| commit | scope |
+| --- | --- |
+| **110c84c69** | P7 T7.1/T7.2/T7.5: trainer, tokenizer, checkpoint round-trip |
+
+**P7 is partial**: T7.3 and T7.4 (the 4 L official run and its memory report) are
+owed to the nightly job.

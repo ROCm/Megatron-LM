@@ -86,11 +86,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [x] | T7.1 `pretrain_kimi_k3.py` end to end | TBD-p7 | 2026-08-27 | **G27 GREEN at tiny.** 30 steps on a fixed batch drive the loss 8.36 → ~0.0 under **both** `dist_muon` and `adam`; on fresh random tokens it sits at `ln(4096) = 8.32` (chance), which catches both a broken model and a label leak |
-| [x] | T7.2 `tools/tokenizer.py` | TBD-p7 | 2026-08-27 | tiktoken ranks + special ids asserted against the released `config.json` |
+| [x] | T7.1 `pretrain_kimi_k3.py` end to end | `110c84c69` | 2026-08-27 | **G27 GREEN at tiny.** 30 steps on a fixed batch drive the loss 8.36 → ~0.0 under **both** `dist_muon` and `adam`; on fresh random tokens it sits at `ln(4096) = 8.32` (chance), which catches both a broken model and a label leak |
+| [x] | T7.2 `tools/tokenizer.py` | `110c84c69` | 2026-08-27 | tiktoken ranks + special ids asserted against the released `config.json` |
 | [ ] | T7.3 4 L official config on the measured recipe | | | **owed to the nightly**: 94 B parameters, 8 GPUs, EP=8, plus the documented fallbacks |
 | [ ] | T7.4 Memory report | | | **G28 owed** with T7.3; the analytic model and the G5 measurements stand in |
-| [x] | T7.5 Checkpoint save/load | TBD-p7 | 2026-08-27 | **G29 GREEN.** Save, rebuild from a *different* init, load, forward matches bitwise |
+| [x] | T7.5 Checkpoint save/load | `110c84c69` | 2026-08-27 | **G29 GREEN.** Save, rebuild from a *different* init, load, forward matches bitwise |
 
 ## P8 — Converter and anchored parity (G30–G33)
 
