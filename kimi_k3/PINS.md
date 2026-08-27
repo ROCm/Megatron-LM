@@ -15,7 +15,7 @@
 |---|---|---|---|
 | **ROCm/Megatron-LM** | `a1b00d4259e92dc4a07a0be2c24088fe827f4b6e` (`rocm_dev`) | local checkout; the branch `dev/wen/kimi-k3` is cut from it | yes — all pin contracts assert against it (`kimi_k3/model/core_patch.py`) |
 | **ROCm/TransformerEngine** | `2.12.0.dev0+40434cf6` (installed wheel) | version string carries the source SHA `40434cf6` | yes — `MXFP4BlockScaling`, `MXFP8BlockScaling`, `MXFP4Quantizer` located |
-| **AITER** | `f299f579a` (2026-04-03) — **stale, must be bumped** | local checkout at `/workspace/aiter` | **no** — the K3 a8w4 assets are absent at this SHA (see §3) |
+| **AITER** | `e9e1278b1` (origin/main, 2026-08-27) | git; the workspace checkout was 5 months stale | **yes** — `kimik3_a8w4_tuned_fmoe.csv`, `ops/opus/moe_stage{1,2}_a8w4.py` and `ActivationType.Situv2` all present |
 | **fla** (flash-linear-attention) | git `5e02dd3` (0.6.0) — **forward OK, backward blocked** | git clone; the PyPI wheel ships no `fla/ops` | forward verified by running the released call; backward fails to compile on gfx950 (see §2) |
 | **HF moonshotai/Kimi-K3** | `a590ce090cb049c93a33dfe8c208ec652aa20503` (lastModified 2026-08-20) | HF model API | yes — config, modeling sources and shard headers read at this revision |
 
@@ -49,12 +49,23 @@ G1's check is **functional**: run the released call and compare against the
 oracle. A signature-based check would have failed on a working library, because
 `A_log` legitimately arrives through `**kwargs`.
 
-## 3. AITER — assets not present at the local SHA
+## 3. AITER — resolved
 
-At `f299f579a` there is no `aiter/configs/model_configs/kimik3_a8w4_tuned_fmoe.csv`,
-no `aiter/ops/opus/` directory and no `ActivationType.Situv2`. P10 (QAT) needs
-them; P0-T0.8 must bump the pin to a SHA that has them or record the fast path as
-descoped (review finding D1).
+The K3 assets the plan named **do exist** on `main` (`e9e1278b1`, 2026-08-27); the
+workspace checkout was simply five months old (2026-04-03), which is what review
+finding D1 actually caught. Verified at this SHA:
+
+| asset | status |
+|---|---|
+| `configs/model_configs/kimik3_a8w4_tuned_fmoe.csv` | present — 35 tuned rows: `gfx950`, `model_dim=3584`, `expert=896`, `topk=16`, `ActivationType.Situv2`, act `float8_e4m3fn` x weight `float4_e2m1fn_x2`, `QuantType.per_1x32`, `flydsl_moe{1,2}_afp8_wfp4_*` kernels |
+| `ops/opus/moe_stage1_a8w4.py` | present — `opus_moe_stage1_a8w4_fwd(..., situ_beta=4.0, situ_linear_beta=25.0)`, fp8 output with an e8m0 `out_scale` |
+| `ops/opus/moe_stage2_a8w4.py` | present |
+| `ActivationType.Situv2` | present in the enum and in the fused-MoE dispatch |
+
+**Not yet exercised.** Running the kernels needs the workspace checkout bumped
+and its JIT modules rebuilt; P10 does that. P0 verified presence, pinned the SHA,
+and built the numerics contract the kernels must match
+(`kimi_k3/moe/k3_qat.py`).
 
 ## 4. LICENSES
 

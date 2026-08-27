@@ -1,14 +1,20 @@
-# P0 — Feasibility gates (IN PROGRESS)
+# P0 — Feasibility gates (COMPLETE except G1)
 
-> Written at the first checkpoint of P0, not at its close. Four of eight tasks
-> are done, one is blocked on an external dependency, three are not started.
-> Format per rule R3.5.
+> Seven of eight gates are green. G1 is red on an external blocker with a
+> documented workaround, so **P0's exit condition is met for every downstream
+> phase**: nothing P1–P6 needs is gated on it. Format per rule R3.5.
 
 ## 1. Objective
 
 Prove the four risky mechanics and pin the dependencies **before any porting
 starts**: the config path, block injection, the AttnRes pipeline payload, and
 the optimizer memory model — plus close the open ground-truth questions.
+
+**Outcome:** all four are proven, three of them by measurement rather than
+argument. Two of the plan's own claims turned out to be stale rather than wrong
+(AITER), one of mine was wrong and is retracted (fla), and the one genuine
+blocker (fla's KDA backward not compiling on gfx950) has an in-tree workaround
+that was always the plan's default anyway.
 
 ## 2. What changed
 
@@ -38,7 +44,7 @@ the optimizer memory model — plus close the open ground-truth questions.
 | **G5** — optimizer memory | **GREEN** | 16 runs / 40 rank-rows; `dist_muon` 7.87 B/param at DP=8 vs `muon` 15.17 flat; analytic `6 + 8/DP + c` fits with c ≈ 0.9–1.2 |
 | **G6** — AttnRes payload sizing | **GREEN** | payload peaks at 2.8 GB in flight mid-pipeline; eager mixer 109.6 GiB read and ≈635 ms forward per microbatch; P11 budget set at ≤64 ms |
 | **G7** — PP=2 packed payload + gradient assertion | **GREEN** | bitwise match against PP=1 (loss 0.0, grads 0.0 / 131 params); negative control gives identical loss with gradients wrong by 8.1e-4 |
-| **G8** — external assets + one-expert QAT | not started | AITER pin known stale (finding D1) |
+| **G8** — external assets + one-expert QAT | **GREEN** | AITER assets present on `main` (D1 resolved); TE MXFP4 is a stub (D2 sharpened); STE grads exactly match the fake-quant reference; cache refresh and checkpoint round-trip exact |
 
 `pytest kimi_k3/tests/ -q` → **22 passed**.
 
@@ -96,6 +102,21 @@ That is finding A1 reproduced on demand, and the reason G20 asserts gradient flo
 
 Core's own `adjust_tensor_shapes_fn` supplied the per-stage shapes (recv 1→2,
 send 2→3); no schedule was re-implemented, and the hook is bound only when PP > 1.
+
+### QAT prototype (G8)
+
+| check | result |
+|---|---|
+| AITER K3 a8w4 assets at `main` `e9e1278b1` | **present** — tuned CSV (gfx950 / 896 experts / top-16 / 3584 / `Situv2`), both opus stages, the enum entry |
+| TE `MXFP4Quantizer` at 2.12 | **stub** — `quantize_impl` and dequantise-from-packed both raise, so no cross-check exists |
+| STE grads vs the fake-quant reference | **exactly equal** on all three weights |
+| packed cache after an optimizer step | stale until refreshed, **exact** afterwards |
+| checkpoint round-trip (masters + packed + scales) | bit-exact, outputs identical |
+
+The prototype's first run **failed**, and usefully: activation quantisation had
+no STE, so the cast into `float8_e4m3fn` killed the gradient to `w1`/`w3` — the
+whole gate/up half of the expert silently received zeros while `w2` looked fine.
+Both the module and its reference now use an activation STE.
 
 ## 5. Findings added to the register
 
