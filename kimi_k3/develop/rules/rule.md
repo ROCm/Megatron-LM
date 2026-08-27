@@ -5,7 +5,7 @@
 > kept with `~~strike-through~~` plus a retirement date — they are the audit
 > trail. Rules are atomic and self-contained: pick the section, then read one rule.
 >
-> Last updated: 2026-08-26 (initial set, R1.1–R11.2).
+> Last updated: 2026-08-27 (R10.4 branch naming).
 
 ---
 
@@ -195,7 +195,7 @@ tree. Ported reference code is a **file with a provenance header**, never a clon
 
 ### R6.3 — No interactive git
 No `git rebase -i`, `git add -i`, `git commit --amend`, no force-push to
-`rocm_dev` or `kimi_k3/dev`.
+`rocm_dev` or `dev/wen/kimi-k3`.
 
 ---
 
@@ -282,8 +282,14 @@ Kimi-K3 revision) live in `kimi_k3/PINS.md` together with the `LICENSES` section
 A pin bump is its own commit and re-runs the P0 gates listed in R10.3.
 
 ### R10.3 — After any IFU on `rocm_dev`
-Rebase `kimi_k3/dev`, then re-run, in order: the guard, `test_k3_p1_pin_contracts.py`
+Rebase `dev/wen/kimi-k3`, then re-run, in order: the guard, `test_k3_p1_pin_contracts.py`
 (R4.5), G1–G3, and only then other work. An IFU is never bundled with feature work.
+
+### R10.4 — Branch naming
+Active development branch: **`dev/wen/kimi-k3`**, opened off `rocm_dev` at the
+pinned SHA (first commit `2a66e4ce5`, docs only). PRs land into `rocm_dev` from
+this branch. Any document that needs to name the branch cites this rule rather
+than repeating the name, so a rename is a one-line change here.
 
 ---
 

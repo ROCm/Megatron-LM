@@ -91,7 +91,7 @@ design is re-opened before any block code is written.
 
 ### Tasks
 
-1. **T1.1 [CPU-OK]** Branch `kimi_k3/dev` off `rocm_dev` at the pinned SHA;
+1. **T1.1 [CPU-OK]** Branch `dev/wen/kimi-k3` off `rocm_dev` at the pinned SHA (open since `2a66e4ce5`);
    create the `kimi_k3/` skeleton per `03-code-layout.md`.
 2. **T1.2 [CPU-OK]** `ci/no_core_diff_guard.sh`: fail any diff outside
    `kimi_k3/` except `.github/workflows/kimi_k3.yml` and

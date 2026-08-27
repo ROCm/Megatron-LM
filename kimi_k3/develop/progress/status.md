@@ -25,7 +25,7 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [ ] | T1.1 Branch + skeleton | | | |
+| [ ] | T1.1 Branch + skeleton | | | branch `dev/wen/kimi-k3` opened at `2a66e4ce5` (docs only) — skeleton still to land |
 | [ ] | T1.2 `no_core_diff_guard.sh` + allowlist, proven against a deliberate core edit | | | G9 |
 | [ ] | T1.3 `test_k3_p1_pin_contracts.py` (IFU tripwire) | | | G10; nine core mechanisms asserted |
 | [ ] | T1.4 `test_env.py` + version capture into `PINS.md` | | | G10 |
