@@ -24,11 +24,16 @@ import torch
 def local_expert_count(model) -> int:
     from kimi_k3.moe.k3_qat_wiring import EXPERT_CONTAINER, SHARED
 
-    names = {
-        name.split(f".{EXPERT_CONTAINER}.")[1].split(".")[0]
-        for name, _ in model.named_modules()
-        if f".{EXPERT_CONTAINER}." in f".{name}." and SHARED not in name
-    }
+    # The membership test padded the name with dots on both sides, so a module
+    # named `...mlp.experts` matched while `name.split(".experts.")` returned a
+    # single element -- IndexError on every rank. Split first, then check.
+    names = set()
+    for name, _ in model.named_modules():
+        if SHARED in name:
+            continue
+        parts = name.split(f".{EXPERT_CONTAINER}.")
+        if len(parts) > 1:
+            names.add(parts[1].split(".")[0])
     numeric = {n for n in names if n.isdigit()}
     if numeric:
         return len(numeric)
@@ -39,14 +44,33 @@ def local_expert_count(model) -> int:
     return 0
 
 
-def routing_counts(model) -> List[int]:
-    """Tokens each *local* expert received, from the router's own histogram."""
-    counts = []
+def routing_load(model) -> Dict:
+    """How evenly the tokens actually landed, from the router's own counter.
+
+    `local_tokens_per_expert` is a buffer core keeps whenever
+    `moe_router_enable_expert_bias` is on, which K3 sets. It is the router's view
+    of all `num_moe_experts`, so this is the load the dispatcher was asked to
+    carry, summed over the MoE layers on this rank.
+    """
+    total = None
     for module in model.modules():
-        histogram = getattr(module, "local_tokens_per_expert", None)
-        if histogram is not None:
-            counts.append(histogram)
-    return counts
+        counts = getattr(module, "local_tokens_per_expert", None)
+        if counts is None:
+            continue
+        counts = counts.detach().float()
+        total = counts.clone() if total is None else total + counts
+    if total is None or float(total.sum()) == 0:
+        return {"available": False}
+
+    mean = float(total.mean())
+    return {
+        "available": True,
+        "experts": int(total.numel()),
+        "max_over_mean": float(total.max()) / mean,
+        "min_over_mean": float(total.min()) / mean,
+        "starved": int((total == 0).sum()),
+        "total_assignments": float(total.sum()),
+    }
 
 
 def main() -> None:
@@ -102,6 +126,10 @@ def main() -> None:
             opt.step()
             losses.append(float(loss.detach()))
         row["losses"] = [round(v, 5) for v in losses]
+        # A router that collapsed onto a few experts still trains and still
+        # descends. Without this the smoke test cannot tell that apart from a
+        # healthy run -- which is the only failure worth running 8 ranks to find.
+        row["routing"] = routing_load(model)
 
         # determinism: the same tokens twice, in eval, must route identically
         tokens, _ = mock_batch(vocab, args.seq, 1, seed=99)
@@ -131,6 +159,14 @@ def main() -> None:
             "loss_spread": [min(r["losses"][-1] for r in ok), max(r["losses"][-1] for r in ok)]
             if ok else [],
             "repeat_forward_bitwise": all(r["repeat_forward_bitwise"] for r in ok) if ok else False,
+            "routing": ok[0].get("routing") if ok else None,
+            "worst_max_over_mean": max(
+                (r["routing"]["max_over_mean"] for r in ok if r.get("routing", {}).get("available")),
+                default=None,
+            ),
+            "total_starved": sum(
+                r["routing"]["starved"] for r in ok if r.get("routing", {}).get("available")
+            ),
         }
         print(json.dumps(summary, indent=2))
         for r in gathered:
