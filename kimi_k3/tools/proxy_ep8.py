@@ -68,6 +68,8 @@ def build(args, rank: int, world: int):
     )
     tensor_parallel.model_parallel_cuda_manual_seed(1234)
     overrides = {}
+    if args.experts:
+        overrides["num_moe_experts"] = args.experts
     if args.dispatcher:
         overrides["moe_token_dispatcher_type"] = args.dispatcher
     if args.flex_backend:
@@ -87,7 +89,13 @@ def build(args, rank: int, world: int):
         recompute_granularity="full", recompute_method="uniform", recompute_num_layers=1,
         **overrides,
     ).bfloat16()
-    return (model,) + build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True)
+    after_model = torch.cuda.memory_allocated()
+    ddp, opt = build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True)
+    resident = {
+        "after_model_gib": round(after_model / 2**30, 2),
+        "after_optimizer_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
+    }
+    return model, ddp, opt, resident
 
 
 class _Done(Exception):
@@ -173,6 +181,9 @@ def main() -> None:
     ap.add_argument("--optimizer", default="dist_muon")
     ap.add_argument("--dispatcher", choices=("alltoall", "allgather", "flex"), default=None,
                     help="MoE token dispatcher; the A/B matrix arms (plan-0/07-dispatcher-ab.md)")
+    ap.add_argument("--experts", type=int, default=None,
+                    help="override num_moe_experts; used to measure how headroom scales "
+                         "with the number of experts local to a rank")
     ap.add_argument("--flex-backend", default=None,
                     help="deepep | mori | hybridep, only with --dispatcher flex")
     ap.add_argument("--fused-attn-res", action="store_true",
@@ -199,10 +210,17 @@ def main() -> None:
 
     row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
            "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res,
-           "arm": args.dispatcher or "default"}
+           "arm": args.dispatcher or "default", "experts": args.experts}
     torch.cuda.reset_peak_memory_stats()
     try:
-        model, ddp, opt = build(args, rank, world)
+        model, ddp, opt, resident = build(args, rank, world)
+        # Headroom is peak minus what is *resident* after the optimizer exists,
+        # measured rather than derived. Subtracting an analytic state estimate
+        # imports every uncertainty in that estimate -- and the estimate is wrong
+        # here anyway: with world=8 and EP=8 the expert parameters have an
+        # expert-DP of 1, so their optimizer state is not sharded and the 7.87
+        # B/param figure from G5 (DP=8) does not apply to them.
+        row.update(resident)
         vocab = get_preset(args.preset)["model"]["vocab_size"]
 
         cold = time.perf_counter()
@@ -226,8 +244,11 @@ def main() -> None:
 
         # one traced steady iteration
         if args.no_trace:
-            row["peak_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
+            peak = torch.cuda.max_memory_allocated() / 2**30
+            row["peak_gib"] = round(peak, 2)
+            row["headroom_gib"] = round(peak - row["after_optimizer_gib"], 2)
             row["resolved"] = resolved_dispatcher(model.config)
+            row["params_this_rank"] = sum(p.numel() for p in model.parameters())
             row["status"] = "ok"
             raise _Done()
         from torch.profiler import ProfilerActivity, profile
