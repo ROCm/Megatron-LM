@@ -118,12 +118,31 @@ def enable_qat_experts(
                 continue
             parametrize.register_parametrization(module, name, FakeQuantMXFP4(group_size))
             touched["weights"] += 1
-        if quantize_activations and not getattr(module, "_k3_qat_hook", False):
-            module.register_forward_pre_hook(_quantize_activations(group_size))
-            module._k3_qat_hook = True
+        if quantize_activations and getattr(module, "_k3_qat_handle", None) is None:
+            module._k3_qat_handle = module.register_forward_pre_hook(
+                _quantize_activations(group_size)
+            )
             touched["activation_hooks"] += 1
         touched["modules"] += 1
     return touched
+
+
+def disable_activation_quantisation(model) -> int:
+    """Remove *our* activation hooks, by handle. Returns how many went.
+
+    Serving runs quantised weights with unquantised activations, so measuring
+    what QAT's activation path costs means turning exactly that off. Clearing
+    `module._forward_pre_hooks` would do it too, and would also silently remove
+    anything core had registered there -- which is why the handle is kept.
+    """
+    removed = 0
+    for module in expert_linears(model):
+        handle = getattr(module, "_k3_qat_handle", None)
+        if handle is not None:
+            handle.remove()
+            module._k3_qat_handle = None
+            removed += 1
+    return removed
 
 
 def qat_state_dict_map(state_dict: Dict[str, torch.Tensor], to_qat: bool) -> Dict[str, torch.Tensor]:

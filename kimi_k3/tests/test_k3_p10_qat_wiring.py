@@ -140,3 +140,39 @@ def test_the_config_flag_turns_qat_on_by_itself(single_rank_world):
     plain = build_k3_model("tiny")
     other = expert_linears(plain)[0]
     assert not parametrize.is_parametrized(other, expert_weight_names(other)[0])
+
+
+def test_activation_hooks_come_off_by_handle(single_rank_world):
+    """Serving means quantised weights with unquantised activations.
+
+    Removing them by handle rather than by clearing `_forward_pre_hooks` matters:
+    the forward must return exactly to the no-hook result, and nothing core owns
+    may be taken with it.
+    """
+    from kimi_k3.moe.k3_qat_wiring import (
+        disable_activation_quantisation,
+        enable_qat_experts,
+        expert_linears,
+    )
+
+    torch.manual_seed(0)
+    model = build(qat=False)[0]
+    tokens = torch.randint(0, 4096, (1, 16), device="cuda")
+    with torch.no_grad():
+        weights_only = None
+        enable_qat_experts(model, quantize_activations=False)
+        weights_only = model(input_ids=tokens, position_ids=None, attention_mask=None)
+
+        touched = enable_qat_experts(model, quantize_activations=True)
+        assert touched["activation_hooks"] > 0
+        with_activations = model(input_ids=tokens, position_ids=None, attention_mask=None)
+
+        removed = disable_activation_quantisation(model)
+        restored = model(input_ids=tokens, position_ids=None, attention_mask=None)
+
+    assert removed == touched["activation_hooks"]
+    assert not torch.allclose(with_activations, weights_only, atol=1e-6), (
+        "activation quantisation did nothing"
+    )
+    torch.testing.assert_close(restored, weights_only, rtol=0, atol=0)
+    assert all(m._forward_pre_hooks is not None for m in expert_linears(model))
