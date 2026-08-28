@@ -110,9 +110,26 @@ class AttnResMixer(torch.nn.Module):
         )
 
 
-#: Rows per chunk in the fused mixer. Purely a memory knob: the mix is
-#: independent per token, so any value gives bit-identical results (G43).
+#: Rows per chunk in the fused mixer.
+#:
+#: **Not purely a memory knob, and the exception was measured rather than
+#: assumed.** The mix is independent per token, so the *forward* is bit-identical
+#: at any chunk size, at both the fast and release tiers. The *backward* is not:
+#: at production width a small chunk makes the batched matmul a different shape,
+#: rocBLAS picks a different kernel, and the per-token gradients change in the
+#: last bits. Measured at T=8192, K=8, H=7168:
+#:
+#:     chunk 32    -> per-token gradients differ, rel 4e-04 (prefix) / 7e-04 (slots)
+#:     chunk 1024  -> bit-identical
+#:     chunk 4096  -> bit-identical
+#:
+#: So the default sits in the region where the guarantee holds. Below ~1024 rows
+#: at release width the chunking is still *correct*, but it is no longer free, and
+#: G43 says so instead of claiming a bound it does not have.
 ATTN_RES_CHUNK = 4096
+
+#: Below this many rows the backward is no longer bit-identical at release width.
+ATTN_RES_BITWISE_MIN_CHUNK = 1024
 
 
 def attn_res_mix_fused(
@@ -133,15 +150,22 @@ def attn_res_mix_fused(
     temporary drops by `T / chunk`.
 
     The arithmetic is untouched: each chunk runs exactly the eager op sequence on
-    exactly the same values in the same order, so the forward is **bit-identical**,
-    not approximately equal, and so are the gradients of everything that belongs
-    to a single token.
+    exactly the same values in the same order, so the **forward is bit-identical**
+    at any chunk size, at both tiers.
 
-    The one exception is `norm_weight`. It is `[H]`, shared by every token, so its
-    gradient is a sum over all `T` rows -- and chunking changes the order of that
-    sum. The result differs by fp32 accumulation noise (~1e-5 relative), and the
-    error does not grow with the number of chunks, which is the difference between
-    reordering a sum and losing precision. Both are tested.
+    Two things about the backward are not, and both are stated rather than
+    discovered later:
+
+    * `norm_weight` is `[H]`, shared by every token, so its gradient is a sum over
+      all `T` rows and chunking reorders that sum. At release width the error is
+      1.9e-07 of the gradient's magnitude at 4 chunks and 7.7e-07 at 256 -- it
+      *does* grow, but sub-linearly, 64x the chunks for 4x the error, which is the
+      signature of a reordered sum rather than lost precision. One chunk is
+      bitwise, as it must be.
+    * The **per-token** gradients are bit-identical only while the chunk is large
+      enough that the batched matmul keeps the same rocBLAS kernel. At release
+      width that threshold is around `ATTN_RES_BITWISE_MIN_CHUNK`; at `chunk=32`
+      they differ by 4e-04 relative. The default is well above it.
 
     ponytail: the next rung is dropping the concatenation as well -- computing
     each candidate's score and output contribution from `block_residual` and

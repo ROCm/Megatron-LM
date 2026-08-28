@@ -66,9 +66,9 @@ loss from 8.36 to ~0.0 under both `dist_muon` and `adam`, and the 4 L official
 config (94 B parameters) trains on a single node at EP = 8, peaking at 189–202 GiB
 of 288. It converts both ways against the released checkpoint, resumes bitwise
 under PP = 2, and matches the release's own KDA module on real layer-0 weights.
-`pytest kimi_k3/tests/ -q` → **254 passed, 8 skipped**.
+`pytest kimi_k3/tests/ -q` → **268 passed, 8 skipped**; with `--run-slow`, **275 passed, 2 skipped**.
 
-Seventeen findings are on the register. Three came out of executing rather than
+Eighteen findings are on the register. Three came out of executing rather than
 reading, and each is a thing that would have shipped silently: **A15** —
 `dist_muon` could not be resumed at all, because the layer-wise optimizer cannot
 read what its own `state_dict()` writes; **A16** — the MXFP4 shared-scale rule was
