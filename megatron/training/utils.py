@@ -26,6 +26,7 @@ import torch
 
 from megatron.core.msc_utils import MultiStorageClientFeature, open_file
 from megatron.core._rank_utils import safe_get_rank as _safe_get_rank
+from megatron.core.dist_checkpointing.strategies.nvrx import has_nvrx_async_support
 
 try:
     from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm
@@ -836,55 +837,15 @@ def get_nvtx_range():
         return dummy_range
 
 
-def to_empty_if_meta_device(module: torch.nn.Module, *, device: torch.device, recurse=True):
-    """Move tensors to device if not meta device; otherwise materialize with empty_like().
-
-    Officially, torch suggests to_empty() for meta device materialization. Under the hood,
-    torch.empty_like() is applied to all parameters or buffers (see _apply). This may
-    accidently overwrite buffers with precomputed values during construction. Given the
-    goal is to only materialize those tensors on meta device, this function checks the
-    device first and only move the tensor to the destination if it is not on meta device.
-   
-    Args:
-        module: The target module to apply this transformation.
-        device: The desired device of the parameters
-            and buffers in this module.
-        recurse: Whether parameters and buffers of submodules should
-            be recursively moved to the specified device.
-    """
-
-    def _empty_like_if_meta(tensor: torch.Tensor, *, device: torch.device):
-        if tensor.device == torch.device("meta"):
-            return torch.empty_like(tensor, device=device)
-        else:
-            return tensor.to(device)
-
-    return module._apply(
-        lambda t: _empty_like_if_meta(t, device=device), recurse=recurse
-    )
-
-
-def get_nvtx_range():
-    """Create an NVTX range context manager."""
+def has_nvrx_installed():
+    """Checks if nvidia-resiliency-ext is installed."""
     try:
-        from torch.cuda import nvtx
+        import nvidia_resiliency_ext
+        return True
+    except (ImportError, ModuleNotFoundError):
+        return False
 
-        @contextmanager
-        def nvtx_range(msg, time=False):
-            if time:
-                timers = get_timers()
-                timers(msg, log_level=0).start()
-            try:
-                nvtx.range_push(msg)
-                yield
-            finally:
-                nvtx.range_pop()
-                if time:
-                    timers(msg, log_level=0).stop()
 
-        return nvtx_range
-    except:
-        @contextmanager
-        def dummy_range(msg):
-            yield
-        return dummy_range
+def has_nvrx_checkpointing_async_support():
+    """Checks whether the installed NVRx package exposes the async checkpointing API Megatron uses."""
+    return has_nvrx_async_support()

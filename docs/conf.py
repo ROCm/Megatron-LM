@@ -27,7 +27,7 @@ import sys
 project = "Megatron Core"
 copyright = "2026, NVIDIA Corporation"
 author = "NVIDIA Corporation"
-release = "nightly"
+release = "0.17.1"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -99,7 +99,7 @@ if not skip_autodoc:
 html_theme = "nvidia_sphinx_theme"
 html_theme_options = {
     "switcher": {
-        "json_url": "versions1.json",
+        "json_url": "../versions1.json",
         "version_match": release,
     },
     "icon_links": [

@@ -912,8 +912,13 @@ def validate_args(args, defaults={}):
                 'will fallback to bf16 all_gather instead, turning off fp8_param_gather',
                 args.rank,
             )
-        if args.fp4_param and not is_te_min_version("2.7.0.dev0"):
-            raise ValueError("--fp4-param requires Transformer Engine >= 2.7.0.dev0.")
+        if args.fp4_param_gather and not is_te_min_version("2.7.0.dev0"):
+            args.fp4_param_gather = False
+            warn_rank_0(
+                'FSDP2 FP4 param gather is not supported yet in TE 2.0, will fallback to bf16'
+                'all_gather instead, turning off fp4_param_gather',
+                args.rank,
+            )
 
     if args.overlap_param_gather_with_optimizer_step:
         assert args.use_distributed_optimizer, \
@@ -953,7 +958,7 @@ def validate_args(args, defaults={}):
         raise ValueError("--fp4-format and --fp8-format cannot be used simultaneously. Please choose one.")
 
     # FP4 param requires FP4 mode
-    if args.fp4_param and not args.fp4:
+    if args.fp4_param_gather and not args.fp4:
         raise ValueError("--fp4-param-gather must be used together with --fp4-format.")
 
     # FP4 requires TE >= 2.7.0.dev0 (NVFP4)
@@ -1505,6 +1510,9 @@ def validate_args(args, defaults={}):
             )
             args.async_save = False
 
+    if not args.async_save:
+        args.async_strategy = "mcore"
+
     # Inference args
     if args.inference_batch_times_seqlen_threshold > -1:
         assert args.pipeline_model_parallel_size > 1, \
@@ -1736,6 +1744,7 @@ def core_transformer_config_from_args(args, config_class=None):
     kw_args['num_layers_in_first_pipeline_stage']= args.decoder_first_pipeline_num_layers
     kw_args['num_layers_in_last_pipeline_stage']= args.decoder_last_pipeline_num_layers
     kw_args['fp8_param'] = args.fp8_param_gather
+    kw_args['fp4_param'] = args.fp4_param_gather
     if args.swiglu:
         kw_args['activation_func'] = F.silu
         kw_args['gated_linear_unit'] = True
@@ -1806,7 +1815,11 @@ def core_transformer_config_from_args(args, config_class=None):
 def _add_transformer_engine_args(parser):
     group = parser.add_argument_group(title='Transformer-Engine')
 
-    # delayed scaling only configs
+    # FP4 related arguments
+    group.add_argument('--fp4-param-gather', action='store_true',
+                       help='Keep the compute param in fp4 (do not use any other intermediate '
+                            'dtype) and perform the param all-gather in fp4.')
+    # FP8 related arguments
     group.add_argument('--fp8-param-gather', action='store_true',
                        help='Keep the compute param in fp8 (do not use any other intermediate '
                             'dtype) and perform the param all-gather in fp8.')
@@ -1815,8 +1828,7 @@ def _add_transformer_engine_args(parser):
                             ' This will use more memory')
     group.add_argument('--keep_fp8_weight_transpose_cache', action='store_true', dest='deprecated_keep_fp8_weight_transpose_cache',
                        help='DEPRECATED: Use --keep-fp8-weight-transpose-cache-te instead')
-
-    # FP4 related arguments
+    # TE precision config file
     group.add_argument('--te-precision-config-file', default=None,
                        help='Configuration file to select per-module precision overrides. '
                        'See TransformerEngineMixedPrecision.md')
@@ -2077,6 +2089,7 @@ def _add_network_size_args(parser):
         # args uses same var with a different name
         "num_moe_experts",
         "fp8_param",
+        "fp4_param",
         # incompatible defaults in dataclass
         "gradient_accumulation_fusion",
         "overlap_p2p_comm",
@@ -2569,6 +2582,8 @@ def _add_training_args(parser):
                        help='Optimizer function')
     group.add_argument('--optimizer-cpu-offload', action='store_true',
                        help='Offload optimizer state to CPU')
+    group.add_argument('--optimizer-cuda-graph', action='store_true',
+                       help='Enable CUDA graph for optimizer step')
     group.add_argument('--optimizer-offload-fraction', type=float, default=1.0,
                           help='Ratio of optimizer state to offload to CPU')
     group.add_argument('--use-torch-optimizer-for-cpu-offload', action='store_true',
