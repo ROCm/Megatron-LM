@@ -125,3 +125,18 @@ def test_a_plain_checkpoint_loads_into_a_qat_model(single_rank_world):
     )
     assert unexpected == [], unexpected[:5]
     assert [m for m in missing if torch.is_tensor(quantised.state_dict().get(m))] == []
+
+
+def test_the_config_flag_turns_qat_on_by_itself(single_rank_world):
+    """`--k3-qat-experts` was a field nothing read. It reads now."""
+    from kimi_k3.model.build import build_k3_model
+    from kimi_k3.moe.k3_qat_wiring import expert_linears, expert_weight_names
+
+    torch.manual_seed(0)
+    model = build_k3_model("tiny", k3_qat_experts=True)
+    module = expert_linears(model)[0]
+    assert parametrize.is_parametrized(module, expert_weight_names(module)[0])
+
+    plain = build_k3_model("tiny")
+    other = expert_linears(plain)[0]
+    assert not parametrize.is_parametrized(other, expert_weight_names(other)[0])

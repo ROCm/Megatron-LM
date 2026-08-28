@@ -17,6 +17,19 @@ would hide exactly the failure this gate exists to catch.
 
 Serving parity is the second half: the QAT forward against the same weights run
 the way a server would run them (dequantised MXFP4, no activation quantisation).
+
+**One phase per process.** Each phase builds an official-width model that peaks
+near 193 GiB per rank, and HIP does not hand that back to the next build quickly
+enough -- running two phases in one process fails with 270 GiB held outside
+PyTorch's allocator while it reports 17 GiB allocated, which reads like a leak and
+is really a lifetime problem. So the phases are separate launches appending to one
+jsonl, and `--mode report` compares them. `pp_payload_probe.py` is laid out the
+same way for the same reason.
+
+    for mode in bf16 qat serving; do
+        torchrun --nproc_per_node=8 -m kimi_k3.tools.qat_twin --mode $mode --json out.jsonl
+    done
+    python -m kimi_k3.tools.qat_twin --mode report --json out.jsonl
 """
 
 import argparse
@@ -130,6 +143,31 @@ def serving_parity(args) -> Dict:
     return stats
 
 
+def report(args) -> None:
+    """Compare the phases already written to `--json`, and print the verdict."""
+    rows = [json.loads(line) for line in open(args.json)]
+    by_mode = {}
+    for row in rows:
+        if row.get("status") == "ok":
+            by_mode[row["mode"]] = row
+    missing = {"bf16", "qat"} - set(by_mode)
+    if missing:
+        raise SystemExit(f"missing phases: {sorted(missing)} -- run them first")
+
+    bf16, qat = by_mode["bf16"]["losses"], by_mode["qat"]["losses"]
+    out = {
+        "steps": len(bf16),
+        "bf16": [bf16[0], bf16[-1]],
+        "qat": [qat[0], qat[-1]],
+        "bf16_fell": by_mode["bf16"]["fell"],
+        "qat_fell": by_mode["qat"]["fell"],
+        "offset": offset_trend(bf16, qat),
+    }
+    if "serving" in by_mode:
+        out["serving"] = by_mode["serving"]["serving"]
+    print(json.dumps(out, indent=2))
+
+
 def main() -> None:
     from megatron.core import parallel_state
 
@@ -143,8 +181,13 @@ def main() -> None:
     ap.add_argument("--optimizer", default="dist_muon")
     ap.add_argument("--no-quantize-activations", dest="quantize_activations",
                     action="store_false", default=True)
+    ap.add_argument("--mode", choices=("bf16", "qat", "serving", "report"), default="bf16")
     ap.add_argument("--json")
     args = ap.parse_args()
+
+    if args.mode == "report":
+        report(args)
+        return
 
     for var in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
         os.environ.pop(var, None)
@@ -156,20 +199,15 @@ def main() -> None:
         expert_model_parallel_size=args.ep,
     )
 
-    row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "steps": args.steps, "rank": rank}
+    row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "steps": args.steps,
+           "rank": rank, "mode": args.mode}
     try:
-        bf16 = curves(args, qat=False)
-        qat = curves(args, qat=True)
-        torch.distributed.barrier()
-        row.update(
-            bf16=[round(v, 4) for v in bf16],
-            qat=[round(v, 4) for v in qat],
-            bf16_fell=bf16[-1] < bf16[0],
-            qat_fell=qat[-1] < qat[0],
-            offset=offset_trend(bf16, qat),
-            serving=serving_parity(args),
-            status="ok",
-        )
+        if args.mode == "serving":
+            row.update(serving=serving_parity(args), status="ok")
+        else:
+            losses = curves(args, qat=args.mode == "qat")
+            row.update(losses=[round(v, 5) for v in losses],
+                       fell=losses[-1] < losses[0], status="ok")
     except Exception as exc:  # noqa: BLE001 -- the failure IS the measurement
         row.update(status=type(exc).__name__, error=str(exc)[:400])
 

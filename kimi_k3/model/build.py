@@ -62,7 +62,7 @@ def build_k3_model(
         device = "cuda" if torch.cuda.is_available() else "cpu"
     ctx = torch.device(device)
     with ctx:
-        return K3GPTModel(
+        model = K3GPTModel(
             config=config,
             transformer_layer_spec=block_spec,
             vocab_size=spec["model"]["vocab_size"],
@@ -72,3 +72,13 @@ def build_k3_model(
             post_process=post_process,
             vp_stage=vp_stage,
         )
+
+    # QAT is applied after construction rather than through the spec, because it
+    # parametrizes weights that core's expert modules own. Doing it here means
+    # `--k3-qat-experts` is a config flag like any other instead of something a
+    # caller has to remember to invoke -- the state the field was in until now.
+    if getattr(config, "k3_qat_experts", False):
+        from ..moe.k3_qat_wiring import enable_qat_experts
+
+        enable_qat_experts(model)
+    return model
