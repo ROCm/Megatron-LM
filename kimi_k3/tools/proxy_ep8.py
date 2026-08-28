@@ -68,6 +68,10 @@ def build(args, rank: int, world: int):
     )
     tensor_parallel.model_parallel_cuda_manual_seed(1234)
     overrides = {}
+    if args.dispatcher:
+        overrides["moe_token_dispatcher_type"] = args.dispatcher
+    if args.flex_backend:
+        overrides["moe_flex_dispatcher_backend"] = args.flex_backend
     if args.fused_attn_res:
         overrides.update(k3_attn_res_fused=True, k3_attn_res_chunk=args.attn_res_chunk)
     if args.layers:
@@ -84,6 +88,26 @@ def build(args, rank: int, world: int):
         **overrides,
     ).bfloat16()
     return (model,) + build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True)
+
+
+class _Done(Exception):
+    """Early exit from the measurement block without going through the error path."""
+
+
+def resolved_dispatcher(config) -> Dict:
+    """What the config *ended up* with, not what was asked for.
+
+    Finding A17: core's `__post_init__` silently overwrites
+    `moe_flex_dispatcher_backend` when `moe_enable_deepep` is set, and its guard
+    against the combination is unreachable. So every arm records the backend it
+    actually got -- otherwise two arms can report identical numbers with nothing
+    in the output saying why.
+    """
+    return {
+        "dispatcher": config.moe_token_dispatcher_type,
+        "flex_backend": getattr(config, "moe_flex_dispatcher_backend", None),
+        "enable_deepep": getattr(config, "moe_enable_deepep", None),
+    }
 
 
 def one_step(ddp, opt, vocab, seq, step):
@@ -147,10 +171,17 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=10)
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--optimizer", default="dist_muon")
+    ap.add_argument("--dispatcher", choices=("alltoall", "allgather", "flex"), default=None,
+                    help="MoE token dispatcher; the A/B matrix arms (plan-0/07-dispatcher-ab.md)")
+    ap.add_argument("--flex-backend", default=None,
+                    help="deepep | mori | hybridep, only with --dispatcher flex")
     ap.add_argument("--fused-attn-res", action="store_true",
                     help="run with the chunked AttnRes mixer (G44/G45)")
     ap.add_argument("--attn-res-chunk", type=int, default=4096)
     ap.add_argument("--trace-dir", default=None)
+    ap.add_argument("--no-trace", action="store_true",
+                    help="skip the profiled iteration; the profiler inflates peak memory, "
+                         "so any memory-scaling measurement must not include it")
     ap.add_argument("--json", default=None)
     args = ap.parse_args()
 
@@ -167,7 +198,8 @@ def main() -> None:
     from kimi_k3.config.presets import preset as get_preset
 
     row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
-           "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res}
+           "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res,
+           "arm": args.dispatcher or "default"}
     torch.cuda.reset_peak_memory_stats()
     try:
         model, ddp, opt = build(args, rank, world)
@@ -193,6 +225,11 @@ def main() -> None:
         row["steady_ms_median"] = round(sorted(steady)[len(steady) // 2], 1)
 
         # one traced steady iteration
+        if args.no_trace:
+            row["peak_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
+            row["resolved"] = resolved_dispatcher(model.config)
+            row["status"] = "ok"
+            raise _Done()
         from torch.profiler import ProfilerActivity, profile
 
         with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
@@ -207,8 +244,14 @@ def main() -> None:
             prof.export_chrome_trace(path)
             row["chrome_trace"] = path
 
+        row["resolved"] = resolved_dispatcher(model.config)
+        from kimi_k3.tools.ep_smoke import routing_load
+
+        row["routing"] = routing_load(model)
         row["peak_gib"] = round(torch.cuda.max_memory_allocated() / 2**30, 2)
         row["status"] = "ok"
+    except _Done:
+        pass
     except Exception as exc:  # noqa: BLE001 -- the failure IS the measurement
         row["status"] = type(exc).__name__
         row["error"] = str(exc)[:400]
