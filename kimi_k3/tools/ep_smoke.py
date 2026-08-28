@@ -73,6 +73,71 @@ def routing_load(model) -> Dict:
     }
 
 
+#: Set by `capture_routing`; each entry is one router call's expert selection.
+_CAPTURED: List[torch.Tensor] = []
+
+
+def capture_routing(model) -> List[torch.Tensor]:
+    """Record every router's chosen experts, so two forwards can be compared.
+
+    A repeat forward that is not bitwise can mean two very different things: float
+    noise accumulating, or a token being routed to a *different expert*. K3 picks
+    16 of 896 on sigmoid scores, so near-ties are common in an untrained router
+    and bf16 noise is enough to flip one. Without this the smoke test reports
+    "not bitwise" and leaves the reader to guess which.
+    """
+    from kimi_k3.moe.k3_router import QuantileBalancingRouter
+
+    _CAPTURED.clear()
+    original = QuantileBalancingRouter.routing
+
+    def wrapped(self, logits, **kwargs):
+        probs, routing_map = original(self, logits, **kwargs)
+        _CAPTURED.append(routing_map.detach().clone())
+        return probs, routing_map
+
+    QuantileBalancingRouter.routing = wrapped
+    QuantileBalancingRouter._k3_original_routing = original
+    return _CAPTURED
+
+
+def release_routing(model) -> None:
+    from kimi_k3.moe.k3_router import QuantileBalancingRouter
+
+    original = getattr(QuantileBalancingRouter, "_k3_original_routing", None)
+    if original is not None:
+        QuantileBalancingRouter.routing = original
+        del QuantileBalancingRouter._k3_original_routing
+
+
+def routing_stability(captured: List[torch.Tensor], boundary: int) -> Dict:
+    """Did the second forward choose the same experts as the first?"""
+    if not captured or boundary == 0 or len(captured) != 2 * boundary:
+        return {"available": False, "calls": len(captured), "boundary": boundary}
+
+    changed = same = 0
+    per_layer = []
+    for first, second in zip(captured[:boundary], captured[boundary:]):
+        if first.shape != second.shape:
+            return {"available": False, "reason": "shape changed between forwards"}
+        differing = (first != second).any(dim=-1) if first.dim() > 1 else (first != second)
+        per_layer.append(int(differing.sum()))
+        changed += int(differing.sum())
+        same += int(differing.numel() - differing.sum())
+    total = changed + same
+    return {
+        "available": True,
+        "layers": boundary,
+        "tokens_compared": total,
+        "tokens_rerouted": changed,
+        # Per MoE layer, in order. Which layer is *first* to differ is the whole
+        # diagnostic: if the earliest router already re-routes, the source is
+        # upstream of any MoE at all, and the dispatcher is not to blame.
+        "rerouted_per_layer": per_layer,
+        "fraction_rerouted": changed / total if total else 0.0,
+    }
+
+
 def main() -> None:
     from megatron.core import parallel_state, tensor_parallel
 
@@ -131,14 +196,21 @@ def main() -> None:
         # healthy run -- which is the only failure worth running 8 ranks to find.
         row["routing"] = routing_load(model)
 
-        # determinism: the same tokens twice, in eval, must route identically
+        # Determinism: the same tokens twice, in eval. When the outputs differ,
+        # the question is *why* -- accumulated float noise looks nothing like a
+        # token being sent to a different expert, and only one of those is a bug.
         tokens, _ = mock_batch(vocab, args.seq, 1, seed=99)
         model.eval()
+        captured = capture_routing(model)
         with torch.no_grad():
             first = model(input_ids=tokens, position_ids=None, attention_mask=None)
+            boundary = len(captured)
             second = model(input_ids=tokens, position_ids=None, attention_mask=None)
+        release_routing(model)
+
         row["repeat_forward_bitwise"] = bool(torch.equal(first, second))
         row["repeat_max_abs"] = (first.float() - second.float()).abs().max().item()
+        row["routing_stability"] = routing_stability(captured, boundary)
         row["status"] = "ok"
     except Exception as exc:  # noqa: BLE001 -- the failure IS the measurement
         row["status"] = type(exc).__name__
