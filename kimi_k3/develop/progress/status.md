@@ -96,10 +96,10 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [x] | T8.1 `tools/mapping.py` + explicit invariants | TBD-p8 | 2026-08-27 | **G30 GREEN.** All **497,220** released tensors accounted for: 497,052 mapped, **168 skipped by name** (the vision tower and projector), **zero unmapped**, 247,296 MXFP4 pairs, 69 KDA / 24 MLA layers inferred from which tensors exist. A 5 KB pattern fixture stands in for the 60 MB index |
-| [x] | T8.2 `tools/convert.py` both directions | TBD-p8 | 2026-08-27 | **G31 GREEN.** bf16 round-trips exactly; `A_log` trims only when the padding is really zero; MXFP4 experts dequantise on import; exporting experts **refuses** rather than writing bf16 under a `weight_packed` name |
-| [x] | T8.3 Synthetic round-trip in CI | TBD-p8 | 2026-08-27 | 13 tests, no network, no weights |
-| [-] | T8.4 Checkpoint-anchored parity | TBD-p8 | 2026-08-27 | **G32 GREEN for one KDA layer on real weights**: 847 MiB fetched by range request, our module and the **release's own** module both load it with 0 missing / 0 unexpected, forward agrees to **rel-L2 7.4e-3, cosine 0.999973** (inside the measured bf16 bound). The full four-layer truncated-model slice is still owed. Report: `results/anchored_parity.md` |
+| [x] | T8.1 `tools/mapping.py` + explicit invariants | `93b2c57ad` | 2026-08-27 | **G30 GREEN.** All **497,220** released tensors accounted for: 497,052 mapped, **168 skipped by name** (the vision tower and projector), **zero unmapped**, 247,296 MXFP4 pairs, 69 KDA / 24 MLA layers inferred from which tensors exist. A 5 KB pattern fixture stands in for the 60 MB index |
+| [x] | T8.2 `tools/convert.py` both directions | `93b2c57ad` | 2026-08-27 | **G31 GREEN.** bf16 round-trips exactly; `A_log` trims only when the padding is really zero; MXFP4 experts dequantise on import; exporting experts **refuses** rather than writing bf16 under a `weight_packed` name |
+| [x] | T8.3 Synthetic round-trip in CI | `93b2c57ad` | 2026-08-27 | 13 tests, no network, no weights |
+| [-] | T8.4 Checkpoint-anchored parity | `93b2c57ad` | 2026-08-27 | **G32 GREEN for one KDA layer on real weights**: 847 MiB fetched by range request, our module and the **release's own** module both load it with 0 missing / 0 unexpected, forward agrees to **rel-L2 7.4e-3, cosine 0.999973** (inside the measured bf16 bound). The full four-layer truncated-model slice is still owed. Report: `results/anchored_parity.md` |
 | [x] | T8.5 Tokenizer round-trip | `110c84c69` | 2026-08-27 | **G33 GREEN** (P7): special ids asserted against the released `config.json` |
 
 ## P9 — Training equivalence, per-head Muon, resume hardening (G34–G37)
@@ -110,14 +110,14 @@
 | [x] | T9.2 Twin axes | `76070d0b7` | 2026-08-27 | eager-vs-`fla` KDA **inside the band** on all three statistics (0.1371 / 0.0223 / 0.0184); recompute on-vs-off **bitwise 0.0**, with the checkpoint path proven to fire (0 calls off, 4 on) so the zero is not vacuous |
 | [x] | T9.3 `optim/per_head_muon.py` + group policy | `23ade88df` | 2026-08-27 | **G35 GREEN.** One split step is **bitwise-equal** to N core-Muon steps on the head slices, both axes; head slices are TP-local so `partition_dim=None`. Policy asserted against a real model |
 | [x] | T9.4 Wire `clip_qk` | `23ade88df` | 2026-08-27 | **G36 GREEN** at tiny: core's own `clip_qk(model)` drives our MLA unmodified; max logit recomputed per head and clipped to the threshold. The NoPE `k_rot` slice is shared across heads, so its whole correction lands on the query side |
-| [x] | T9.5 Resume under PP=2 | TBD-p9 | 2026-08-27 | **G37 GREEN, bitwise** over 10 post-resume steps, with and without dropout. Both negative controls fail. Found finding **A15**: `dist_muon` could not be resumed at all as shipped (`results/pp_resume.md`) |
+| [x] | T9.5 Resume under PP=2 | `544733536` | 2026-08-27 | **G37 GREEN, bitwise** over 10 post-resume steps, with and without dropout. Both negative controls fail. Found finding **A15**: `dist_muon` could not be resumed at all as shipped (`results/pp_resume.md`) |
 
 ## P10 — MXFP4 / MXFP8 QAT (G38–G41)
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
 | [x] | T10.1 quantiser + oracle | `9b1d2e8c7` | 2026-08-27 | **G38 GREEN.** The scale rule was wrong and the released weights said so — 25.75 % of a real expert's groups are impossible under the OCP floor-to-6.0 formula. Corrected to the measured rule; now **byte-identical** to `aiter.per_1x32_f4_quant`, and MXFP8 bit-identical with `scale_type=fp8_e8m0`. Finding **A16** |
-| [x] | T10.2 a8w4 forward + STE backward | TBD-p10 | 2026-08-27 | **G39 GREEN** at rel-L2 **1.66e-3** including K3's own 3584→3072 geometry, via `aiter.ops.triton.moe.moe_op_gemm_a8w4` — no checkout bump needed, contrary to P0's D1 deferral. **G40 GREEN, exact** (rtol 0, atol 0) |
+| [x] | T10.2 a8w4 forward + STE backward | `07d103d34` | 2026-08-27 | **G39 GREEN** at rel-L2 **1.66e-3** including K3's own 3584→3072 geometry, via `aiter.ops.triton.moe.moe_op_gemm_a8w4` — no checkout bump needed, contrary to P0's D1 deferral. **G40 GREEN, exact** (rtol 0, atol 0) |
 | [x] | T10.3 Checkpointing of packed data + scales + masters | `de2d10b1e` | 2026-08-27 | landed in P0 with the expert prototype; packed caches are buffers and ride the checkpoint |
 | [ ] | T10.4 QAT-vs-BF16 twin, serve parity | — | — | **G41 owed** — 8-GPU scheduled tier, per the P9 twin protocol |
 
@@ -125,11 +125,11 @@
 
 |     | Task | commit | date | note |
 | --- | --- | --- | --- | --- |
-| [x] | T11.1 EP=8 proxy + trace | TBD-g42 | 2026-08-27 | **G42 GREEN.** 4 L official, **EP=8**, seq 512: steady **2653.5 ms** (spread 2643–2659), peak **193.6 GiB**/rank, 321 k launches. The earlier 2-layer run is kept as a depth cross-check — the ranking is unchanged |
-| [x] | T11.2 Baseline report + budgets | TBD-p11 | 2026-08-27 | `profile/profile-baseline-2026-08-27.md`. **The prediction was wrong**: AttnRes is 0.1 % of device time, the Muon step is 21 % |
+| [x] | T11.1 EP=8 proxy + trace | `ef9bae4c1` | 2026-08-27 | **G42 GREEN.** 4 L official, **EP=8**, seq 512: steady **2653.5 ms** (spread 2643–2659), peak **193.6 GiB**/rank, 321 k launches. The earlier 2-layer run is kept as a depth cross-check — the ranking is unchanged |
+| [x] | T11.2 Baseline report + budgets | `72daec696` | 2026-08-27 | `profile/profile-baseline-2026-08-27.md`. **The prediction was wrong**: AttnRes is 0.1 % of device time, the Muon step is 21 % |
 | [x] | T11.3 Fused (chunked) AttnRes mixer | `92db9d6fc` | 2026-08-27 | **G43 GREEN.** Forward and per-token gradients **bit-identical**; the shared `[H]` gain gradient differs by fp32 accumulation order only, and the error does not grow with chunk count. Behind `--k3-attn-res-fused`, default off |
-| [x] | T11.4 Whatever the ranking says next | TBD-g42 | 2026-08-27 | **rescoped and settled.** Muon step **21.1 %**, AttnRes **0.09 %** — the ranking held across a 2x depth change, retiring the caveat that 21 % was overstated. Under R9.4 no AttnRes fix is authorised |
-| [x] | T11.5 Post-phase trace | TBD-g42 | 2026-08-27 | **G45 GREEN**, **G44 has nothing to meet.** Fused vs baseline at EP=8: **0.00 GiB** memory delta, −0.15 % time (noise). The temporary the chunking removes is **29 MB** at this geometry, not 109 GiB — that figure is production shape, which no single node can run |
+| [x] | T11.4 Whatever the ranking says next | `ef9bae4c1` | 2026-08-27 | **rescoped and settled.** Muon step **21.1 %**, AttnRes **0.09 %** — the ranking held across a 2x depth change, retiring the caveat that 21 % was overstated. Under R9.4 no AttnRes fix is authorised |
+| [x] | T11.5 Post-phase trace | `ef9bae4c1` | 2026-08-27 | **G45 GREEN**, **G44 has nothing to meet.** Fused vs baseline at EP=8: **0.00 GiB** memory delta, −0.15 % time (noise). The temporary the chunking removes is **29 MB** at this geometry, not 109 GiB — that figure is production shape, which no single node can run |
 
 ## P12 — Scale-out preparation (G46–G47)
 
@@ -138,6 +138,6 @@
 | [x] | T12.1 93 L configs from the measured recipe | `a5c3a9f62` | 2026-08-27 | **G46 GREEN.** Floor is **28 nodes** (pp8 x ep28: 19.25 B params/GPU, 141 GiB state + 82 GiB measured headroom). `results/scaleout_93l.md` |
 | [x] | T12.2 PP layouts + legality test | `a5c3a9f62` | 2026-08-27 | **PP cannot exceed 8** with aligned boundaries — 93 layers give seven whole AttnRes blocks, so eight cut points. Every `pp16` candidate is flagged, not silently emitted |
 | [x] | T12.3 EP ladder | `a5c3a9f62` | 2026-08-27 | 8/16/28/32/56, each asserted to divide 896 |
-| [x] | T12.4 Dispatcher A/B matrix | TBD-p12 | 2026-08-27 | **G47 GREEN** as a plan (`plan-0/07-dispatcher-ab.md`). The premise is overtaken: core already ships DeepEP **and** MoRI as flex backends — nothing to port, only runtimes to install. Found **A17**: core's "cannot enable both" guard is unreachable, so asking for MoRI + DeepEP silently gives DeepEP |
+| [x] | T12.4 Dispatcher A/B matrix | `1cdda9dd8` | 2026-08-27 | **G47 GREEN** as a plan (`plan-0/07-dispatcher-ab.md`). The premise is overtaken: core already ships DeepEP **and** MoRI as flex backends — nothing to port, only runtimes to install. Found **A17**: core's "cannot enable both" guard is unreachable, so asking for MoRI + DeepEP silently gives DeepEP |
 | [ ] | T12.5 Continued-pretrain flatness scripts | — | — | owed |
 

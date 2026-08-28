@@ -20,6 +20,7 @@ the way a server would run them (dequantised MXFP4, no activation quantisation).
 """
 
 import argparse
+import gc
 import json
 import os
 from typing import Dict, List
@@ -48,6 +49,7 @@ def curves(args, qat: bool) -> List[float]:
     ddp, opt = build_optimizer(model, optimizer=args.optimizer, lr=args.lr, bf16=True)
     vocab = get_preset(args.preset)["model"]["vocab_size"]
 
+    torch.distributed.barrier()
     losses = []
     for step in range(args.steps):
         tokens, labels = mock_batch(vocab, args.seq, 1, seed=args.seed)  # fixed batch: it must fall
@@ -58,8 +60,15 @@ def curves(args, qat: bool) -> List[float]:
         ddp.finish_grad_sync()
         opt.step()
         losses.append(float(loss.detach()))
+    # Both curves run in one process, so the second model is built while the
+    # first is being torn down. DDP allocates its buckets collectively, and if
+    # ranks reach that point after different amounts of garbage collection they
+    # enqueue collectives in different orders -- which shows up as an NCCL
+    # timeout with the ranks one work item apart, not as an error anyone can read.
     del model, ddp, opt
+    gc.collect()
     torch.cuda.empty_cache()
+    torch.distributed.barrier()
     return losses
 
 
@@ -109,12 +118,16 @@ def serving_parity(args) -> Dict:
         serving = model(input_ids=tokens, position_ids=None, attention_mask=None).float()
 
     diff = training - serving
-    return {
+    stats = {
         "rel_l2": (diff.norm() / serving.norm()).item(),
         "max_abs": diff.abs().max().item(),
         "logit_std": serving.std().item(),
         "argmax_agreement": (training.argmax(-1) == serving.argmax(-1)).float().mean().item(),
     }
+    del model, training, serving, diff
+    gc.collect()
+    torch.cuda.empty_cache()
+    return stats
 
 
 def main() -> None:
@@ -147,6 +160,7 @@ def main() -> None:
     try:
         bf16 = curves(args, qat=False)
         qat = curves(args, qat=True)
+        torch.distributed.barrier()
         row.update(
             bf16=[round(v, 4) for v in bf16],
             qat=[round(v, 4) for v in qat],
@@ -159,6 +173,11 @@ def main() -> None:
     except Exception as exc:  # noqa: BLE001 -- the failure IS the measurement
         row.update(status=type(exc).__name__, error=str(exc)[:400])
 
+    # The gather allocates NCCL buffers, and by this point three official-width
+    # models have been built and torn down. Without reclaiming first it fails
+    # inside NCCL with "Failed to CUDA calloc", which reads like a comms bug.
+    gc.collect()
+    torch.cuda.empty_cache()
     gathered = [None] * world
     torch.distributed.all_gather_object(gathered, row)
     if rank == 0:
