@@ -28,8 +28,9 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
                        help="in-kernel gate lower bound (release: -5.0)")
     group.add_argument("--k3-kda-use-full-rank-gate", action=argparse.BooleanOptionalAction,
                        default=True, help="release: true; the output gate is full-rank")
-    group.add_argument("--k3-kda-backend", type=str, default="eager", choices=["eager", "fla"],
-                       help="eager is the FP32 oracle and stays the default until G15 (rule R5.3)")
+    group.add_argument("--k3-kda-backend", type=str, default="fla", choices=["eager", "fla"],
+                       help="fla since G15 went green at production geometry; eager is the FP32 "
+                            "oracle, still selectable, and costs 109 GiB/layer at seq 8192")
 
     # --- MLA ---
     group.add_argument("--k3-mla-use-nope", action=argparse.BooleanOptionalAction, default=True,

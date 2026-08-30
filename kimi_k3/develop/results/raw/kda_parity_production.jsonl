@@ -1,0 +1,15 @@
+{"seq": 1024, "geometry": "production", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.0033000470139086246, "max_abs": 0.0003660842776298523, "cosine": 0.9999945163726807}
+{"seq": 1024, "geometry": "production", "comparison": "fla fp32 vs eager fp32", "rel_l2": 6.433947987716238e-07, "max_abs": 9.452924132347107e-08, "cosine": 1.0}
+{"seq": 1024, "geometry": "production", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 2.34823801292805e-05, "which": "dt_bias"}
+{"seq": 1024, "geometry": "production", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.0043091061525046825, "max_abs": 0.00048828125, "cosine": 0.9999907612800598}
+{"seq": 1024, "geometry": "production", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.006094508804380894, "which": "v"}
+{"seq": 4096, "geometry": "production", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.0033054121304303408, "max_abs": 0.00040521472692489624, "cosine": 0.999994695186615}
+{"seq": 4096, "geometry": "production", "comparison": "fla fp32 vs eager fp32", "rel_l2": 6.418761699933384e-07, "max_abs": 1.3690441846847534e-07, "cosine": 0.9999998807907104}
+{"seq": 4096, "geometry": "production", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 1.5704043107689358e-05, "which": "g"}
+{"seq": 4096, "geometry": "production", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.0043053170666098595, "max_abs": 0.00048828125, "cosine": 0.9999908208847046}
+{"seq": 4096, "geometry": "production", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.006068474147468805, "which": "v"}
+{"seq": 8192, "geometry": "production", "comparison": "floor: eager bf16 vs fp32", "rel_l2": 0.003310123225674033, "max_abs": 0.00045074522495269775, "cosine": 0.9999946355819702}
+{"seq": 8192, "geometry": "production", "comparison": "fla fp32 vs eager fp32", "rel_l2": 6.767935474272235e-07, "max_abs": 1.150183379650116e-07, "cosine": 0.9999998807907104}
+{"seq": 8192, "geometry": "production", "comparison": "fla fp32 backward (worst grad)", "rel_l2": 1.461010833736509e-05, "which": "g"}
+{"seq": 8192, "geometry": "production", "comparison": "fla bf16 vs eager bf16", "rel_l2": 0.004318824969232082, "max_abs": 0.00048828125, "cosine": 0.9999908208847046}
+{"seq": 8192, "geometry": "production", "comparison": "fla bf16 backward (worst grad)", "rel_l2": 0.0060778348706662655, "which": "v"}

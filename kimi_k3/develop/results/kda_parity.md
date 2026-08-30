@@ -51,9 +51,31 @@ Backward, worst per-tensor gradient: **fp32 1.6–2.9e-05** (`dt_bias` / `g`),
 | backward, fp32 | rel-L2 ≤ 1e-3 | 2.9e-5 | — | ~34× |
 | backward, bf16 | rel-L2 ≤ 2e-2 | 6.1e-3 | 3.3e-3 | ~3.3× |
 
+## Production geometry — G15, run 2026-08-30
+
+`python -m kimi_k3.tools.kda_parity_probe --production --seq 1024 4096 8192 --grad`
+at K3's real **H=96, K=128**:
+
+| seq | floor (eager bf16 vs fp32) | fla fp32 | fla bf16 | worst grad fp32 | worst grad bf16 |
+|---:|---:|---:|---:|---:|---:|
+| 1024 | 3.300e-03 | **6.434e-07** | 4.309e-03 | 2.35e-05 | 6.10e-03 |
+| 4096 | 3.305e-03 | **6.419e-07** | 4.305e-03 | 1.57e-05 | 6.07e-03 |
+| 8192 | 3.310e-03 | **6.768e-07** | 4.319e-03 | 1.46e-05 | 6.08e-03 |
+
+Identical in shape to the smaller geometries, and flat in sequence length: 8x the
+sequence moves fp32 agreement from 6.43e-07 to 6.77e-07. bf16 sits at 4.31e-03
+against a measured floor of 3.31e-03 — the kernel is within the dtype's own noise,
+not adding to it.
+
+**This is what R5.3 was waiting for, so the default flipped to `fla`** in its own
+commit. The eager oracle stays in tree and stays selectable; it is the reference,
+and every parity number here is against it.
+
+The flip is not cosmetic. The oracle keeps the recurrent state at every timestep
+for autograd, so at seq 8192 it costs **109 GiB per layer** against fla's **10.2**
+— the difference between the 93 L model fitting on 28 nodes and not fitting at all
+(`results/scaleout_93l.md`).
+
 ## Still owed
 
-Production geometry (H=96, K=128) and seq 8 k / 64 k belong to the nightly job:
-the eager oracle is a Python loop over the sequence, so it costs minutes there.
-The default backend stays `eager` until that runs (rule R5.3) — these numbers
-say the kernel is right at the shapes measured, not at every shape.
+seq 64 k, and the KDA state-passing path across a sequence-parallel boundary.

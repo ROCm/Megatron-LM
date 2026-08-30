@@ -60,7 +60,10 @@ def test_defaults_are_the_released_values():
     assert cfg.k3_kda_gate_lower_bound == -5.0
     assert (cfg.k3_situ_beta, cfg.k3_situ_linear_beta) == (4.0, 25.0)
     assert cfg.k3_mla_lora_norm_eps == 1e-6
-    assert cfg.k3_kda_backend == "eager", "the fast backend must not be the default (R5.3)"
+    assert cfg.k3_kda_backend == "fla", (
+        "fla is the default since G15 went green at production geometry (R5.3); "
+        "the eager oracle stays selectable but costs 109 GiB/layer at seq 8192"
+    )
 
 
 def test_bad_backend_is_rejected_at_parse_time():

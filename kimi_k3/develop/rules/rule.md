@@ -193,6 +193,14 @@ selectable at runtime. Fast backends (fla `chunk_kda`, AITER a8w4) default
 **off** until their parity gate is green at production shapes, then the default
 flip is its own commit with the gate numbers in the message.
 
+**Flipped so far:** `k3_kda_backend` -> `fla` on 2026-08-30, after G15 ran at
+H=96 / K=128 and seq 1024/4096/8192 (fp32 6.4-6.8e-07, bf16 4.31e-03 against a
+3.31e-03 floor). The gate was nearly flipped a day early on the strength of "the
+slow suite is green" -- which was true and irrelevant, because no slow test
+covered production geometry. *Green somewhere* is not the condition this rule
+states, and wanting the flip (it decides whether 93 L fits on 28 nodes) is
+exactly when to re-read the rule rather than the summary.
+
 ---
 
 ## §6. Git hygiene

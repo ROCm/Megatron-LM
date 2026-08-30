@@ -34,9 +34,19 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     k3_kda_conv_size: int = 4
     k3_kda_gate_lower_bound: float = -5.0
     k3_kda_use_full_rank_gate: bool = True
-    k3_kda_backend: str = "eager"
-    """eager | fla. Eager is the FP32 oracle and stays the default until the
-    fla parity gate (G15) is green at production shapes (rule R5.3)."""
+    k3_kda_backend: str = "fla"
+    """eager | fla. The eager FP32 oracle stays in tree permanently and remains
+    selectable, but `fla` is the default since 2026-08-30: G15 ran at production
+    geometry (H=96, K=128) at seq 1024/4096/8192 and the kernel agrees with the
+    oracle to **6.4-6.8e-07** rel-L2 in fp32, and to 4.31e-03 in bf16 against a
+    measured bf16 floor of 3.31e-03 -- the same shape as at the smaller geometries,
+    with no growth in sequence length. Backward: worst gradient 1.5-2.3e-05 fp32,
+    6.1e-03 bf16 (rule R5.3, `results/kda_parity.md`).
+
+    The flip is not cosmetic. The oracle keeps the recurrent state at every
+    timestep for autograd, so at seq 8192 it costs **109 GiB per layer** against
+    fla's **10.2** -- the difference between the 93 L model fitting on 28 nodes and
+    not fitting at all (`results/scaleout_93l.md`)."""
 
     # ---- Gated MLA layers ---------------------------------------------------
     k3_mla_use_nope: bool = True
