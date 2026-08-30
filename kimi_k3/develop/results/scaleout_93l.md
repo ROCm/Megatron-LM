@@ -1,63 +1,102 @@
-# G46 — 93 L configurations, validated analytically
+# G46 — what training 93 L actually takes
 
 > `kimi_k3/config/scaleout.py`; tests in `test_k3_p12_scaleout.py`.
-> Raw table: `results/raw/scaleout_93l.txt`. No cluster job is launched from here (R10.1).
+> Measurements: `results/raw/headroom_fla.jsonl`, `headroom_final.jsonl`.
+> No cluster job is launched from here (R10.1).
 
-Every number below is derived from a **measurement**, not an estimate (R9.1):
-bytes per parameter from `results/opt_mem.md` (`dist_muon` at DP=8: **7.87**),
-parameter counts from `tools/mem_budget.py`'s analytic breakdown, and the 82 GiB
-non-parameter headroom from the 4 L run in `results/official_smoke.md`, where
-16.31 B params/rank at 7.87 B/param accounted for the rest of a 202 GiB peak.
+93 L, **seq 8192**, `fla` KDA backend (the default since 2026-08-30), full
+recompute, micro-batch 1, MI355X at 288 GiB.
 
-## The smallest configuration that fits
+| shape | GPUs | nodes | experts/rank | state | mid-stage | last stage | AttnRes-aligned | fits |
+|---|---|---|---|---|---|---|---|---|
+| pp4 × ep28 | 112 | 14 | 32 | 320.6 | 457.9 | 457.4 | yes | no |
+| pp4 × ep32 | 128 | 16 | 28 | 290.5 | 427.8 | 427.3 | yes | no |
+| pp4 × ep56 | 224 | 28 | 16 | 199.9 | 337.2 | 336.7 | yes | no |
+| pp8 × ep28 | 224 | 28 | 32 | 160.3 | 228.9 | 228.4 | yes | **yes** |
+| pp8 × ep32 | 256 | 32 | 28 | 145.2 | 213.8 | 213.3 | yes | **yes** |
+| pp8 × ep56 | 448 | 56 | 16 | 100.0 | 168.6 | 168.1 | yes | **yes** |
+| pp16 × ep28 | 448 | 56 | 32 | 80.2 | 114.5 | 125.5 | **no** | **yes** |
+| pp16 × ep32 | 512 | 64 | 28 | 72.6 | 106.9 | 117.9 | **no** | **yes** |
+| pp16 × ep56 | 896 | 112 | 16 | 50.0 | 84.3 | 95.3 | **no** | **yes** |
 
-| config | GPUs | nodes | params/GPU | state GiB | + headroom | fits |
-|---|---|---|---|---|---|---|
-| pp8 · ep28 | 224 | 28 | 19.25 B | 141.1 | 223.1 | **yes** |
-| pp8 · ep32 | 256 | 32 | 17.73 B | 129.9 | 211.9 | **yes** |
-| pp4 · ep56 | 224 | 28 | 26.34 B | 193.1 | 275.1 | yes, with 13 GiB spare |
-| pp8 · ep16 | 128 | 16 | 28.36 B | 207.9 | 289.9 | no |
-| pp8 · ep8 | 64 | 8 | 49.64 B | 363.8 | 445.8 | no |
+## **28 nodes** — `pp8 × ep28`, 224 GPUs, 59 GiB of margin
 
-**28 nodes** is the floor with aligned pipeline boundaries. `pp4 · ep56` reaches
-it too but leaves 13 GiB of headroom against 65 GiB for `pp8 · ep28`, so it is
-the fragile one.
+Not a squeeze: a fifth of each card is free on both the mid and last stages.
 
-## PP cannot exceed 8 without splitting an AttnRes block
+## Two constraints bind, and neither is the node count
 
-A layer appends a residual slot when its 0-indexed position is a multiple of 12,
-and **the prefix sum resets at that moment** — `prefix_sum = None`, the stream
-restarts. A boundary there hands the next stage a payload whose prefix half is
-fresh rather than half-accumulated, and whose slot count is exactly `layer / 12`.
+**`pp` must be 8.** `pp4` fails at every EP — 24 layers per stage exceeds the card
+regardless of sharding. `pp16` is cheaper still but breaks AttnRes block
+alignment: 93 layers give only eight block-aligned cut points, so any larger PP
+leaves a residual block straddling two stages. 28 nodes is the *aligned* floor.
 
-93 layers give **seven whole blocks**, so there are only eight places a stage can
-begin on a block boundary. Every `pp16` row in the table is therefore flagged. It
-is not a correctness failure — P5 proved bitwise transport of a partial prefix
-across a stage boundary (G21) — but a `pp16` layout cuts a block in half, and any
-repartition or recompute then has to reason about a prefix that began on another
-stage. The planner reports the constraint instead of quietly emitting the layout.
+**`ep` must be at least 28.** Per-layer cost has a cliff in expert locality at
+seq 8192:
 
-| pp | layout | boundaries | payload slots crossing |
-|---|---|---|---|
-| 4 | 24, 24, 24, 21 | 24, 48, 72 | 2, 4, 6 |
-| 8 | 12 x 7, then 9 | 12, 24, …, 84 | 1, 2, 3, 4, 5, 6, 7 |
+| experts per rank | per KDA+MoE layer |
+|---|---|
+| 16, 28, 32 | **~5.7 GiB** |
+| 56 | ~57 GiB |
+| 112 | ~65 GiB |
 
-The last stage is short in both, and it is the one to watch: it carries the tail
-block **and** the extra layer, including the final MLA pair (layers 92 and 93,
-1-indexed) — the one place the 3:1 KDA/MLA stride breaks. A boundary that lands
-between those two is called out by name.
+Ten-fold, between 32 and 56. `ep28` puts 32 experts on a rank and sits just
+inside. `headroom_gib()` **raises** above 32 rather than extrapolating — the
+mechanism is bracketed, not explained, and a fit through a discontinuity would be
+invented rather than measured.
 
-Payload cost grows with depth: the last boundary in a `pp8` layout carries 8x the
-hidden state, against 2x at the first. Pipeline stages are not interchangeable
-here, and a balanced *layer* split is not a balanced *bandwidth* split.
+## Where every number comes from
 
-## EP ladder
+| quantity | value | measured how |
+|---|---|---|
+| non-expert | **6.00 B/param** | L=1 dense-only at DP=8 |
+| expert, expert-DP=1 | **10.66 B/param** | four consistent deltas, L=1..4 |
+| per KDA+MoE layer, seq 8192 | **5.72 GiB** | marginals 6.26 / 4.05 / 6.84 at 32 experts/rank |
+| fixed: embedding, output, loss | **16.66 GiB** | L=1 at seq 8192 — last stage only |
+| params per GPU | analytic | confirmed to the digit by G26 (16,306,993,312) |
 
-8, 16, 28, 32, 56 — all divide 896, and a test asserts it, because an EP that
-does not divide the expert count fails deep inside the dispatcher rather than at
-configuration time.
+`tools/proxy_ep8.py --no-trace` records resident memory on both sides of
+optimizer construction, so headroom is peak-minus-**measured**, never
+peak-minus-estimate.
 
-## Owed
+## What this replaces, and why the first answer was wrong twice over
 
-G47: the dispatcher A/B matrix (stock all-to-all vs DeepEP vs MoRI vs MoonEP) and
-the QB-load report template, both as plans rather than implementations.
+The first version of this document said 28 nodes too — by two errors that
+cancelled. It applied a **flat 82 GiB headroom** measured at 4 layers and seq 512
+to a 12-layer stage at seq 8192 (far too low), against a **flat 7.87 B/param**
+applied to expert weights that shard differently (also too low). Getting the same
+answer from compensating mistakes is worse than getting a different one, because
+nothing looks wrong.
+
+Three things were retracted on the way here, all from computing rather than
+measuring:
+
+1. **"~24 GiB of headroom per MoE layer"** — an artefact of the wrong
+   bytes-per-param. Measured across an 8x range of expert locality it is flat.
+2. **"expert-DP=1 implies 15.17 B/param"** — a correct reading of
+   `parallel_state.py` about the *group size*, and wrong about the *cost*.
+   Measurement gives 10.66.
+3. **"a 108 GiB fixed term"** — 87 % of it was the **eager KDA oracle**, which
+   keeps the recurrent state at every timestep for autograd: 109 GiB per layer at
+   seq 8192 against `fla`'s 10.2. Bisection found it; it was neither the
+   vocab-163840 output layer (removing it changed nothing) nor the naive fp32
+   loss (15 GiB in isolation).
+
+That last one is why this document is dated after the R5.3 backend flip. On the
+eager default, **28 nodes does not fit at all**.
+
+## Sensitivity
+
+Sequence length is the largest lever — the per-layer term is ~5.7 GiB at seq 8192
+and ~1.5 at seq 512. Micro-batch scales the activation term directly; mbs 2 adds
+roughly 69 GiB to a mid-stage and would consume the margin.
+
+## Not modelled
+
+* **Pipeline in-flight micro-batches.** Every measurement is pp=1. Under 1F1B an
+  early stage holds several micro-batches at once; with full recompute that should
+  be layer inputs only (~117 MB/layer at seq 8192), but "should be" is not a
+  measurement.
+* **expert-DP > 1.** Estimated at 0.72x and flagged `expert_bpp_measured: False`.
+  One node cannot produce that configuration.
+* **Context parallelism**, which would divide the sequence term and is the obvious
+  lever if micro-batch or sequence has to grow.

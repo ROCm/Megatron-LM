@@ -11,6 +11,7 @@ import pytest
 from kimi_k3.config.scaleout import (
     BYTES_PER_PARAM,
     CANDIDATES,
+    ScaleOutConfig,
     EP_LADDER,
     aligned_layout,
     boundaries,
@@ -78,16 +79,77 @@ def test_every_candidate_is_arithmetically_consistent():
         assert sum(row["layout"]) == LAYERS
         assert len(row["boundaries"]) == config.pp - 1
         assert row["params_per_gpu"] > 0
-        assert row["total_gib"] == pytest.approx(row["state_gib"] + row["headroom_gib"], abs=0.2)
+        if row["fits"] is None:
+            continue  # locality past the measured range; the model refuses to guess
+        assert row["mid_stage_gib"] > row["state_gib"]
+        assert row["last_stage_gib"] > row["state_gib"]
+
+
+def test_the_model_refuses_to_extrapolate_past_the_measured_locality():
+    """Per-layer cost jumps ~10x between 32 and 56 experts per rank.
+
+    A fit through that region would be invented rather than measured, so
+    `headroom_gib` raises and `plan` reports it as a problem instead of returning
+    a number that looks as trustworthy as the measured ones.
+    """
+    from kimi_k3.config.scaleout import MAX_MEASURED_LOCALITY, headroom_gib
+
+    assert headroom_gib(12, MAX_MEASURED_LOCALITY, False) > 0
+    with pytest.raises(ValueError, match="past the measured range"):
+        headroom_gib(12, MAX_MEASURED_LOCALITY + 1, False)
+
+    row = plan(ScaleOutConfig(name="ep8", tp=1, pp=8, ep=8))   # 112 experts per rank
+    assert row["fits"] is None
+    assert any("measured range" in p for p in row["problems"]), row["problems"]
+
+
+def test_the_fixed_term_is_charged_to_the_last_stage_only():
+    """Embedding, output layer and loss are paid once, not per stage."""
+    from kimi_k3.config.scaleout import FIXED_LAST_STAGE_GIB_SEQ8192, headroom_gib
+
+    mid = headroom_gib(12, 32, is_last_stage=False)
+    last = headroom_gib(12, 32, is_last_stage=True)
+    assert last - mid == pytest.approx(FIXED_LAST_STAGE_GIB_SEQ8192)
+
+
+def test_the_minimum_aligned_configuration_is_pp8_ep28():
+    """The headline number, so it cannot drift without a test failing."""
+    fitting = [
+        plan(c) for c in CANDIDATES
+        if plan(c)["fits"] and plan(c)["aligned"]
+    ]
+    assert fitting, "nothing fits; the model or the constants changed"
+    best = min(fitting, key=lambda r: r["gpus"])
+    assert (best["pp"], best["ep"]) == (8, 28), (best["pp"], best["ep"])
+    assert best["nodes"] == 28
+    assert best["mid_stage_gib"] < 288 - 40, "the 59 GiB margin has eroded"
 
 
 def test_the_node_count_comes_from_the_measured_recipe():
-    """If this ever reads an estimate, the whole table is decoration (R9.1)."""
-    assert BYTES_PER_PARAM["dist_muon@dp8"] == 7.87  # results/opt_mem.md
-    assert BYTES_PER_PARAM["muon"] == 15.17
+    """If this ever reads an estimate, the whole table is decoration (R9.1).
 
-    row = plan(next(c for c in CANDIDATES if c.pp == 8 and c.ep == 32))
-    expected = row["params_per_gpu"] * BYTES_PER_PARAM["dist_muon@dp8"] / 2**30
+    The constants are the *measured* ones, not G5's DP-sweep table: that table
+    predicted 15.17 B/param for experts at expert-DP=1, and direct measurement
+    gives 10.66. Both are in tree; only one is used here.
+    """
+    from kimi_k3.config.scaleout import (
+        EXPERT_BYTES_PER_PARAM_EDP1,
+        NON_EXPERT_BYTES_PER_PARAM,
+        split_params_per_gpu,
+    )
+    from kimi_k3.config.k3_config_builder import config_from_preset
+    from kimi_k3.config.presets import preset
+
+    assert NON_EXPERT_BYTES_PER_PARAM == 6.00
+    assert EXPERT_BYTES_PER_PARAM_EDP1 == 10.66
+
+    config = next(c for c in CANDIDATES if c.pp == 8 and c.ep == 32)
+    row = plan(config)
+    assert row["expert_data_parallel"] == 1 and row["expert_bpp_measured"]
+
+    cfg = config_from_preset(preset("93L")["config"])
+    ne, ex = split_params_per_gpu(cfg, 163840, config.tp, config.pp, config.ep)
+    expected = (ne * NON_EXPERT_BYTES_PER_PARAM + ex * EXPERT_BYTES_PER_PARAM_EDP1) / 2**30
     assert row["state_gib"] == pytest.approx(expected, abs=0.1)
 
 

@@ -26,7 +26,7 @@ pair that nothing else in the model resembles, so it is called out separately.
 """
 
 from dataclasses import dataclass
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 #: Measured, not assumed: `results/opt_mem.md`. Keyed by the data-parallel size
 #: the parameters are *actually* sharded over -- which is not the same number for
@@ -35,8 +35,34 @@ DIST_MUON_BYTES_PER_PARAM = {1: 15.17, 2: 11.00, 4: 8.91, 8: 7.87}
 
 #: Kept for the older call sites; prefer the table above.
 BYTES_PER_PARAM = {"dist_muon@dp8": 7.87, "dist_muon@dp4": 8.91, "muon": 15.17, "adam_dist@dp8": 6.0}
-#: MI300-class part. The usable figure, not the nameplate.
+#: MI355X. The usable figure, not the nameplate.
 HBM_PER_GPU_GIB = 288.0
+
+# --- measured headroom model (results/scaleout_93l.md) -----------------------
+# All four constants come from `tools/proxy_ep8.py --no-trace`, which records
+# resident memory on both sides of optimizer construction, so headroom is
+# peak-minus-measured rather than peak-minus-estimate. Deriving it produced two
+# retracted claims before the tool was changed to measure it.
+
+#: Bytes per parameter for ordinary parameters, sharded over the full DP group.
+NON_EXPERT_BYTES_PER_PARAM = 6.00
+#: Bytes per parameter for expert parameters at expert-DP = 1.
+EXPERT_BYTES_PER_PARAM_EDP1 = 10.66
+
+#: Per KDA+MoE layer at seq 8192, mbs 1, **32 experts per rank** -- the locality
+#: `ep28` has at full width. Mean of three consecutive marginals (6.26, 4.05,
+#: 6.84 GiB), which agree at this locality and do *not* at 112 per rank.
+PER_LAYER_GIB_SEQ8192 = 5.72
+
+#: Embedding, output layer and loss at seq 8192. Paid **once**, on the last
+#: pipeline stage only -- not per stage and not per layer.
+FIXED_LAST_STAGE_GIB_SEQ8192 = 16.66
+
+#: Experts per rank above which per-layer cost jumps roughly ten-fold at seq
+#: 8192: 5.7 GiB at 16/28/32 per rank, 57 at 56, 65 at 112. `ep28` sits just
+#: inside. The mechanism is not explained, only bracketed, so the model refuses
+#: to extrapolate past it rather than interpolating across a discontinuity.
+MAX_MEASURED_LOCALITY = 32
 GPUS_PER_NODE = 8
 #: Everything that is not parameters, gradients and optimizer state: activations,
 #: the AttnRes payload, fragmentation, NCCL buffers. Measured at 4 L in G28,
@@ -193,13 +219,18 @@ def state_gib(cfg, vocab_size: int, config: "ScaleOutConfig", world: int) -> Dic
     non_expert, expert = split_params_per_gpu(cfg, vocab_size, config.tp, config.pp, config.ep)
     dp = world // (config.tp * config.pp)
     edp = expert_data_parallel_size(world, config.tp, config.pp, config.ep)
-    gib = (non_expert * bytes_per_param(dp) + expert * bytes_per_param(edp)) / 2**30
+    # Measured, not the old DIST_MUON table: that table came from G5's probe at
+    # DP 1/2/4/8 on a non-EP config, and predicted 15.17 B/param for experts at
+    # expert-DP=1 where direct measurement gives 10.66. The measurement wins.
+    expert_bpp = EXPERT_BYTES_PER_PARAM_EDP1 if edp == 1 else EXPERT_BYTES_PER_PARAM_EDP1 * 0.72
+    gib = (non_expert * NON_EXPERT_BYTES_PER_PARAM + expert * expert_bpp) / 2**30
     return {
         "params_per_gpu": non_expert + expert,
         "expert_fraction": expert / (non_expert + expert),
         "data_parallel": dp,
         "expert_data_parallel": edp,
-        "expert_bytes_per_param": bytes_per_param(edp),
+        "expert_bytes_per_param": expert_bpp,
+        "expert_bpp_measured": edp == 1,
         "state_gib": round(gib, 1),
     }
 
@@ -221,34 +252,59 @@ def memory_per_gpu_gib(config: ScaleOutConfig, params_per_gpu: float) -> Dict[st
     }
 
 
-def plan(config: ScaleOutConfig) -> Dict:
+def headroom_gib(layers_on_stage: int, local_experts: int, is_last_stage: bool) -> float:
+    """Non-state memory one pipeline stage needs at seq 8192, mbs 1, `fla` backend.
+
+    Raises above `MAX_MEASURED_LOCALITY` rather than extrapolating: per-layer cost
+    jumps roughly ten-fold between 32 and 56 experts per rank and the mechanism is
+    unexplained, so a fit through that region would be invented, not measured.
+    """
+    if local_experts > MAX_MEASURED_LOCALITY:
+        raise ValueError(
+            f"{local_experts} experts per rank is past the measured range "
+            f"(<= {MAX_MEASURED_LOCALITY}); per-layer cost jumps ~10x beyond it, so "
+            "this needs measuring at that locality rather than extrapolating"
+        )
+    fixed = FIXED_LAST_STAGE_GIB_SEQ8192 if is_last_stage else 0.0
+    return layers_on_stage * PER_LAYER_GIB_SEQ8192 + fixed
+
+
+def plan(config: ScaleOutConfig, world: Optional[int] = None) -> Dict:
     """The full picture for one candidate, including why it does not work."""
     from kimi_k3.config.k3_config_builder import config_from_preset
     from kimi_k3.config.presets import preset
-    from kimi_k3.tools.mem_budget import params_per_gpu
 
     spec = preset("93L")
     cfg = config_from_preset(spec["config"])
+    world = world or config.gpus
+    alignment_note: List[str] = []
     try:
-        layout = aligned_layout(cfg.num_layers, config.pp, cfg.k3_attn_res_block_size)
-        alignment_note = []
+        layout, aligned = aligned_layout(cfg.num_layers, config.pp, cfg.k3_attn_res_block_size), True
     except ValueError as exc:
-        # Not a crash -- a result. 93 layers give only 7 whole AttnRes blocks, so
-        # any PP above 8 *must* cut one. The memory numbers are still worth having.
-        layout = uniform_layout(cfg.num_layers, config.pp)
+        # Not a crash -- a result. 93 layers give only seven whole AttnRes blocks,
+        # so any PP above 8 must cut one. The memory numbers are still worth having.
+        layout, aligned = uniform_layout(cfg.num_layers, config.pp), False
         alignment_note = [str(exc)]
-    per_gpu = params_per_gpu(cfg, spec["model"]["vocab_size"], config.tp, config.pp, config.ep)
 
+    state = state_gib(cfg, spec["model"]["vocab_size"], config, world)
+    local = cfg.num_moe_experts // config.ep
     row = {
         "name": config.name, "tp": config.tp, "pp": config.pp, "ep": config.ep,
-        "gpus": config.gpus, "nodes": config.nodes, "recipe": config.recipe,
-        "layout": layout,
+        "gpus": world, "nodes": world / GPUS_PER_NODE, "layout": layout,
+        "aligned": aligned, "local_experts": local,
         "boundaries": boundaries(layout),
-        "payload_slots": [slots_at(b, cfg.k3_attn_res_block_size) for b in boundaries(layout)],
         "problems": alignment_note
         + layout_problems(layout, cfg.num_layers, cfg.k3_attn_res_block_size),
     }
+    row.update(state)
     if not experts_divide(config.ep, cfg.num_moe_experts):
         row["problems"].append(f"ep={config.ep} does not divide {cfg.num_moe_experts} experts")
-    row.update(memory_per_gpu_gib(config, per_gpu))
+    try:
+        mid = row["state_gib"] + headroom_gib(max(layout), local, False)
+        last = row["state_gib"] + headroom_gib(layout[-1], local, True)
+        row.update(mid_stage_gib=round(mid, 1), last_stage_gib=round(last, 1),
+                   fits=max(mid, last) <= HBM_PER_GPU_GIB)
+    except ValueError as exc:
+        row.update(mid_stage_gib=None, last_stage_gib=None, fits=None)
+        row["problems"].append(str(exc))
     return row
