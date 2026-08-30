@@ -68,6 +68,8 @@ def build(args, rank: int, world: int):
     )
     tensor_parallel.model_parallel_cuda_manual_seed(1234)
     overrides = {}
+    if args.kda_backend:
+        overrides["k3_kda_backend"] = args.kda_backend
     if args.experts:
         overrides["num_moe_experts"] = args.experts
     if args.dispatcher:
@@ -181,6 +183,10 @@ def main() -> None:
     ap.add_argument("--optimizer", default="dist_muon")
     ap.add_argument("--dispatcher", choices=("alltoall", "allgather", "flex"), default=None,
                     help="MoE token dispatcher; the A/B matrix arms (plan-0/07-dispatcher-ab.md)")
+    ap.add_argument("--kda-backend", choices=("eager", "fla"), default=None,
+                    help="eager is the fp32 oracle and stores the recurrent state at every "
+                         "timestep -- 109 GiB per layer at seq 8192 against fla's 10.2. Any "
+                         "memory measurement meant to size a cluster must use fla.")
     ap.add_argument("--experts", type=int, default=None,
                     help="override num_moe_experts; used to measure how headroom scales "
                          "with the number of experts local to a rank")
@@ -210,7 +216,8 @@ def main() -> None:
 
     row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
            "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res,
-           "arm": args.dispatcher or "default", "experts": args.experts}
+           "arm": args.dispatcher or "default", "experts": args.experts,
+           "kda_backend": args.kda_backend}
     torch.cuda.reset_peak_memory_stats()
     try:
         model, ddp, opt, resident = build(args, rank, world)
