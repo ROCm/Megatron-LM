@@ -131,7 +131,7 @@ These are set against the **EP=8** numbers above; the AttnRes row has been settl
 
 | target | current | budget | why |
 |---|---|---|---|
-| Muon step | **21.1 % / 1503 ms** | −30 % of that row | per-head Newton-Schulz (P9) makes many small orthogonalisations out of few large ones; whether that is faster or slower on this part is **unmeasured** and is the first thing to check |
+| Muon step | **21.1 % / 1503 ms** | −30 % of that row | **checked 2026-08-30, and the answer is slower**: per-head Newton-Schulz costs **0.57x** on KDA and **0.06x** on MLA `q_b` (`results/per_head_muon_cost.md`). The precision knob that would have been the other candidate is already applied — `muon_fp32_matmul_prec` defaults to `"medium"`, worth 7x over `"highest"`. The Triton SYRK path is ~2x slower on gfx950 and unreachable anyway (A20). **No lead remains on this row** short of a ROCm Newton-Schulz kernel |
 | collectives | **6.6 % / 467 ms** | −20 % | overlap: `overlap_grad_reduce` is off in `build_optimizer` |
 | `aten::add_`, 14,449 calls | 3.6 % | fewer launches | **321 k** launches per iteration is high; the AttnRes prefix accumulation is one contributor |
 | AttnRes mixer | **0.09 % at EP=8** | no budget — **settled** | R9.4. G44 measured the chunked mixer at this geometry: 0.00 GiB and −0.15 % time, because the temporary it removes is 29 MB here |
