@@ -26,7 +26,8 @@ from .gated_mla_eager_fp32 import gated_mla_eager_fp32, rms_norm, softmax_scale
 
 EAGER = "eager"
 SDPA = "sdpa"
-BACKENDS = (EAGER, SDPA)
+TE = "te"
+BACKENDS = (EAGER, SDPA, TE)
 
 
 class K3GatedMLA(torch.nn.Module):
@@ -77,6 +78,8 @@ class K3GatedMLA(torch.nn.Module):
             getattr(config, "qk_clip", False) or getattr(config, "log_max_attn_logit", False)
         )
         self.max_logit_chunk = getattr(config, "k3_max_logit_chunk", 1024)
+        self.backend = getattr(config, "k3_mla_backend", TE)
+        self._te_dpa = None
 
     def weights(self) -> dict:
         w = {
@@ -165,21 +168,64 @@ class K3GatedMLA(torch.nn.Module):
     # --- attention ----------------------------------------------------------
 
     def _sdpa(self, query, key, value):
-        """Fused attention with the release's own 192/128 workaround.
+        """The release's own 192/128 workaround. Kept as the fallback, not the default.
 
-        `scaled_dot_product_attention` wants one head dim; K3's queries and keys
-        are 192 wide while values are 128. The release pads V to `q_head_dim` for
-        FlashAttention and slices the output back, so we do the same.
+        `scaled_dot_product_attention` needs `Dq == Dk == Dv` to reach a fused
+        kernel: with `v` at 128 against q/k at 192 both FLASH and EFFICIENT refuse
+        and it silently falls back to MATH, which materialises the whole
+        `[B, H, S, S]` score matrix -- **85.5 ms against 6.5 ms** at seq 8192. So
+        the release pads V to `q_head_dim` and slices the output back, and that
+        workaround is not optional on this path.
+
+        It costs 16.7 % of the attention FLOPs, and more besides: a 192-wide head
+        tiles worse than the shape TE can use. Measured at seq 8192, 96 heads:
+
+            SDPA flash, v padded 128->192    6.459 ms   383.0 TFLOP/s   29.1 % of peak
+            TE, native 192/128               2.207 ms   933.9 TFLOP/s   70.9 % of peak
         """
         pad = self.q_head_dim - self.v_head_dim
         v = F.pad(value, (0, pad)) if pad else value
         out = F.scaled_dot_product_attention(query, key, v, is_causal=True, scale=self.scale)
         return out[..., : self.v_head_dim] if pad else out
 
+    def _te_attention(self, query, key, value):
+        """TransformerEngine's fused attention, with **native** asymmetric head dims.
+
+        `DotProductAttention` takes `kv_channels: Union[int, Tuple[int, int]]` and
+        splits it into separate k and v widths, so K3's 192/128 needs no padding
+        at all -- 2.93x the padded SDPA path and 70.9 % of measured peak.
+
+        The signal for this was already in the register: finding **A13** records
+        that core's `MLASelfAttention` passes `k_channels` / `v_channels` to its
+        `core_attention` submodule and that core's own `DotProductAttention`
+        accepts neither. That was written up as a blocker for the local spec; what
+        it also means is that **TE's** version exists precisely for this case.
+
+        Takes and returns `[B, H, S, D]` to match `_sdpa`, converting to TE's
+        `sbhd` in between.
+        """
+        if self._te_dpa is None:
+            import transformer_engine.pytorch as te
+
+            self._te_dpa = te.DotProductAttention(
+                num_attention_heads=self.num_heads,
+                kv_channels=(self.q_head_dim, self.v_head_dim),
+                attn_mask_type="causal",
+                softmax_scale=self.scale,
+                qkv_format="sbhd",
+                attention_dropout=0.0,
+            ).to(query.device)
+
+        b, h, s, _ = query.shape
+        to_sbhd = lambda x: x.permute(2, 0, 1, 3).contiguous()
+        out = self._te_dpa(to_sbhd(query), to_sbhd(key), to_sbhd(value))
+        return out.view(s, b, h, self.v_head_dim).permute(1, 2, 0, 3)
+
     def forward(
-        self, hidden_states: torch.Tensor, backend: str = SDPA
+        self, hidden_states: torch.Tensor, backend: Optional[str] = None
     ) -> torch.Tensor:
         """``hidden_states`` is ``[B, S, hidden]``."""
+        backend = backend or self.backend
         assert backend in BACKENDS, f"unknown MLA backend {backend!r}"
         if backend == EAGER:
             return gated_mla_eager_fp32(
@@ -209,7 +255,7 @@ class K3GatedMLA(torch.nn.Module):
 
         if self.track_max_attn_logits:
             self._record_max_attn_logits(q, key)
-        attn = self._sdpa(q, key, value)
+        attn = self._te_attention(q, key, value) if backend == TE else self._sdpa(q, key, value)
         out = attn.transpose(1, 2).reshape(b, s, self.num_heads * self.v_head_dim)
         if self.fp32_attention_output:
             out = to_hi(out)

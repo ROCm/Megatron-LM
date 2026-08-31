@@ -27,7 +27,8 @@ the routing path had none.
 
 | component | weights | parameters | rel-L2 | max-abs | cosine |
 |---|---|---|---|---|---|
-| **gated MLA** | layer 3 | 232,196,096 = ours | **5.82e-03** | 2.20e-03 | **0.999983** |
+| **gated MLA** (`te` backend) | layer 3 | 232,196,096 = ours | **5.82e-03** | 2.20e-03 | **0.999983** |
+| **gated MLA** (`sdpa`, release workaround) | layer 3 | 232,196,096 = ours | 5.82e-03 | 2.20e-03 | 0.999983 |
 | **KDA** | layer 1 | 443,740,384 = ours | **7.84e-03** | 1.53e-05 | 0.999969 |
 | **KDA** | layer 2 | 443,740,384 = ours | **7.41e-03** | 3.05e-05 | 0.999973 |
 | **AttnRes**, attention site | layer 0 | — | **0.00e+00** | 0.00e+00 | **1.000000** |
@@ -70,3 +71,18 @@ The evidence for that path is independent and strong: P8 accounted for all 497,2
 released tensors with zero unmapped, and P10 showed our MXFP4 quantiser is
 **byte-identical** to `aiter.per_1x32_f4_quant`. It is anchored transitively, not
 directly.
+
+## Re-run 2026-08-31 after the TE attention swap
+
+The MLA attention operator moved from `scaled_dot_product_attention` with V padded
+to 192 (the release's own workaround) to TransformerEngine's `DotProductAttention`
+with `kv_channels=(192, 128)`, which handles the asymmetric head dims natively.
+
+Re-anchored against the release's own module on real layer-3 weights, the two
+backends are **indistinguishable**: rel-L2 5.8240e-03 (`te`) against 5.8230e-03
+(`sdpa`), differing from each other by 1e-6. The swap is numerically free.
+
+    attention operator, seq 8192   6.459 ms -> 2.207 ms   2.93x, 29.1% -> 70.9% of peak
+    full MLA layer,     seq 8192  11.62  ms -> 7.00  ms   1.66x
+
+Only layer 3's MLA tensors were re-fetched for this (0.43 GiB), not the 49 GiB slice.

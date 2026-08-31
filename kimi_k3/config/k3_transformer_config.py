@@ -71,6 +71,14 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     (`results/per_head_muon_cost.md`). MLA is excluded -- its slices are narrow
     enough to cost 17x. Turn on only with a twin run behind it."""
 
+    k3_mla_backend: str = "te"
+    """eager | sdpa | te. TE's `DotProductAttention` takes
+    `kv_channels=(192, 128)` and handles K3's asymmetric head dims natively, where
+    `scaled_dot_product_attention` must pad V to 192 to reach a fused kernel at
+    all. Measured at seq 8192 / 96 heads: **2.207 ms at 70.9 % of peak** against
+    the padded SDPA path's **6.459 ms at 29.1 %** -- 2.93x. `eager` stays the fp32
+    oracle; `sdpa` is the release's own workaround, kept as the fallback."""
+
     k3_max_logit_chunk: int = 1024
     """Query-block size when recomputing the max attention logit for QK-clip.
     Purely a memory knob -- the statistic is identical at any value (P9/G36)."""

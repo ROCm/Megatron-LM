@@ -158,3 +158,42 @@ def test_sequence_first_adapter_keeps_batch_elements_independent(mla):
     out2, _ = attn(x2)
     torch.testing.assert_close(out[:, 0], out2[:, 0], rtol=1e-5, atol=1e-6)
     assert not torch.allclose(out[:, 1], out2[:, 1])
+
+
+def test_the_te_backend_matches_the_release_workaround(single_rank_world):
+    """The TE swap must be numerically free, not merely faster.
+
+    `te` uses TransformerEngine's native asymmetric head dims; `sdpa` pads V to
+    192 the way the release does. They must agree, and both must agree with the
+    fp32 oracle -- otherwise a 2.93x speedup is buying a different model.
+    """
+    import torch
+
+    from kimi_k3.attention.gated_mla import K3GatedMLA
+    from kimi_k3.config.k3_config_builder import config_from_preset
+    from kimi_k3.config.presets import preset
+
+    torch.manual_seed(0)
+    module = K3GatedMLA(config_from_preset(preset("tiny")["config"])).cuda()
+    x = torch.randn(1, 64, module.config.hidden_size, device="cuda")
+    with torch.no_grad():
+        te = module(x, backend="te")
+        sdpa = module(x, backend="sdpa")
+        eager = module(x, backend="eager")
+
+    scale = eager.float().norm()
+    assert (te.float() - sdpa.float()).norm() / scale < 5e-3, "the two fused paths disagree"
+    assert (te.float() - eager.float()).norm() / scale < 5e-2, "te drifts from the fp32 oracle"
+
+
+def test_te_is_the_default_and_sdpa_stays_reachable(single_rank_world):
+    """The release's workaround is kept selectable, not deleted."""
+    from kimi_k3.attention.gated_mla import BACKENDS, TE, K3GatedMLA
+    from kimi_k3.config.k3_config_builder import config_from_preset
+    from kimi_k3.config.presets import preset
+
+    assert set(BACKENDS) == {"eager", "sdpa", "te"}
+    module = K3GatedMLA(config_from_preset(preset("tiny")["config"]))
+    assert module.backend == TE
+    forced = K3GatedMLA(config_from_preset(preset("tiny")["config"], k3_mla_backend="sdpa"))
+    assert forced.backend == "sdpa"

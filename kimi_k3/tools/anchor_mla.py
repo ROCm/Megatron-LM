@@ -9,12 +9,8 @@ import torch
 from safetensors import safe_open
 
 P = "language_model.model.layers.3."
-w = {}
-for f in sorted(glob.glob("/tmp/k3w/*.safetensors")):
-    with safe_open(f, framework="pt", device="cpu") as fh:
-        for k in fh.keys():
-            if k.startswith(P + "self_attn."):
-                w[k[len(P + "self_attn."):]] = fh.get_tensor(k)
+raw = torch.load("/tmp/k3_layer3_mla.pt", weights_only=True)
+w = {k[len(P + "self_attn."):]: v for k, v in raw.items() if k.startswith(P + "self_attn.")}
 print("MLA tensors:", sorted(w), flush=True)
 
 cfg_json = json.load(open(f"{REF}/config.json"))["text_config"]
@@ -59,9 +55,11 @@ with torch.no_grad():
     except TypeError:
         r = ref(hidden_states=x, attention_mask=causal, position_ids=pos, past_key_value=None)
     r = r[0] if isinstance(r, tuple) else r
-    o = ours(x)
-a, b = o.float(), r.float()
-print(f"\nANCHORED MLA PARITY, real layer-3 weights, seq {S}:")
-print(f"  rel-L2 {(a-b).norm()/b.norm():.4e} | max-abs {(a-b).abs().max():.3e} | cosine "
-      f"{torch.nn.functional.cosine_similarity(a.flatten(), b.flatten(), dim=0):.6f}")
-print(f"  std: ours {a.std():.6f} | release {b.std():.6f}")
+    o_te = ours(x, backend="te")
+    o_sdpa = ours(x, backend="sdpa")
+b = r.float()
+print(f"\nANCHORED MLA PARITY vs the release's own module, real layer-3 weights, seq {S}:")
+for label, got in (("te   (new default)", o_te.float()), ("sdpa (release workaround)", o_sdpa.float())):
+    print(f"  {label:26} rel-L2 {(got-b).norm()/b.norm():.4e} | max-abs {(got-b).abs().max():.3e} | "
+          f"cosine {torch.nn.functional.cosine_similarity(got.flatten(), b.flatten(), dim=0):.6f}")
+print(f"  std: release {b.std():.6f} | te {o_te.float().std():.6f} | sdpa {o_sdpa.float().std():.6f}")
