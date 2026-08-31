@@ -139,5 +139,5 @@
 | [x] | T12.2 PP layouts + legality test | `a5c3a9f62` | 2026-08-27 | **PP cannot exceed 8** with aligned boundaries — 93 layers give seven whole AttnRes blocks, so eight cut points. Every `pp16` candidate is flagged, not silently emitted |
 | [x] | T12.3 EP ladder | `a5c3a9f62` | 2026-08-27 | 8/16/28/32/56, each asserted to divide 896 |
 | [x] | T12.4 Dispatcher A/B matrix | `1cdda9dd8` | 2026-08-27 | **G47 GREEN** as a plan (`plan-0/07-dispatcher-ab.md`). The premise is overtaken: core already ships DeepEP **and** MoRI as flex backends — nothing to port, only runtimes to install. Found **A17**: core's "cannot enable both" guard is unreachable, so asking for MoRI + DeepEP silently gives DeepEP |
-| [ ] | T12.5 Continued-pretrain flatness scripts | — | — | owed |
+| [x] | T12.5 Continued-pretrain flatness scripts | TBD-t125 | 2026-08-31 | `tools/flatness_probe.py` + 7 tests. The statistic is **deceleration**, not drift — continued pretraining is supposed to descend, so slope alone flags every healthy run. Finding **C6** is measured rather than assumed: `--quantisation-baseline` puts the MXFP4 round-trip offset at **0.0749** at 4 L. Evaluation against the released checkpoint is human-run (R10.1) |
 
