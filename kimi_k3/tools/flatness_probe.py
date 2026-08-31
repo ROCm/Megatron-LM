@@ -29,6 +29,11 @@ cannot hide another:
   Testing `drift` instead would fail every healthy run that actually learns.
 * `spike` — max loss in the window over the arrival loss. A single bad step shows
   here and nowhere else.
+* `step_noise` — **median** absolute change between consecutive steps. **A threshold is
+  meaningless without this.** On the first end-to-end run, a "spike" of 0.2423
+  tripped a 0.05 tolerance and was 1.7x the typical step-to-step move of ~0.14 --
+  ordinary sampling noise reported as a defect. `verdict` now refuses to call a
+  window unflat on evidence smaller than the window can resolve, and says so.
 
 ## What C6 means for the threshold
 
@@ -57,6 +62,7 @@ def flatness(losses: List[float]) -> Dict:
     quarter = max(1, len(losses) // 4)
     first = sum(losses[:quarter]) / quarter
     last = sum(losses[-quarter:]) / quarter
+    deltas = sorted(abs(losses[i + 1] - losses[i]) for i in range(len(losses) - 1)) or [0.0]
     half = len(losses) // 2
     early_drop = losses[0] - losses[max(0, half - 1)]
     late_drop = losses[half] - losses[-1] if half < len(losses) else 0.0
@@ -69,25 +75,48 @@ def flatness(losses: List[float]) -> Dict:
         "late_drop": late_drop,
         "deceleration": early_drop - late_drop,
         "spike": max(losses) - losses[0],
+        # Median, not mean: a spike creates two large consecutive deltas and would
+        # inflate the very estimate meant to judge it, raising the threshold past
+        # the event. The median is unmoved by the outliers being detected.
+        "step_noise": deltas[len(deltas) // 2],
         "min": min(losses),
         "max": max(losses),
     }
 
 
-def verdict(stats: Dict, tolerance: float) -> Dict:
-    """Flat, recovering, or spiking -- named, so a curve is not read by eye."""
+def verdict(stats: Dict, tolerance: float, noise_factor: float = 3.0) -> Dict:
+    """Flat, recovering, spiking, or inconclusive -- so a curve is not read by eye.
+
+    The threshold is the *larger* of what the caller asked for and what the window
+    can resolve. A run whose steps move by 0.14 on their own cannot testify about a
+    0.05 effect, and reporting one as a defect is how a noisy baseline gets called
+    a bug. `conclusive` says which regime the answer came from.
+    """
+    resolution = noise_factor * stats.get("step_noise", 0.0)
+    threshold = max(tolerance, resolution)
     problems = []
-    if stats["deceleration"] > tolerance:
+    if stats["deceleration"] > threshold:
         problems.append(
-            f"deceleration {stats['deceleration']:.4f} above {tolerance}: the window "
+            f"deceleration {stats['deceleration']:.4f} above {threshold:.4f}: the window "
             f"falls {stats['early_drop']:.4f} in its first half and only "
             f"{stats['late_drop']:.4f} in its second. That is *recovery* -- what a "
             "conversion defect looks like once the model has trained through it -- "
             "not continued pretraining, which descends at a steady rate"
         )
-    if stats["spike"] > tolerance:
-        problems.append(f"spike {stats['spike']:.4f} above {tolerance}")
-    return {"flat": not problems, "problems": problems}
+    if stats["spike"] > threshold:
+        problems.append(f"spike {stats['spike']:.4f} above {threshold:.4f}")
+    return {
+        "flat": not problems,
+        "problems": problems,
+        "threshold_used": threshold,
+        "resolution": resolution,
+        "conclusive": resolution <= tolerance,
+        "note": None if resolution <= tolerance else (
+            f"step-to-step noise is {stats['step_noise']:.4f}, so this window cannot "
+            f"resolve an effect below {resolution:.4f}; a 'flat' verdict here means "
+            f"'nothing larger than the noise', not 'nothing'"
+        ),
+    }
 
 
 def evaluate(model, tokens, labels) -> float:

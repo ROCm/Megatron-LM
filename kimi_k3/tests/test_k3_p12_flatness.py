@@ -36,12 +36,35 @@ def test_the_recovery_signature_is_caught():
     assert any("recovery" in p for p in result["problems"]), result
 
 
+def test_a_noisy_window_cannot_convict_and_says_so():
+    """The flaw the first end-to-end run exposed.
+
+    A fresh model on random tokens moved ~0.14 between consecutive steps, and its
+    0.242 "spike" -- 1.7x that -- tripped a fixed 0.05 tolerance. Reporting that
+    as a defect is how a noisy baseline gets called a bug. The threshold is now
+    the larger of what was asked for and what the window can resolve.
+    """
+    noisy = [13.38, 13.62, 13.13, 13.55, 13.25, 13.49, 13.27, 13.42]
+    stats = flatness(noisy)
+    assert stats["step_noise"] > 0.2
+    result = verdict(stats, TOL)
+    assert result["flat"], result
+    assert not result["conclusive"]
+    assert "cannot resolve" in result["note"]
+
+
 def test_a_single_spike_is_caught_even_when_the_window_is_otherwise_flat():
     losses = [2.50] * 4 + [3.20] + [2.50] * 3
     stats = flatness(losses)
     assert abs(stats["drift"]) < 0.01, "drift alone would call this flat"
     assert stats["spike"] == pytest.approx(0.70)
-    assert not verdict(stats, TOL)["flat"]
+    result = verdict(stats, TOL)
+    assert not result["flat"]
+    assert result["conclusive"], (
+        "a quiet window must still be able to convict -- if the noise estimate "
+        "used the mean, this spike would inflate it past its own detection "
+        "threshold, which is why it is the median"
+    )
 
 
 def test_ordinary_descent_is_not_mistaken_for_recovery():
