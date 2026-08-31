@@ -26,7 +26,33 @@ measured under a different default is comparing against the wrong yardstick.
 | backend | max Δ | mean Δ | final-quarter Δ |
 |---|---|---|---|
 | `eager` (2026-08-27) | 0.2382 | 0.0837 | 0.0488 |
-| **`fla` (2026-08-30, current default)** | **0.2679** | **0.1165** | **0.1230** |
+| **`fla` (2026-08-31, current default)** | **0.2679** | **0.1165** | **0.1230** |
+
+Each band is reproducible to the digit on its own default, across separate runs.
+
+## Both twins re-validated against the current band (2026-08-31)
+
+Certifying a twin against a band measured under a different default is comparing
+against the wrong yardstick, so both were re-run rather than assumed to carry over:
+
+| axis | max Δ | mean Δ | final-quarter Δ | inside |
+|---|---|---|---|---|
+| KDA backend, eager vs `fla` | **0.0765** | **0.0192** | **0.0151** | yes |
+| recompute off vs full | **0.0000** | **0.0000** | **0.0000** | yes |
+
+The KDA twin came in **tighter** than on the eager-era band — 0.0765 against 0.1371
+on max, and 0.0151 against 0.0184 on the final quarter — while the band it is
+measured against got wider. Both twins now sit further inside than before.
+
+That is worth stating carefully, because it is easy to over-read. The twin
+compares the same two backends either way; what changed is which one the *rest of
+the model* runs, and the band it is judged against. It is not evidence that `fla`
+improved, only that the comparison did not degrade when the default moved.
+
+The recompute twin is still bitwise 0.0, with the checkpoint path still proven to
+fire — 0 calls off, 4 on. A correct recompute replays a forward, so the backend
+should not matter; that is a prediction about a different kernel's determinism,
+and it is now measured rather than reasoned.
 
 Three statistics rather than one: `max` catches a single spike a mean would
 absorb, `mean` catches a small constant offset, and the final quarter catches
