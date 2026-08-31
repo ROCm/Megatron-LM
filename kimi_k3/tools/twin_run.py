@@ -94,6 +94,11 @@ AXES = (
     ("recompute", {"recompute_granularity": None}, {"recompute_granularity": "full",
                                                    "recompute_method": "uniform",
                                                    "recompute_num_layers": 1}),
+    # Unlike the axes above, this one is *not* expected to be a no-op: per-head
+    # Muon deliberately changes the update (G35's control asserts it does). The
+    # band is still the right yardstick -- the question is whether a change that
+    # costs 1.75x on the largest row moves the loss further than reseeding does.
+    ("per_head_muon", {"k3_per_head_muon": False}, {"k3_per_head_muon": True}),
 )
 
 

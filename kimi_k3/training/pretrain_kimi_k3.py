@@ -94,9 +94,15 @@ def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf
         clip_grad=1.0,
     )
     if "muon" in opt_config.optimizer:
-        return ddp, get_megatron_muon_optimizer(
+        build = lambda: get_megatron_muon_optimizer(
             opt_config, [ddp], layer_wise_distributed_optimizer="dist" in opt_config.optimizer
         )
+        if getattr(model.config, "k3_per_head_muon", False):
+            from ..optim.per_head_muon import per_head_muon
+
+            with per_head_muon(model, model.config):
+                return ddp, build()
+        return ddp, build()
     return ddp, get_megatron_optimizer(opt_config, [ddp])
 
 

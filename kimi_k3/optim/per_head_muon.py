@@ -30,7 +30,9 @@ orthogonalization is just normalisation; it goes through whole-matrix Muon
 instead.
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+import contextlib
 
 import torch
 
@@ -51,12 +53,21 @@ KDA_SPLITS = {
     "g_b_proj.weight": OUT_AXIS,
     "o_proj.weight": IN_AXIS,
 }
+#: Retained but **off by default** -- see `SPLIT_KINDS`. MLA's per-head slices are
+#: `[192, 1536]`, small enough that five GEMMs become 480 launch-bound ones:
+#: measured 1.42 ms whole against 24.93 ms per-head, a **17x** cost for the same
+#: property KDA gets for 1.75x (`develop/results/per_head_muon_cost.md`).
 MLA_SPLITS = {
     "q_b_proj.weight": OUT_AXIS,
     "kv_b_proj.weight": OUT_AXIS,
     "g_proj.weight": OUT_AXIS,
     "o_proj.weight": IN_AXIS,
 }
+
+#: Which attention kinds get the head split. KDA only by default: its slices are
+#: `[128, 7168]`, wide enough that the split costs 1.75x rather than 17x. Pass
+#: `("kda", "mla")` to `head_split` / `tag_k3_heads` to restore the old behaviour.
+SPLIT_KINDS = ("kda",)
 
 #: Sent to the scalar optimizer (Adam or Lion) by name, on top of core's own rule
 #: that anything not 2-D and anything flagged `is_embedding_or_output_parameter`
@@ -66,13 +77,23 @@ MLA_SPLITS = {
 SCALAR_BY_NAME = ("A_log", "dt_bias", "expert_bias", "_conv1d_weight", "norm", "layernorm")
 
 
-def head_split(name: str, param: torch.Tensor, config) -> Optional[Tuple[int, int]]:
-    """`(num_heads, axis)` for a per-head attention matrix, else None."""
+def head_split(
+    name: str, param: torch.Tensor, config, kinds: Sequence[str] = SPLIT_KINDS
+) -> Optional[Tuple[int, int]]:
+    """`(num_heads, axis)` for a per-head attention matrix, else None.
+
+    `kinds` decides which attention kinds are split. The default is KDA only,
+    because the cost of the split depends on how wide the slice is and MLA's is
+    not wide enough -- 17x against KDA's 1.75x. This is a *speed* decision on a
+    *correctness* feature, so it is a knob rather than a deletion, and the twin
+    run in `results/per_head_muon_twin.md` is what says whether the correctness
+    is worth the 1.75x at all.
+    """
     if param.dim() != 2:
         return None
-    if ".kda." in name:
+    if ".kda." in name and "kda" in kinds:
         table, heads = KDA_SPLITS, config.k3_kda_num_heads
-    elif ".mla." in name:
+    elif ".mla." in name and "mla" in kinds:
         table, heads = MLA_SPLITS, config.num_attention_heads
     else:
         return None
@@ -108,11 +129,11 @@ def k3_param_policy(model) -> Dict[str, str]:
     return {name: param_role(name, param) for name, param in model.named_parameters()}
 
 
-def tag_k3_heads(model, config) -> List[str]:
+def tag_k3_heads(model, config, kinds: Sequence[str] = SPLIT_KINDS) -> List[str]:
     """Mark every per-head matrix with `param.k3_head_split`. Returns the names."""
     tagged = []
     for name, param in model.named_parameters():
-        split = head_split(name, param, config)
+        split = head_split(name, param, config, kinds)
         if split is not None:
             param.k3_head_split = split
             tagged.append(name)
@@ -135,6 +156,26 @@ def orthogonalize_per_head(
     heads = grad.view(grad.shape[0], num_heads, -1).transpose(0, 1)
     out = torch.stack([orthogonalize_fn(h) for h in heads])
     return out.transpose(0, 1).reshape(grad.shape)
+
+
+@contextlib.contextmanager
+def per_head_muon(model, config, kinds: Sequence[str] = SPLIT_KINDS):
+    """Tag the model's heads and make core build `PerHeadMuon` instead of Muon.
+
+    `get_megatron_muon_optimizer` constructs `TensorParallelMuon(...)` directly
+    from its own module scope, so rebinding that name for the duration of
+    construction substitutes ours with no diff under `megatron/` -- the same
+    mechanism `model/core_patch.py` uses for the decoder block (rule R2.2).
+    """
+    import megatron.core.optimizer.muon as muon_module
+
+    tagged = tag_k3_heads(model, config, kinds)
+    original = muon_module.TensorParallelMuon
+    muon_module.TensorParallelMuon = PerHeadMuon
+    try:
+        yield tagged
+    finally:
+        muon_module.TensorParallelMuon = original
 
 
 class PerHeadMuon(TensorParallelMuon):

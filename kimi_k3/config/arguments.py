@@ -43,6 +43,9 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
                        default=True, help="[report] fp32 attention output during training")
     group.add_argument("--k3-attn-res-chunk", type=int, default=4096,
                        help="rows per chunk in the fused AttnRes mixer; memory only")
+    group.add_argument("--k3-per-head-muon", action=argparse.BooleanOptionalAction, default=False,
+                       help="split KDA attention matrices by head before Newton-Schulz; "
+                            "costs ~1.75x on the Muon step")
     group.add_argument("--k3-max-logit-chunk", type=int, default=1024,
                        help="query-block size for the QK-clip max-logit recompute; memory only")
 

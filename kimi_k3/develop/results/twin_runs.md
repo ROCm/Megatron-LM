@@ -17,6 +17,17 @@ three seeds.
 | seed 1 vs 2 | 0.1511 | 0.0609 | 0.0175 |
 | **band** (worst of each) | **0.2382** | **0.0837** | **0.0488** |
 
+**This band is for the `eager` KDA backend**, which was the default when it was
+measured. Re-measured on 2026-08-30 with identical seeds, steps and batch but the
+`fla` default (R5.3 flip), it is **0.2679 / 0.1165 / 0.1230**. A noise band is a
+property of a configuration, not of a project: comparing a twin against a band
+measured under a different default is comparing against the wrong yardstick.
+
+| backend | max Δ | mean Δ | final-quarter Δ |
+|---|---|---|---|
+| `eager` (2026-08-27) | 0.2382 | 0.0837 | 0.0488 |
+| **`fla` (2026-08-30, current default)** | **0.2679** | **0.1165** | **0.1230** |
+
 Three statistics rather than one: `max` catches a single spike a mean would
 absorb, `mean` catches a small constant offset, and the final quarter catches
 slow divergence — which is the failure that matters and the one the other two

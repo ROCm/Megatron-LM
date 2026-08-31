@@ -101,9 +101,13 @@ def test_head_split_covers_the_projections_that_have_heads(single_rank_world, ti
         heads, axis = by_name[name].k3_head_split
         assert by_name[name].shape[axis] % heads == 0
 
-    # every attention output projection, of both kinds, must be in there
-    o_projs = [n for n in by_name if n.endswith("o_proj.weight") and "attention" in n]
-    assert o_projs and set(o_projs) <= tagged
+    # every KDA output projection must be in there; MLA must not, by default
+    kda_o = [n for n in by_name if n.endswith(".kda.o_proj.weight")]
+    assert kda_o and set(kda_o) <= tagged
+    assert not any(".mla." in n for n in tagged), (
+        "MLA is excluded by default: its [192, 1536] slices cost 17x where KDA's "
+        "[128, 7168] cost 1.75x (results/per_head_muon_cost.md)"
+    )
 
     # the latent projections have no head axis and must not be
     for suffix in ("f_a_proj.weight", "q_a_proj.weight", "kv_a_proj_with_mqa.weight"):
@@ -114,6 +118,15 @@ def test_head_split_covers_the_projections_that_have_heads(single_rank_world, ti
     # and it *is* per-head.
     assert not any(n.endswith(".kda.b_proj.weight") for n in tagged)
     assert any(n.endswith(".kda.f_b_proj.weight") for n in tagged)
+
+
+def test_mla_can_still_be_opted_back_in(single_rank_world, tiny_config):
+    """The exclusion is a speed knob, not a deletion -- the split itself is exact."""
+    from kimi_k3.model.build import build_k3_model
+
+    model = build_k3_model("tiny")
+    both = set(tag_k3_heads(model, tiny_config, kinds=("kda", "mla")))
+    assert any(".mla." in n for n in both)
 
 
 def test_head_split_rejects_a_shape_that_does_not_divide(tiny_config):

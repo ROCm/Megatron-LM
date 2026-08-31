@@ -62,6 +62,15 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     k3_mla_fp32_attn_output: bool = True
     """[report] attention output is kept in fp32 during training."""
 
+    k3_per_head_muon: bool = False
+    """Split KDA attention matrices by head before Newton-Schulz (P9/G35).
+
+    Off by default. The split is exact (G35: bitwise-equal to N independent
+    core-Muon steps) and argued on optimisation grounds, but it costs **1.75x**
+    on the Muon step, which is 21.1 % of device time
+    (`results/per_head_muon_cost.md`). MLA is excluded -- its slices are narrow
+    enough to cost 17x. Turn on only with a twin run behind it."""
+
     k3_max_logit_chunk: int = 1024
     """Query-block size when recomputing the max attention logit for QK-clip.
     Purely a memory knob -- the statistic is identical at any value (P9/G36)."""
