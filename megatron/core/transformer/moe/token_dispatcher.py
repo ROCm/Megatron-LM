@@ -1630,18 +1630,6 @@ class _MoriManager(_DispatchManager):
         # TE kernel to size its output, and the non-fused argsort-based permute
         # to slice the sorted indices (see moe_utils.permute). Compute it once.
         num_out_tokens = int(self._synced_tokens_per_expert().sum())
-        if self.permute_fusion:
-            # Clamp to >= 1 so the fused permute never emits a [0, H] tensor.
-            # On a cold rank (zero tokens received under skewed routing)
-            # num_out_tokens is 0; the empty permute output makes TE's fused
-            # unpermute short-circuit (`if not inp.numel(): return inp`) and
-            # return that [0, H] tensor instead of scattering into
-            # restore_shape=[max_recv, H]. That collapsed shape then flows into
-            # op.combine (x=[0, H], ctx.total_recv=0), corrupting the combine
-            # forward and zeroing the combine backward grad. The dummy row's
-            # routing_map has no 1s, so unpermute never reads it and the
-            # restored output stays all-zero on the cold rank.
-            num_out_tokens = max(num_out_tokens, 1)
         (
             hidden_states,
             permuted_probs,

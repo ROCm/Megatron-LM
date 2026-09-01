@@ -402,6 +402,14 @@ def permute(
             The permuted tokens, (optional) permuted probs, sorted indices,
             (optional) pad_offsets, (optional) padded_tokens_per_expert.
     """
+    # Cold EP rank: TE's fused permute backward short-circuits on a [0, H] grad
+    # and won't restore the [R, H] dispatch-buffer gradient. Fall back to the
+    # native index_select path, whose autograd emits zeros([R, H]) for an empty
+    # selection. Forward is a no-op (0 rows), so there is no perf cost. This is
+    # symmetric with the cold-rank guard in ``unpermute``.
+    if fused and num_out_tokens == 0:
+        fused = False
+
     if fused and probs is None:
         if not HAVE_TE or fused_permute is None:
             raise ValueError("fused_permute is not available. Please install TE >= 2.1.0.")
@@ -516,6 +524,15 @@ def unpermute(
     Returns:
         torch.Tensor: The tokens restored to their original order.
     """
+    # Cold EP rank: TE's fused unpermute short-circuits on an empty input and
+    # returns [0, H] instead of zeros(restore_shape). Fall back to the native
+    # scatter path, which fills zeros(restore_shape) and whose autograd keeps the
+    # (empty) input on the graph -- its backward is grad.gather(empty) = [0, H] --
+    # so combine backward stays symmetric across ranks. This is complementary to
+    # the cold-rank guard in ``permute``.
+    if fused and permuted_tokens.numel() == 0:
+        fused = False
+
     if fused:
         if not HAVE_TE or fused_unpermute is None:
             raise ValueError("fused_unpermute is not available. Please install TE >= 2.1.0.")
