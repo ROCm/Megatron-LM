@@ -250,14 +250,14 @@ class TestMegatronFsdpFullyShard:
         """
         from torch.distributed.tensor import DTensor
 
-        from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import fully_shard
+        from megatron.core.distributed.fsdp.src.megatron_fsdp import (
+            MixedPrecisionPolicy,
+            fully_shard,
+        )
 
         # Skip tests.
         if outer_shard_strategy == OPTIM and shard_strategy != OPTIM_GRADS_PARAMS:
-            # FIXME(@shjwudp, @cspades): This is an unexpected lack of support.
-            # [default0]:FAILED tests/unit_tests/distributed/test_mfsdp_fully_shard.py
-            # [False-True-True-True-mesh_dim_config0-optim-optim-cnn]
-            # [False-True-True-True-mesh_dim_config0-optim-optim_grads-cnn]
+            # TODO(@shjwudp, @cspades): Requires various modifications to support.
             pytest.skip(
                 f"dp_outer sharding strategy {outer_shard_strategy} requires "
                 "zero_dp_strategy to be full-sharded ('optim_grads_params', 3)."
@@ -288,15 +288,16 @@ class TestMegatronFsdpFullyShard:
             module=toy_model,
             optimizer=toy_adam,
             device_mesh=device_mesh,
-            dp_shard_dim=DP_SHARD_CP,
+            dp_shard_dim=DP_SHARD_CP if mesh_dim_config[2] > 1 else DP_SHARD,
             dp_outer_dim=DP_OUTER,
             tp_dim=TP,
             hybrid_fsdp_group=device_mesh[HSDP].get_group(),
             fsdp_unit_modules=fsdp_unit_modules,
             zero_dp_strategy=shard_strategy,
             outer_dp_sharding_strategy=outer_shard_strategy,
-            preserve_fp32_weights=True,
-            grad_reduce_in_fp32=True,
+            mixed_precision_policy=MixedPrecisionPolicy(
+                main_params_dtype=torch.float32, main_grads_dtype=torch.float32
+            ),
             init_model_with_meta_device=False,
             sync_model_each_microbatch=True,
         )
@@ -333,11 +334,18 @@ class TestMegatronFsdpFullyShard:
             pre_output = model(toy_input, toy_input)
         pre_save_loss = mse_loss(pre_output, toy_target).item()
 
-        # Save deep copy of the model state dictionary before checkpointing.
-        s1 = deepcopy(model.state_dict())
-
-        # Save deep copy of the optimizer state dictionary before checkpointing.
-        o1 = deepcopy(optimizer.state_dict())
+        # Save deep copy of the model and optimizer state before checkpointing.
+        # NOTE(@cspades): deepcopy has issues with DTensors. Just clone().
+        s1 = {}
+        for key, val in model.state_dict().items():
+            s1[key] = val.clone()
+        optim_state_dict = optimizer.state_dict()
+        o1 = {"state": {}}
+        for idx, state in optim_state_dict["state"].items():
+            o1_state = o1["state"].setdefault(idx, {})
+            for key, val in state.items():
+                o1_state[key] = val.clone()
+        o1["param_groups"] = deepcopy(optim_state_dict["param_groups"])
 
         """
         MODEL CHECKPOINT SAVE
@@ -368,15 +376,16 @@ class TestMegatronFsdpFullyShard:
             module=toy_model,
             optimizer=toy_adam,
             device_mesh=device_mesh,
-            dp_shard_dim=DP_SHARD_CP,
+            dp_shard_dim=DP_SHARD_CP if mesh_dim_config[2] > 1 else DP_SHARD,
             dp_outer_dim=DP_OUTER,
             tp_dim=TP,
             hybrid_fsdp_group=device_mesh[HSDP].get_group(),
             fsdp_unit_modules=fsdp_unit_modules,
             zero_dp_strategy=shard_strategy,
             outer_dp_sharding_strategy=outer_shard_strategy,
-            preserve_fp32_weights=True,
-            grad_reduce_in_fp32=True,
+            mixed_precision_policy=MixedPrecisionPolicy(
+                main_params_dtype=torch.float32, main_grads_dtype=torch.float32
+            ),
             init_model_with_meta_device=False,
             sync_model_each_microbatch=True,
         )
@@ -386,13 +395,13 @@ class TestMegatronFsdpFullyShard:
         torch.distributed.checkpoint.load(state_dict=ckpt_state_dict, checkpoint_id=str(CKPT_DIR))
         model.load_state_dict(ckpt_state_dict["model"], strict=False)
         optimizer.load_state_dict(ckpt_state_dict["optimizer"])
-        s2 = deepcopy(model.state_dict())
-        o2 = deepcopy(optimizer.state_dict())
 
         """
         MODEL CHECKPOINT STATE DICT VALIDATION
         """
         # Compare pre-save and post-load model state dictionaries.
+        s2 = model.state_dict()
+        nonempty_model_state = False
         for key in s1.keys() | s2.keys():
             v1 = s1.get(key, None)
             if isinstance(v1, DTensor):
@@ -407,14 +416,17 @@ class TestMegatronFsdpFullyShard:
                 v1.shape == v2.shape
             ), f"[Checkpoint Param {key} Shape Mismatch] {v1.shape} != {v2.shape}"
             assert torch.allclose(v1, v2), f"[Checkpoint Param {key} Value Mismatch] {v1} != {v2}"
+            nonempty_model_state = True
 
         # Compare pre-save and post-load optimizer state dictionaries.
+        o2 = optimizer.state_dict()
+        nonempty_optim_state = False
         for param_id in o1["state"].keys() | o2["state"].keys():
             param_state_1 = o1["state"].get(param_id, None)
             param_state_2 = o2["state"].get(param_id, None)
             assert (
                 param_state_1 is not None and param_state_2 is not None
-            ), f"[{param_id} Not Found] Original Param State: {param_state_1} | Checkpoint Param State: {param_state_2}"
+            ), f"[{param_id} Not Found] Original Optim State: {param_state_1} | Checkpoint Optim State: {param_state_2}"
             for key in param_state_1.keys() | param_state_2.keys():
                 v1 = param_state_1.get(key, None)
                 if isinstance(v1, DTensor):
@@ -424,23 +436,31 @@ class TestMegatronFsdpFullyShard:
                     v2 = v2.to_local()
                 assert (
                     v1 is not None and v2 is not None
-                ), f"[{param_id} {key} Not Found] Original Optimizer State: {v1} | Checkpoint Optimizer State: {v2}"
+                ), f"[{param_id} {key} Not Found] Original Optim State: {v1} | Checkpoint Optim State: {v2}"
                 assert (
                     v1.shape == v2.shape
-                ), f"[Optimizer State {param_id} {key} Shape Mismatch] {v1.shape} != {v2.shape}"
+                ), f"[Optim State {param_id} {key} Shape Mismatch] {v1.shape} != {v2.shape}"
                 assert torch.allclose(
                     v1, v2
-                ), f"[Optimizer State {param_id} {key} Value Mismatch] {v1} != {v2}"
+                ), f"[Optim State {param_id} {key} Value Mismatch] {v1} != {v2}"
+                nonempty_optim_state = True  # Optimizer state depends on wgrad, verify this!
         assert len(o1["param_groups"]) == len(
             o2["param_groups"]
-        ), f"[Optimizer State Param Groups Length Mismatch] {o1['param_groups']} != {o2['param_groups']}"
+        ), f"[Optim State Param Groups Length Mismatch] {o1['param_groups']} != {o2['param_groups']}"
         for i in range(len(o2["param_groups"])):
             for key in o1["param_groups"][i].keys():
                 v1 = o1["param_groups"][i][key]
                 v2 = o2["param_groups"][i][key]
-                assert (
-                    v1 == v2
-                ), f"[Optimizer State Param Group {i} {key} Value Mismatch] {v1} != {v2}"
+                assert v1 == v2, f"[Optim State Param Group {i} {key} Value Mismatch] {v1} != {v2}"
+
+        # Validate that at least 1 rank has a non-empty model and optimizer state.
+        # It is very possible that some ranks have completely empty state!
+        global_nonempty_model_state = [False] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(global_nonempty_model_state, nonempty_model_state)
+        assert any(global_nonempty_model_state), "All ranks had an empty model state!"
+        global_nonempty_optim_state = [False] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(global_nonempty_optim_state, nonempty_optim_state)
+        assert any(global_nonempty_optim_state), "All ranks had an empty optimizer state!"
 
         """
         MODEL CHECKPOINT FORWARD PASS VALIDATION

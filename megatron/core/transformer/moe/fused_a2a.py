@@ -552,13 +552,12 @@ def init_mori_shmem(group: torch.distributed.ProcessGroup):
     """Initialize MORI shared memory using the given process group.
 
     Registers ``group`` under :data:`MORI_EP_PROCESS_GROUP_NAME` and runs
-    ``shmem_torch_process_group_init`` once per process (until
-    :func:`finalize_mori_shmem`). MORI consumes the named PG only during
+    ``shmem_torch_process_group_init`` once per process. MORI consumes the named PG only during
     bootstrap (to broadcast the shmem UID); after that the registration is
-    unused, so later calls with a rebuilt EP group are no-ops until finalize.
+    unused, so later calls with a rebuilt but equivalent EP group are no-ops.
 
-    After :func:`finalize_mori_shmem`, the next call re-registers the group and
-    re-initializes shmem (used between pytest parametrized cases).
+    Current MORI releases do not support finalizing and reinitializing shmem in
+    the same process. Call :func:`finalize_mori_shmem` only during process teardown.
     """
     global _mori_shmem_initialized
     if _mori_shmem_initialized:
@@ -593,8 +592,8 @@ def reset_mori_op():
 
     Drains the comm stream and synchronizes the device, then calls
     :meth:`~mori.ops.EpDispatchCombineOp.reset` when present and drops the
-    reference and comm stream cache. Use between pytest parametrized cases or
-    when EP layout changes so the next :func:`get_mori_op` builds a fresh op.
+    reference and comm stream cache. Use between pytest parametrized cases with
+    the same node-spanning EP layout so the next :func:`get_mori_op` builds a fresh op.
     Does not finalize symmetric memory or clear shmem staging buffers; call
     :func:`finalize_mori_shmem` at session teardown.
 
@@ -609,13 +608,12 @@ def reset_mori_op():
 
 
 def finalize_mori_shmem():
-    """Finalize MORI symmetric memory so the next test can re-bootstrap cleanly.
+    """Finalize MORI symmetric memory during process teardown.
 
     Inverse of :func:`init_mori_shmem`. Resets the cached op first, then calls
     ``mori.shmem.shmem_finalize()`` and unregisters
-    :data:`MORI_EP_PROCESS_GROUP_NAME` so :func:`init_mori_shmem` can register
-    a fresh EP process group on the next parametrized case. Safe when shmem was
-    never initialized.
+    :data:`MORI_EP_PROCESS_GROUP_NAME`. Safe when shmem was never initialized.
+    Reinitialization after this call is unsupported by current MORI releases.
     """
     reset_mori_op()
     global _mori_shmem_initialized

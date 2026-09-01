@@ -2,14 +2,15 @@
 
 import copy
 import dataclasses
+import os
 
 import pytest
 import torch
 
 from megatron.core import config, parallel_state
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_submodules
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
+from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 from megatron.core.transformer.moe.moe_utils import get_capacity
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -120,15 +121,11 @@ class MoEModelTestContainer:
         self.moe_layer = self.new_moe_layer()
 
     def new_moe_layer(self, **kargs):
-        transformer_layer_spec = get_gpt_layer_local_spec(
+        submodules = get_gpt_layer_local_submodules(
             num_experts=self.config.num_moe_experts, moe_grouped_gemm=self.config.moe_grouped_gemm
         )
         new_config = dataclasses.replace(self.config, **kargs)
-        moe_layer = (
-            MoELayer(new_config, transformer_layer_spec.submodules.mlp.submodules)
-            .cuda()
-            .to(dtype=self.test_dtype)
-        )
+        moe_layer = MoELayer(new_config, submodules.mlp.submodules).cuda().to(dtype=self.test_dtype)
         moe_layer.set_layer_number(0)
         return moe_layer
 
@@ -476,7 +473,6 @@ class TestAllgatherDispatcher:
     def teardown_method(self, method):
         Utils.destroy_model_parallel()
 
-    @pytest.mark.flaky_in_dev
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.internal
     @pytest.mark.parametrize("tp_size,ep_size", [(8, 1), (1, 8), (2, 4), (1, 1)])
@@ -495,7 +491,6 @@ class TestAllgatherDispatcher:
 
         container.dispatcher_dropless_test()
 
-    @pytest.mark.flaky_in_dev
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.internal
     @pytest.mark.parametrize("permute_fusion", permute_fusion_params)
@@ -537,6 +532,16 @@ def is_mori_available():
 
     return HAVE_MORI
 
+
+def require_node_spanning_mori_ep(ep_size):
+    gpus_per_node = int(os.environ.get("LOCAL_WORLD_SIZE", torch.cuda.device_count()))
+    if ep_size != gpus_per_node:
+        pytest.skip(
+            f"MORI requires a node-spanning EP group; got ep_size={ep_size}, "
+            f"gpus_per_node={gpus_per_node}"
+        )
+
+
 @pytest.mark.skipif(
     not is_deep_ep_available() and not is_hybrid_ep_available() and not is_mori_available(),
     reason="Deep EP, Hybrid EP, and MORI are not available",
@@ -546,10 +551,7 @@ class TestFlexDispatcher:
         pass
 
     def teardown_method(self, method):
-        # Full MORI teardown so the next parametrized case (different tp/ep →
-        # num_local_experts, router_topk) cannot inherit shmem staging or a
-        # stale EpDispatchCombineOp handle from the previous test.
-        finalize_mori_shmem()
+        reset_mori_op()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -564,6 +566,8 @@ class TestFlexDispatcher:
             pytest.skip("Hybrid EP is not available")
         if moe_flex_dispatcher_backend == "mori" and not is_mori_available():
             pytest.skip("MORI is not available")
+        if moe_flex_dispatcher_backend == "mori":
+            require_node_spanning_mori_ep(ep_size)
         if permute_fusion:
             config.ENABLE_EXPERIMENTAL = True
         mori_kwargs = {}
@@ -602,6 +606,8 @@ class TestFlexDispatcher:
             pytest.skip("Hybrid EP is not available")
         if moe_flex_dispatcher_backend == "mori" and not is_mori_available():
             pytest.skip("MORI is not available")
+        if moe_flex_dispatcher_backend == "mori":
+            require_node_spanning_mori_ep(ep_size)
         if permute_fusion:
             config.ENABLE_EXPERIMENTAL = True
         mori_kwargs = {}
@@ -645,6 +651,8 @@ class TestFlexDispatcher:
             pytest.skip("Hybrid EP is not available")
         if moe_flex_dispatcher_backend == "mori" and not is_mori_available():
             pytest.skip("MORI is not available")
+        if moe_flex_dispatcher_backend == "mori":
+            require_node_spanning_mori_ep(ep_size)
         if permute_fusion:
             config.ENABLE_EXPERIMENTAL = True
         mori_kwargs = {}
@@ -677,7 +685,7 @@ class TestMoriSharedOp:
         pass
 
     def teardown_method(self, method):
-        finalize_mori_shmem()
+        reset_mori_op()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -687,6 +695,7 @@ class TestMoriSharedOp:
     def test_multi_layer_multi_iter_forward_backward(
         self, tp_size, ep_size, num_layers, num_iters
     ):
+        require_node_spanning_mori_ep(ep_size)
         container = MoEModelTestContainer(
             tp_size=tp_size,
             ep_size=ep_size,

@@ -13,6 +13,7 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_mtp_block_spec,
 )
 from megatron.core.models.gpt.gpt_model import GPTModel
+from megatron.core.pipeline_parallel.utils import get_comm_stream, get_comp_stream, set_streams
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     DummyState,
@@ -73,9 +74,8 @@ def run_transformer_layer_a2a_overlap_with_capture(model, input_tensors, microba
     for i in range(len(input_tensors)):
         input_tensors[i] = input_tensors[i].clone()
 
+    set_streams()
     event = torch.cuda.Event()
-    comp_stream = torch.cuda.current_stream()
-    comm_stream = torch.cuda.Stream(device="cuda")
     state = DummyState()
     state.is_mtp = False
     state.model = model
@@ -84,8 +84,8 @@ def run_transformer_layer_a2a_overlap_with_capture(model, input_tensors, microba
             transformer_layer,
             event,
             state,
-            comp_stream,
-            comm_stream,
+            get_comp_stream,
+            get_comm_stream,
             extra_args={"is_moe": True, "enable_deepep": False},
         )
         for _ in range(microbatches)
@@ -188,8 +188,7 @@ def run_mtp_layer_a2a_overlap_with_capture(
     for i in range(len(hidden_states)):
         hidden_states[i] = hidden_states[i].clone()
 
-    comp_stream = torch.cuda.current_stream()
-    comm_stream = torch.cuda.Stream(device="cuda")
+    set_streams()
     layers = []
     for _ in range(microbatches):
         state = DummyState()
@@ -208,8 +207,8 @@ def run_mtp_layer_a2a_overlap_with_capture(
                 model.mtp.layers[0],
                 event,
                 state,
-                comp_stream,
-                comm_stream,
+                get_comp_stream,
+                get_comm_stream,
                 extra_args={
                     "is_moe": True,
                     "enable_deepep": False,
@@ -260,14 +259,18 @@ class TestA2AOverlap:
         )
 
     def teardown_method(self, method):
-        # Full MORI teardown so the next parametrized case (different tp/ep layout)
-        # cannot inherit shmem staging or a stale EpDispatchCombineOp handle. These
-        # are safe no-ops when MORI is not installed.
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+        # MORI symmetric memory cannot be finalized and reinitialized safely in the
+        # same process. Drop the per-case op, but keep shmem alive until the class ends.
+        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 
         reset_mori_op()
-        finalize_mori_shmem()
         Utils.destroy_model_parallel()
+
+    @classmethod
+    def teardown_class(cls):
+        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
+
+        finalize_mori_shmem()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     def test_transformer_layer_overlap_dense(self):
