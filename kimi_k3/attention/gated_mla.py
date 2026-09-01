@@ -80,6 +80,13 @@ class K3GatedMLA(torch.nn.Module):
         self.max_logit_chunk = getattr(config, "k3_max_logit_chunk", 1024)
         self.backend = getattr(config, "k3_mla_backend", TE)
         self._te_dpa = None
+        #: TE's tuned RMSNorm for the two LoRA norms. Measured at seq 8192:
+        #: q_a [S,1536] 0.0919 -> 0.0310 ms (2.96x), kv_a [S,512] 0.0462 -> 0.0298
+        #: ms (1.55x), agreeing with ours to ~1e-05. The parameters stay ours --
+        #: only the kernel changes -- so the converter and every parity test that
+        #: names `q_a_layernorm` / `kv_a_layernorm` are untouched.
+        self.te_lora_norm = getattr(config, "k3_mla_te_lora_norm", True)
+        self._te_norms = {}
 
     def weights(self) -> dict:
         w = {
@@ -167,6 +174,26 @@ class K3GatedMLA(torch.nn.Module):
 
     # --- attention ----------------------------------------------------------
 
+    def _rms_norm(self, x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+        """RMSNorm over the LoRA latent, through TE's tuned kernel when enabled.
+
+        TE's `RMSNorm` owns its own `weight`, but K3's belongs to this module and
+        is loaded from the checkpoint, so the module is built once per width and
+        its weight is pointed at ours. Copying instead would make the norm gain
+        silently stop training.
+        """
+        if not self.te_lora_norm or not x.is_cuda:
+            return rms_norm(x, weight, eps)
+        key = (weight.shape[-1], eps, x.dtype)
+        module = self._te_norms.get(key)
+        if module is None:
+            import transformer_engine.pytorch as te
+
+            module = te.RMSNorm(weight.shape[-1], eps=eps).to(x.device, x.dtype)
+            self._te_norms[key] = module
+        module.weight = weight
+        return module(x)
+
     def _sdpa(self, query, key, value):
         """The release's own 192/128 workaround. Kept as the fallback, not the default.
 
@@ -203,6 +230,12 @@ class K3GatedMLA(torch.nn.Module):
 
         Takes and returns `[B, H, S, D]` to match `_sdpa`, converting to TE's
         `sbhd` in between.
+
+        Needs **TE >= 2.18.0.dev0+8f377e4**. On the previously pinned
+        `2.12.0.dev0+40434cf6` the CK fused-attention backward returned NaN on the
+        *query* path at `hd192_hd128` (AOTRITON was clean); HEAD fixes it and all
+        three paths agree. A test asserts the fixed behaviour so a rollback is
+        caught.
         """
         if self._te_dpa is None:
             import transformer_engine.pytorch as te
@@ -237,14 +270,14 @@ class K3GatedMLA(torch.nn.Module):
             )
 
         b, s, _ = hidden_states.shape
-        q = rms_norm(self.q_a_proj(hidden_states), self.q_a_layernorm, self.lora_norm_eps)
+        q = self._rms_norm(self.q_a_proj(hidden_states), self.q_a_layernorm, self.lora_norm_eps)
         q = self.q_b_proj(q).view(b, s, self.num_heads, self.q_head_dim).transpose(1, 2)
 
         compressed = self.kv_a_proj_with_mqa(hidden_states)
         k_pass, k_rot = torch.split(
             compressed, [self.kv_lora_rank, self.qk_pos_emb_head_dim], dim=-1
         )
-        k_pass = rms_norm(k_pass, self.kv_a_layernorm, self.lora_norm_eps)
+        k_pass = self._rms_norm(k_pass, self.kv_a_layernorm, self.lora_norm_eps)
         k_pass = self.kv_b_proj(k_pass).view(
             b, s, self.num_heads, self.qk_head_dim + self.v_head_dim
         ).transpose(1, 2)

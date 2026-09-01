@@ -47,8 +47,12 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
                        help="split KDA attention matrices by head before Newton-Schulz; "
                             "costs ~1.75x on the Muon step")
     group.add_argument("--k3-mla-backend", type=str, default="te", choices=["eager", "sdpa", "te"],
-                       help="te uses TransformerEngine's native asymmetric head dims (2.93x "
-                            "the padded SDPA path); sdpa is the release's own workaround")
+                       help="te uses TE's native asymmetric head dims (2.97x the padded sdpa "
+                            "path, needs TE >= 2.18.0.dev0+8f377e4); sdpa is the fallback")
+    group.add_argument("--k3-mla-te-lora-norm", action=argparse.BooleanOptionalAction, default=True,
+                       help="TE's tuned RMSNorm for the MLA LoRA norms (2.96x / 1.55x)")
+    group.add_argument("--k3-moe-ck-grouped-gemm", action=argparse.BooleanOptionalAction, default=True,
+                       help="CK GroupedGemmKernel for routed experts instead of hipBLASLt (1.44x)")
     group.add_argument("--k3-max-logit-chunk", type=int, default=1024,
                        help="query-block size for the QK-clip max-logit recompute; memory only")
 

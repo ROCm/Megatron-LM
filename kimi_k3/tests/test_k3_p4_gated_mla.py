@@ -186,14 +186,47 @@ def test_the_te_backend_matches_the_release_workaround(single_rank_world):
     assert (te.float() - eager.float()).norm() / scale < 5e-2, "te drifts from the fp32 oracle"
 
 
-def test_te_is_the_default_and_sdpa_stays_reachable(single_rank_world):
-    """The release's workaround is kept selectable, not deleted."""
+def test_te_is_the_default_and_the_others_stay_reachable(single_rank_world):
+    """`te` became the default once TE HEAD fixed the CK backward. See below."""
     from kimi_k3.attention.gated_mla import BACKENDS, TE, K3GatedMLA
     from kimi_k3.config.k3_config_builder import config_from_preset
     from kimi_k3.config.presets import preset
 
     assert set(BACKENDS) == {"eager", "sdpa", "te"}
-    module = K3GatedMLA(config_from_preset(preset("tiny")["config"]))
-    assert module.backend == TE
-    forced = K3GatedMLA(config_from_preset(preset("tiny")["config"], k3_mla_backend="sdpa"))
-    assert forced.backend == "sdpa"
+    assert K3GatedMLA(config_from_preset(preset("tiny")["config"])).backend == TE
+    for name in ("sdpa", "eager"):
+        forced = K3GatedMLA(config_from_preset(preset("tiny")["config"], k3_mla_backend=name))
+        assert forced.backend == name
+
+
+def test_the_te_backward_is_finite_on_every_fused_attention_backend(single_rank_world):
+    """The defect that kept `te` off by default, now fixed -- and pinned so.
+
+    On TE `2.12.0.dev0+40434cf6` the **CK** fused-attention backward returned NaN
+    for `q_a_layernorm` and `q_b_proj` at `hd192_hd128` while `kv_a_layernorm`
+    stayed finite; AOTRITON was clean. Deterministic, 6/6. On
+    `2.18.0.dev0+8f377e4` all three paths agree at 7.9297e-01.
+
+    This asserts the *fixed* behaviour, so it fails if the environment is rolled
+    back to a build carrying the defect -- the direction that now needs catching.
+    """
+    import torch
+
+    from kimi_k3.attention.gated_mla import K3GatedMLA
+    from kimi_k3.config.k3_config_builder import config_from_preset
+    from kimi_k3.config.presets import preset
+
+    for backend in ("te", "sdpa"):
+        torch.manual_seed(0)
+        m = K3GatedMLA(config_from_preset(preset("93L")["config"])).cuda().bfloat16()
+        m.zero_grad()
+        out = m(torch.randn(1, 128, 7168, device="cuda", dtype=torch.bfloat16) * 0.02,
+                backend=backend)
+        torch.manual_seed(2)
+        out.backward(torch.randn_like(out))
+        for name in ("q_a_layernorm", "kv_a_layernorm"):
+            grad = getattr(m, name).grad
+            assert torch.isfinite(grad).all(), (
+                f"{backend}/{name} gradient is not finite -- if TE was rolled back below "
+                "2.18.0.dev0+8f377e4 this is the CK hd192_hd128 backward defect returning"
+            )

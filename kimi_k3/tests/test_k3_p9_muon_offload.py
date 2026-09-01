@@ -80,17 +80,27 @@ def test_only_a_rounding_error_of_k3_could_offload_at_all():
 
 
 def test_transformer_engine_here_has_no_newton_schulz(single_rank_world):
-    """A20(b): our pinned build predates the kernel, whatever the fork has at HEAD."""
+    """A20: Newton-Schulz is excluded from ROCm builds -- confirmed by building HEAD.
+
+    This was originally justified from CMake (`cuda_only_cpp_sources`), the
+    `_IS_HIP_EXTENSION` import guard, and cuSOLVERMp having no ROCm counterpart.
+    Building the ROCm fork at HEAD (`2.18.0.dev0+8f377e4`, up from the previously
+    pinned `2.12.0.dev0+40434cf6`) settles it empirically: the symbols are still
+    absent, so the exclusion is real and not an artefact of an old pin.
+
+    Deliberately not pinned to a version string -- the claim is about ROCm builds,
+    not about one build.
+    """
     import transformer_engine
     import transformer_engine.pytorch as te
     import transformer_engine_torch as tex
 
-    assert transformer_engine.__version__.startswith("2.12.0.dev0+40434cf6")
     assert not hasattr(te, "newton_schulz")
+    assert not hasattr(te, "CusolverMpCtx")
     assert not hasattr(tex, "newton_schulz")
     assert not hasattr(tex, "cusolvermp_ctx_create"), (
-        "TE gained the cuSOLVERMp entry point; re-check whether ROCm builds it "
-        "(develop/notes/2026-08-30-te-bump.md) before retiring A20"
+        f"TE {transformer_engine.__version__} gained the cuSOLVERMp entry point on "
+        "ROCm; re-check develop/notes/2026-08-30-te-bump.md before retiring A20"
     )
 
 

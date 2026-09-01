@@ -77,7 +77,32 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     `scaled_dot_product_attention` must pad V to 192 to reach a fused kernel at
     all. Measured at seq 8192 / 96 heads: **2.207 ms at 70.9 % of peak** against
     the padded SDPA path's **6.459 ms at 29.1 %** -- 2.93x. `eager` stays the fp32
-    oracle; `sdpa` is the release's own workaround, kept as the fallback."""
+    oracle.
+
+`te` is the default since **TE 2.18.0.dev0+8f377e4**.
+
+    It was briefly held back: on the previously pinned `2.12.0.dev0+40434cf6` the
+    **CK** fused-attention backward returned NaN for `q_a_layernorm` and
+    `q_b_proj` at `hd192_hd128` (AOTRITON was clean, deterministic 6/6). Building
+    the ROCm fork at HEAD fixed it -- all three fused-attention paths now agree at
+    7.9297e-01 -- so no `NVTE_FUSED_ATTN_*` pin is needed."""
+
+    k3_mla_te_lora_norm: bool = True
+    """Use TE's tuned RMSNorm kernel for `q_a_layernorm` / `kv_a_layernorm`.
+    Measured at seq 8192: **2.96x** on `[S, 1536]` and **1.55x** on `[S, 512]`,
+    agreeing with our own to ~1e-05. Only the kernel changes -- the parameters
+    remain this module's, so the converter is unaffected."""
+
+    k3_moe_ck_grouped_gemm: bool = True
+    """Route TE's grouped GEMM to CK's `GroupedGemmKernel` rather than
+    hipBLASLt/Tensile. On K3's real expert shape (112 local experts x ~146 tokens,
+    3584 -> 6144) that is **1.531 ms against 2.205 ms, 470.4 vs 326.5 TFLOP/s --
+    1.44x**. CK picks a `<256, 256, 64>` tile where Tensile picks `MT64x80x256`,
+    which is what wins on a stack of skinny per-expert matmuls.
+
+    The switch is `NVTE_USE_CUTLASS_GROUPED_GEMM`, named for CUTLASS; the ROCm
+    fork routes it to CK. It must be set **before** TE reads it, which is why
+    `set_moe_gemm_backend()` exists rather than a config field alone."""
 
     k3_max_logit_chunk: int = 1024
     """Query-block size when recomputing the max attention logit for QK-clip.

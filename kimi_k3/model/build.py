@@ -44,6 +44,14 @@ def build_k3_model(
         )
     spec = get_preset(preset_name)
     config = config_from_preset(spec["config"], **config_overrides)
+
+    # Must precede expert construction: TE reads NVTE_USE_CUTLASS_GROUPED_GEMM
+    # when it dispatches, so setting it from the config afterwards would be too
+    # late. See k3_moe_layer.set_moe_gemm_backend for the measurement.
+    if config.num_moe_experts:
+        from ..moe.k3_moe_layer import set_moe_gemm_backend
+
+        set_moe_gemm_backend(getattr(config, "k3_moe_ck_grouped_gemm", True))
     block_spec = get_k3_block_spec(config, vp_stage=vp_stage)
 
     if pre_process is None or post_process is None:

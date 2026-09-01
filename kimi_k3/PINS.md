@@ -7,14 +7,14 @@
 > Status: **G1 GREEN** — all five pins resolved, licenses recorded, and the
 > released `chunk_kda` call verified functionally (forward *and* backward) after
 > the triton 3.6.0 → 3.7.1 upgrade. See §2.
-> Last updated: 2026-08-27.
+> Last updated: 2026-09-01.
 
 ## 1. Pins
 
 | Repo | Pin | How it was resolved | Verified here |
 |---|---|---|---|
 | **ROCm/Megatron-LM** | `a1b00d4259e92dc4a07a0be2c24088fe827f4b6e` (`rocm_dev`) | local checkout; the branch `dev/wen/kimi-k3` is cut from it | yes — all pin contracts assert against it (`kimi_k3/model/core_patch.py`) |
-| **ROCm/TransformerEngine** | `2.12.0.dev0+40434cf6` (installed wheel) | version string carries the source SHA `40434cf6` | yes — `MXFP4BlockScaling`, `MXFP8BlockScaling`, `MXFP4Quantizer` located |
+| **ROCm/TransformerEngine** | `2.18.0.dev0+8f377e4` — **moved 2026-09-01**, was `2.12.0.dev0+40434cf6` | built from source at fork HEAD (`8f377e4`, 2026-08-29); version string carries the SHA | yes — see §6 for what the move fixed and which results predate it |
 | **AITER** | `e9e1278b1` (origin/main, 2026-08-27) | git; the workspace checkout was 5 months stale | **yes** — `kimik3_a8w4_tuned_fmoe.csv`, `ops/opus/moe_stage{1,2}_a8w4.py` and `ActivationType.Situv2` all present |
 | **fla** (flash-linear-attention) | git `5e02dd3` (0.6.0) | git clone; the PyPI wheel ships no `fla/ops` | **forward and backward both verified** on triton 3.7.1 by `tests/test_k3_p0_fla_contract.py` |
 | **HF moonshotai/Kimi-K3** | `a590ce090cb049c93a33dfe8c208ec652aa20503` (lastModified 2026-08-20) | HF model API | yes — config, modeling sources and shard headers read at this revision |
@@ -85,6 +85,68 @@ and built the numerics contract the kernels must match
 |---|---|
 | torch | 2.10.0+git94c6e04 |
 | triton | **3.7.1** (upstream PyPI; 3.6.0 could not compile fla's KDA backward). `torch.compile` re-verified on it — including inductor's Triton MM templates under `max-autotune` and Megatron's `jit_fuser` fusion path, which is `torch.compile` by default. Guarded by `tests/test_k3_p0_torch_compile_contract.py` |
-| transformer_engine | 2.12.0.dev0+40434cf6 |
+| transformer_engine | **2.18.0.dev0+8f377e4** (built from source; see §6) |
 | GPUs | 8 × AMD Instinct MI355X (gfx950) |
 | fla | 0.6.0 (git `5e02dd3`), installed from source |
+
+
+## 6. TransformerEngine pin moved, 2026-09-01
+
+`2.12.0.dev0+40434cf6` → `2.18.0.dev0+8f377e4` (ROCm fork HEAD), **built from
+source**. PyPI's `transformer_engine` is a metapackage over
+`transformer_engine_cu12`/`cu13` and is CUDA-only — there is no ROCm wheel, and
+installing it would shadow the working build.
+
+    NVTE_FRAMEWORK=pytorch PYTORCH_ROCM_ARCH=gfx950 \
+        pip install --no-build-isolation --no-deps .
+
+Two build notes. `git clone --depth 1 --recursive` leaves **`3rdparty/ck_jit`
+empty**, and the only symptom is `[AITER-BUILD] CK-JIT build failed` — pip hides
+the underlying `ck_jit_build.py: No such file or directory`, so run CMake by hand
+to see it. And the default builds `gfx942;gfx950`; pinning `PYTORCH_ROCM_ARCH`
+halves the work. The previous install is archived at
+`/tmp/te_backup/te_2.12.0.dev0+40434cf6.tgz`.
+
+### Why it moved
+
+The **CK fused-attention backward returned NaN** at `hd192_hd128` — K3's gated
+MLA shape. On the old pin `q_a_layernorm` and `q_b_proj` came back NaN while
+`kv_a_layernorm` stayed finite, deterministic 6/6, with AOTRITON clean. At HEAD
+all three fused-attention paths agree at 7.9297e-01, so `k3_mla_backend` defaults
+to `te` with no `NVTE_FUSED_ATTN_*` pin. That is worth **2.97x** on the MLA
+attention operator (6.459 → 2.169 ms, 29.1 % → 72.2 % of peak) and 1.67x on the
+whole MLA layer at seq 8192 (11.51 → 6.89 ms).
+
+### What was re-verified on the new build
+
+| check | result |
+|---|---|
+| full test suite | **288 passed, 11 skipped** |
+| anchored MLA parity vs the release | **rel-L2 5.8240e-03, cosine 0.999983** — identical to the old build |
+| CK grouped GEMM vs hipBLASLt | 1.536 ms vs 2.212 ms — **1.44x**, unchanged |
+| MLA attention operator | 2.169 ms / 72.2 % of peak — unchanged |
+| Newton-Schulz on ROCm (**A20**) | still absent: no `newton_schulz`, `CusolverMpCtx` or `cusolvermp_ctx_create`. The finding rested on reading `cuda_only_cpp_sources` and the `_IS_HIP_EXTENSION` guard; a HEAD build now confirms it empirically |
+
+### Results measured on the OLD pin and not re-run
+
+These were measured against `2.12.0.dev0+40434cf6`. Anchored parity coming back
+identical is good evidence none of them shifted, but none has been re-measured,
+and in this project a number belongs to the configuration it was taken on:
+
+* `results/kda_parity.md` — G15, including production geometry. KDA runs through
+  `fla`, not TE, so a TE bump should not touch it.
+* `results/anchored_parity_4l.md` — the four-layer slice. Only the **MLA layer**
+  was re-anchored on the new build (identical); KDA layers 1–2, the AttnRes sites
+  and the routing check were not, and re-running them needs the 49 GiB slice again.
+* `results/scaleout_93l.md`, `profile/profile-baseline-2026-08-27.md` — the memory
+  model, the 28-node floor, and the whole device-time ranking. Attention is a
+  ~155 ms line of which the TE swap removes ~60 ms, so the AttnRes mixer's
+  dominance is unaffected, but the absolute timings predate the bump.
+* `results/opt_mem.md`, `results/pp_resume.md`, `results/qat_twin.md`,
+  `results/twin_runs.md`, `results/router_replay.md`, `results/ep_smoke.md`,
+  `results/a8w4.md`, `results/mxfp4_scale_rule.md` — optimizer, transport, QAT and
+  routing paths, none of which route through TE's attention.
+
+The one that would most repay re-running is the **P11 device-time trace**: MLA
+attention was measured before the swap, so its share of the ranking is now stale
+by roughly 60 ms per forward.

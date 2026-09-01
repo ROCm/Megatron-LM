@@ -17,6 +17,8 @@ only the *routed* experts run at the latent width (finding B6).
 
 from typing import Optional
 
+import os
+
 import torch
 
 from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -50,3 +52,23 @@ class K3MoELayer(MoELayer):
         xf = to_hi(x)
         normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + self.latent_norm_eps)
         return (self.routed_expert_norm.to(xf.dtype) * normed).to(x.dtype)
+
+
+def set_moe_gemm_backend(use_ck: bool = True) -> str:
+    """Select CK's grouped GEMM for the routed experts, before TE reads the flag.
+
+    TE decides its grouped-GEMM backend from `NVTE_USE_CUTLASS_GROUPED_GEMM` at
+    import/dispatch time, so a config field alone is too late -- this has to run
+    before the experts are built. Measured on K3's real expert shape (112 local
+    experts x ~146 tokens, 3584 -> 6144):
+
+        hipBLASLt/Tensile  MT64x80x256          2.205 ms   326.5 TFLOP/s
+        CK GroupedGemmKernel <256, 256, 64>     1.531 ms   470.4 TFLOP/s   1.44x
+
+    The environment variable is named for CUTLASS; on ROCm the fork routes it to
+    `ck_tile::GroupedGemmKernel`, which was confirmed from the kernel names rather
+    than from the flag's name.
+    """
+    value = "1" if use_ck else "0"
+    os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = value
+    return value
