@@ -370,6 +370,14 @@ def permute(
         Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
             The permuted tokens, permuted probs, and sorted indices.
     """
+    # Cold EP rank: TE's fused permute backward short-circuits on a [0, H] grad
+    # and won't restore the [R, H] dispatch-buffer gradient. Fall back to the
+    # native index_select path, whose autograd emits zeros([R, H]) for an empty
+    # selection. Forward is a no-op (0 rows), so there is no perf cost. This is
+    # symmetric with the cold-rank guard in ``unpermute``.
+    if fused and num_out_tokens == 0:
+        fused = False
+
     if fused and probs is None:
         if not HAVE_TE or fused_permute is None:
             raise ValueError("fused_permute is not available. Please install TE >= 2.1.0.")

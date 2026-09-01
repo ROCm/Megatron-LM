@@ -447,9 +447,14 @@ class MoEModelTestContainer:
         assert restored.shape == hidden_states.shape, (
             f"combine restored {tuple(restored.shape)}, expected {tuple(hidden_states.shape)}"
         )
-        # TE fused permute backward short-circuits on a [0, H] grad
-        # (`ctx.probs` is unset when the permute *input* was non-empty). Do not
-        # call backward here until that TE path honors restore_shape.
+        # Cold-rank backward: permute() falls back to the native index_select
+        # path when num_out_tokens == 0, so TE's fused permute is never the one
+        # responsible for the empty-gradient backward. The gradient w.r.t. the
+        # dispatch buffer is zeros([R, H]) -- correct shape and value for a rank
+        # that contributes no tokens.
+        restored.float().sum().backward()
+        assert hidden_states.grad is not None
+        assert hidden_states.grad.shape == hidden_states.shape
 
     def set_params(self):
         # TODO: Set consistent parameters for various parallelisms.
