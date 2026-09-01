@@ -9,7 +9,7 @@ import torch
 from megatron.core import config, parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem, reset_mori_op
+from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
 from megatron.core.transformer.moe.moe_utils import get_capacity
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module
@@ -733,32 +733,19 @@ class TestMoriColdRank:
     @pytest.mark.timeout(600)
     @pytest.mark.parametrize("tp_size,ep_size", [(1, 8)])
     def test_cold_rank_fused_permute_sequential_mlp(self, tp_size, ep_size):
-        config.ENABLE_EXPERIMENTAL = True
-        try:
-            container = MoEModelTestContainer(
-                tp_size=tp_size,
-                ep_size=ep_size,
-                pp_size=1,
-                num_moe_experts=32,
-                moe_router_topk=2,
-                moe_router_load_balancing_type="aux_loss",
-                moe_token_dispatcher_type="flex",
-                moe_flex_dispatcher_backend="mori",
-                moe_permute_fusion=True,
-                moe_grouped_gemm=False,
-                moe_mori_max_tokens_per_rank=4096,
-                hidden_size=1024,
-                test_dtype=torch.bfloat16,
-            )
-            container.dispatcher_cold_rank_test()
-        except Exception:
-            import traceback
-
-            rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else -1
-            tb = traceback.format_exc()
-            with open(f"/tmp/mori_cold_r{rank}.err", "w") as fh:
-                fh.write(tb)
-            print(tb, flush=True)
-            raise
-        finally:
-            config.ENABLE_EXPERIMENTAL = False
+        container = MoEModelTestContainer(
+            tp_size=tp_size,
+            ep_size=ep_size,
+            pp_size=1,
+            num_moe_experts=32,
+            moe_router_topk=2,
+            moe_router_load_balancing_type="aux_loss",
+            moe_token_dispatcher_type="flex",
+            moe_flex_dispatcher_backend="mori",
+            moe_permute_fusion=True,
+            moe_grouped_gemm=False,
+            moe_mori_max_tokens_per_rank=4096,
+            hidden_size=1024,
+            test_dtype=torch.bfloat16,
+        )
+        container.dispatcher_cold_rank_test()
