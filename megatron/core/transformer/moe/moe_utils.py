@@ -465,6 +465,16 @@ def unpermute(
     if fused:
         if not HAVE_TE or fused_unpermute is None:
             raise ValueError("fused_unpermute is not available. Please install TE >= 2.1.0.")
+        # TE fused unpermute short-circuits on an empty input and returns [0, H]
+        # instead of zeros(restore_shape). A cold EP rank still needs the
+        # dispatch-buffer shape so combine is well-defined.
+        if permuted_tokens.numel() == 0:
+            zeros = permuted_tokens.new_zeros(restore_shape)
+            # Keep the dummy output on the autograd graph so combine backward
+            # can run on a cold rank (new_zeros is detached by itself).
+            if permuted_tokens.requires_grad:
+                zeros = zeros + permuted_tokens.sum() * 0
+            return zeros
         return fused_unpermute(
             permuted_tokens, sorted_indices, merging_probs=probs, restore_shape=restore_shape
         )
