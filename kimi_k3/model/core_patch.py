@@ -27,6 +27,76 @@ def k3_block_class(block_cls):
         gm.TransformerBlock = original
 
 
+_ORIGINAL_UPDATE_ROUTER_EXPERT_BIAS = None
+
+
+def install_router_bias_dispatch() -> None:
+    """Let a router own its own expert-bias update.
+
+    `finalize_model_grads._update_router_expert_bias` collects every module with
+    an `expert_bias` attribute and overwrites it with the free function
+    `get_updated_expert_bias` -- core's fixed `sign()` step. It never consults
+    the module. So K3's `QuantileBalancingRouter.update_expert_bias` was dead
+    code the moment training ran through `megatron.training.pretrain`: core
+    recomputed the bias from scratch every step and copied its own value in,
+    silently discarding quantile balancing.
+
+    This rebinds that module-scope symbol (resolved at
+    `finalize_model_grads.py:481`) so routers that implement
+    `update_expert_bias` handle themselves, and every other module still goes
+    through core's original path untouched. Idempotent.
+    """
+    global _ORIGINAL_UPDATE_ROUTER_EXPERT_BIAS
+    # NB: the package rebinds `finalize_model_grads` to the *function* of that
+    # name, so both `from ... import` and `import ... as` hand back the function.
+    # importlib returns the actual module object.
+    import importlib
+
+    fmg = importlib.import_module("megatron.core.distributed.finalize_model_grads")
+    from megatron.core.utils import get_attr_wrapped_model
+
+    if _ORIGINAL_UPDATE_ROUTER_EXPERT_BIAS is not None:
+        return
+    _ORIGINAL_UPDATE_ROUTER_EXPERT_BIAS = fmg._update_router_expert_bias
+
+    def _dispatching_update(model, config):
+        handled, remaining = [], []
+        for model_chunk in model:
+            for module in get_attr_wrapped_model(model_chunk, 'modules')():
+                if not (hasattr(module, "expert_bias") and module.training):
+                    continue
+                (handled if callable(getattr(module, "update_expert_bias", None))
+                 else remaining).append(module)
+        for module in handled:
+            module.update_expert_bias()
+        if remaining:
+            # Core's own path, for any router that does not own its update.
+            _ORIGINAL_UPDATE_ROUTER_EXPERT_BIAS(model, config)
+
+    fmg._update_router_expert_bias = _dispatching_update
+
+
+def _contract_router_bias_dispatch():
+    """Core must still route the bias update through a module-scope symbol."""
+    import importlib
+
+    fmg = importlib.import_module("megatron.core.distributed.finalize_model_grads")
+
+    assert hasattr(fmg, "_update_router_expert_bias"), (
+        "finalize_model_grads no longer defines _update_router_expert_bias; "
+        "the K3 quantile-balancing dispatch would silently do nothing."
+    )
+    source = inspect.getsource(fmg.finalize_model_grads)
+    assert "_update_router_expert_bias(model, config)" in source, (
+        "finalize_model_grads no longer calls _update_router_expert_bias at "
+        "module scope; re-check install_router_bias_dispatch()."
+    )
+    original = _ORIGINAL_UPDATE_ROUTER_EXPERT_BIAS or fmg._update_router_expert_bias
+    assert "expert_bias" in inspect.getsource(original), (
+        "core's expert-bias update no longer reads module.expert_bias."
+    )
+
+
 def _contract_gpt_model_block():
     """GPTModel must still resolve TransformerBlock at module scope and build it."""
     import megatron.core.models.gpt.gpt_model as gm
@@ -156,6 +226,7 @@ PIN_CONTRACTS = (
     ("muon -> LayerWiseDistributedOptimizer + dist-opt rejection", _contract_muon),
     ("core_transformer_config_from_args substitution", _contract_config_substitution),
     ("MLA passes k_channels to core_attention", _contract_mla_core_attention_kwargs),
+    ("router expert-bias update dispatches to the module", _contract_router_bias_dispatch),
 )
 
 

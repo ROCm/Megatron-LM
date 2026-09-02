@@ -62,10 +62,38 @@ class ScoreQuantileEstimator(torch.nn.Module):
         self.histogram.mul_(self.momentum).add_(counts, alpha=1 - self.momentum)
 
     @torch.no_grad()
+    def pooled_histogram(self) -> torch.Tensor:
+        """The histogram summed over every rank that sees *different* tokens.
+
+        Each rank observes only its own microbatch, so a purely local histogram
+        gives each rank a different quantile and therefore a different bias --
+        the ranks would then route the same token to different experts, and
+        nothing would flag it. Core reduces its own `tokens_per_expert` over
+        this same TPxCPxDP group, and for this same reason
+        (`moe_utils.py:1201`).
+
+        Reduced into a **copy**, never the persistent buffer: `histogram` is an
+        EMA that is re-reduced on every call, so summing in place would
+        multiply it by the world size once per step.
+        """
+        if not (torch.distributed.is_available() and torch.distributed.is_initialized()):
+            return self.histogram
+        try:
+            from megatron.core import parallel_state
+
+            group = parallel_state.get_tensor_and_data_parallel_group(with_context_parallel=True)
+        except (ImportError, AssertionError, RuntimeError):
+            return self.histogram  # model-parallel state not initialised (unit tests)
+        pooled = self.histogram.clone()
+        torch.distributed.all_reduce(pooled, group=group)
+        return pooled
+
+    @torch.no_grad()
     def quantile(self, upper_tail: float) -> torch.Tensor:
         """Per-expert score with ``upper_tail`` of that expert's mass above it."""
-        total = self.histogram.sum(dim=1, keepdim=True).clamp_min(1e-12)
-        cdf = torch.cumsum(self.histogram / total, dim=1)
+        histogram = self.pooled_histogram()
+        total = histogram.sum(dim=1, keepdim=True).clamp_min(1e-12)
+        cdf = torch.cumsum(histogram / total, dim=1)
         target = 1.0 - upper_tail
         idx = torch.searchsorted(cdf.contiguous(), torch.full_like(total, target)).clamp(
             max=self.num_bins - 1
@@ -74,7 +102,28 @@ class ScoreQuantileEstimator(torch.nn.Module):
 
     @torch.no_grad()
     def is_populated(self) -> bool:
-        return bool(self.histogram.sum() > 0)
+        """Populated *anywhere*, not just here.
+
+        A rank whose own histogram is empty must still take part in the
+        all-reduce inside `quantile()`; returning False here would make it skip
+        the collective and hang every other rank.
+        """
+        local = torch.tensor(
+            [float(self.histogram.sum() > 0)], device=self.histogram.device
+        )
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            try:
+                from megatron.core import parallel_state
+
+                torch.distributed.all_reduce(
+                    local,
+                    group=parallel_state.get_tensor_and_data_parallel_group(
+                        with_context_parallel=True
+                    ),
+                )
+            except (ImportError, AssertionError, RuntimeError):
+                pass
+        return bool(local.item() > 0)
 
 
 @torch.no_grad()

@@ -62,8 +62,15 @@ def test_checkpoint_round_trips(single_rank_world, tmp_path):
     torch.testing.assert_close(after, before, rtol=0, atol=0)
 
 
-def test_expert_bias_is_updated_during_training(single_rank_world):
-    """The quantile-balancing update has to be reached by the training loop."""
+def test_expert_bias_moves_when_the_update_is_called(single_rank_world):
+    """The update mutates the bias after real steps have populated the estimator.
+
+    Deliberately *not* a reachability test: it calls `update_expert_bias()`
+    directly. Which loops actually reach it is covered by
+    `test_k3_p6_moe.py::test_core_bias_update_dispatches_to_the_router`, and the
+    earlier name here ("...during_training") claimed a guarantee this body never
+    checked -- core's finalize path was in fact bypassing the router entirely.
+    """
     from kimi_k3.model.build import build_k3_model
     from kimi_k3.training.pretrain_kimi_k3 import build_optimizer, loss_func
 

@@ -28,7 +28,7 @@ def test_pin_contract(name, fn):
 
 
 def test_every_contract_runs_from_the_entry_point():
-    assert len(assert_pin_contracts()) == len(PIN_CONTRACTS) == 8
+    assert len(assert_pin_contracts()) == len(PIN_CONTRACTS) == 9
 
 
 # --- gate G9: the guard itself ----------------------------------------------

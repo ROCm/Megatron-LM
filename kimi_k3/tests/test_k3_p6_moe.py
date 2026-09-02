@@ -183,3 +183,35 @@ def test_balancing_can_be_switched_off(single_rank_world):
     router, _ = make_router(k3_router_quantile_balancing=False)
     assert router.estimator is None
     assert router.update_expert_bias() is None
+
+
+def test_core_bias_update_dispatches_to_the_router():
+    """core's finalize path must reach QuantileBalancingRouter.update_expert_bias.
+
+    `_update_router_expert_bias` collects modules with an `expert_bias` and
+    overwrites it with core's own sign-step; it never consults the module. Before
+    `install_router_bias_dispatch()` that made quantile balancing dead code under
+    `megatron.training.pretrain` -- the bias moved every step, so nothing looked
+    wrong, but it was core's value and not ours.
+    """
+    import importlib
+
+    from kimi_k3.model.build import build_k3_model
+    from kimi_k3.model.core_patch import install_router_bias_dispatch
+
+    install_router_bias_dispatch()
+    fmg = importlib.import_module("megatron.core.distributed.finalize_model_grads")
+
+    model = build_k3_model("tiny")
+    model.train()
+    routers = [m for m in model.modules() if hasattr(m, "update_expert_bias")]
+    assert routers, "no quantile-balancing routers found"
+
+    called = []
+    for r in routers:
+        r.update_expert_bias = lambda _r=r: called.append(_r)
+
+    fmg._update_router_expert_bias([model], model.config)
+    assert len(called) == len(routers), (
+        f"core reached {len(called)} of {len(routers)} routers; the dispatch is not installed"
+    )

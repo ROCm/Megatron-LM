@@ -61,7 +61,8 @@ def forward_step(data_iterator, model):
     return output, loss_func(labels)
 
 
-def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf16: bool = True):
+def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf16: bool = True,
+                    cpu_offload: bool = False, offload_fraction: float = 1.0):
     """Wrap the model in DDP and build the optimizer, consistently.
 
     `dist_muon` is the sharded Muon path -- 7.87 B/param at DP=8 against plain
@@ -84,6 +85,14 @@ def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf
         ),
         model,
     )
+    if cpu_offload and "muon" in optimizer:
+        # A20: dist_muon routes all matrix params through the Muon group, which
+        # HybridDeviceOptimizer never sees -- only the 0.085% scalar group would
+        # move. Refuse rather than report a meaningless saving.
+        raise ValueError(
+            f"optimizer_cpu_offload is inert with {optimizer!r} (finding A20); "
+            "use optimizer='adam_dist'"
+        )
     opt_config = OptimizerConfig(
         optimizer="adam" if use_dist_opt else optimizer,
         lr=lr,
@@ -92,6 +101,14 @@ def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf
         use_distributed_optimizer=use_dist_opt,
         weight_decay=0.1,
         clip_grad=1.0,
+        optimizer_cpu_offload=cpu_offload,
+        optimizer_offload_fraction=offload_fraction,
+        # Left at core's default (True = AdamW). HybridDeviceOptimizer asserts on
+        # it, so offload needs it -- but forcing False otherwise would silently
+        # downgrade adam_dist from AdamW to Adam.
+        overlap_cpu_optimizer_d2h_h2d=cpu_offload,
+        pin_cpu_grads=cpu_offload,
+        pin_cpu_params=cpu_offload,
     )
     if "muon" in opt_config.optimizer:
         build = lambda: get_megatron_muon_optimizer(

@@ -70,6 +70,8 @@ def build(args, rank: int, world: int):
     overrides = {}
     if args.kda_backend:
         overrides["k3_kda_backend"] = args.kda_backend
+    if not args.ck_grouped_gemm:
+        overrides["k3_moe_ck_grouped_gemm"] = False
     if args.experts:
         overrides["num_moe_experts"] = args.experts
     if args.dispatcher:
@@ -92,7 +94,9 @@ def build(args, rank: int, world: int):
         **overrides,
     ).bfloat16()
     after_model = torch.cuda.memory_allocated()
-    ddp, opt = build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True)
+    ddp, opt = build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True,
+                               cpu_offload=args.cpu_offload,
+                               offload_fraction=args.offload_fraction)
     resident = {
         "after_model_gib": round(after_model / 2**30, 2),
         "after_optimizer_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
@@ -147,6 +151,15 @@ def summarise(prof, iteration_ms: float) -> Dict:
         if name in dict(REGIONS):
             regions[name] += total_ms
             continue
+        if name.startswith("Optimizer.step#"):
+            # ROCTracer emits a "duplicate flow start" for the optimizer annotation
+            # and charges the region's whole *wall* duration to self_device_time.
+            # It is a real duration but not device time, and its children (the
+            # Newton-Schulz addmm/mm) are counted again below -- so summing it into
+            # device_ms inflated the total and every pct_device with it. Verified:
+            # a toy region of known length reports wall, not kernel, time.
+            regions[name] += cuda_ms or total_ms
+            continue
         if cuda_ms <= 0:
             continue
         launches += event.count
@@ -181,12 +194,19 @@ def main() -> None:
     ap.add_argument("--iterations", type=int, default=10)
     ap.add_argument("--warmup", type=int, default=3)
     ap.add_argument("--optimizer", default="dist_muon")
+    ap.add_argument("--cpu-offload", action="store_true",
+                    help="offload optimizer state and the update to CPU; adam_dist only "
+                         "(inert with Muon, finding A20)")
+    ap.add_argument("--offload-fraction", type=float, default=1.0)
     ap.add_argument("--dispatcher", choices=("alltoall", "allgather", "flex"), default=None,
                     help="MoE token dispatcher; the A/B matrix arms (plan-0/07-dispatcher-ab.md)")
     ap.add_argument("--kda-backend", choices=("eager", "fla"), default=None,
                     help="eager is the fp32 oracle and stores the recurrent state at every "
                          "timestep -- 109 GiB per layer at seq 8192 against fla's 10.2. Any "
                          "memory measurement meant to size a cluster must use fla.")
+    ap.add_argument("--no-ck-grouped-gemm", dest="ck_grouped_gemm", action="store_false",
+                    default=True, help="fall back to hipBLASLt for the routed experts, to "
+                                       "isolate what the CK grouped GEMM contributes")
     ap.add_argument("--experts", type=int, default=None,
                     help="override num_moe_experts; used to measure how headroom scales "
                          "with the number of experts local to a rank")
@@ -217,7 +237,9 @@ def main() -> None:
     row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
            "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res,
            "arm": args.dispatcher or "default", "experts": args.experts,
-           "kda_backend": args.kda_backend}
+           "kda_backend": args.kda_backend, "ck_grouped_gemm": args.ck_grouped_gemm,
+           "optimizer": args.optimizer, "cpu_offload": args.cpu_offload,
+           "offload_fraction": args.offload_fraction}
     torch.cuda.reset_peak_memory_stats()
     try:
         model, ddp, opt, resident = build(args, rank, world)
