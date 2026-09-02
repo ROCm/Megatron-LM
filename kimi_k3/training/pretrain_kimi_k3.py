@@ -62,7 +62,8 @@ def forward_step(data_iterator, model):
 
 
 def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf16: bool = True,
-                    cpu_offload: bool = False, offload_fraction: float = 1.0):
+                    cpu_offload: bool = False, offload_fraction: float = 1.0,
+                    decoupled_weight_decay: bool = True):
     """Wrap the model in DDP and build the optimizer, consistently.
 
     `dist_muon` is the sharded Muon path -- 7.87 B/param at DP=8 against plain
@@ -103,9 +104,11 @@ def build_optimizer(model, *, optimizer: str = "dist_muon", lr: float = 1e-4, bf
         clip_grad=1.0,
         optimizer_cpu_offload=cpu_offload,
         optimizer_offload_fraction=offload_fraction,
-        # Left at core's default (True = AdamW). HybridDeviceOptimizer asserts on
-        # it, so offload needs it -- but forcing False otherwise would silently
-        # downgrade adam_dist from AdamW to Adam.
+        # True = AdamW, core's default. HybridDeviceOptimizer asserts on it, so
+        # offload requires it. Exposed only so the decay mode can be A/B'd
+        # directly: an earlier version forced False whenever offload was off,
+        # silently downgrading adam_dist to coupled Adam.
+        decoupled_weight_decay=decoupled_weight_decay,
         overlap_cpu_optimizer_d2h_h2d=cpu_offload,
         pin_cpu_grads=cpu_offload,
         pin_cpu_params=cpu_offload,

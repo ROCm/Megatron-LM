@@ -96,7 +96,8 @@ def build(args, rank: int, world: int):
     after_model = torch.cuda.memory_allocated()
     ddp, opt = build_optimizer(model, optimizer=args.optimizer, lr=1e-5, bf16=True,
                                cpu_offload=args.cpu_offload,
-                               offload_fraction=args.offload_fraction)
+                               offload_fraction=args.offload_fraction,
+                               decoupled_weight_decay=args.decoupled_weight_decay)
     resident = {
         "after_model_gib": round(after_model / 2**30, 2),
         "after_optimizer_gib": round(torch.cuda.memory_allocated() / 2**30, 2),
@@ -198,6 +199,11 @@ def main() -> None:
                     help="offload optimizer state and the update to CPU; adam_dist only "
                          "(inert with Muon, finding A20)")
     ap.add_argument("--offload-fraction", type=float, default=1.0)
+    ap.add_argument("--coupled-weight-decay", dest="decoupled_weight_decay",
+                    action="store_false", default=True,
+                    help="Adam rather than AdamW: decay enters the moments instead of "
+                         "being applied to the weight directly. For A/B-ing the decay "
+                         "mode; offload rejects it.")
     ap.add_argument("--dispatcher", choices=("alltoall", "allgather", "flex"), default=None,
                     help="MoE token dispatcher; the A/B matrix arms (plan-0/07-dispatcher-ab.md)")
     ap.add_argument("--kda-backend", choices=("eager", "fla"), default=None,
@@ -239,7 +245,8 @@ def main() -> None:
            "arm": args.dispatcher or "default", "experts": args.experts,
            "kda_backend": args.kda_backend, "ck_grouped_gemm": args.ck_grouped_gemm,
            "optimizer": args.optimizer, "cpu_offload": args.cpu_offload,
-           "offload_fraction": args.offload_fraction}
+           "offload_fraction": args.offload_fraction,
+           "decoupled_weight_decay": args.decoupled_weight_decay}
     torch.cuda.reset_peak_memory_stats()
     try:
         model, ddp, opt, resident = build(args, rank, world)
