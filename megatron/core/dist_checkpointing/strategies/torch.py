@@ -5,13 +5,12 @@ import io
 import os
 import pickle
 import warnings
-from abc import ABC
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import product
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import torch
 from packaging.version import Version as PkgVersion
@@ -49,22 +48,19 @@ from ..mapping import (
     is_main_replica,
 )
 from .async_utils import AsyncRequest
-from .base import (
-    AsyncSaveShardedStrategy,
-    LoadShardedStrategy,
-    StrategyAction,
-    register_default_strategy,
-)
 from .checkpointable import CheckpointableShardedTensor, LocalShardsContainer
+from .nvrx import has_nvrx_async_support, make_nvrx_async_request
 
-try:
+if TYPE_CHECKING:
     from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncRequest as NVRxAsyncRequest
     from nvidia_resiliency_ext.checkpointing.async_ckpt.state_dict_saver import (
         CheckpointMetadataCache,
     )
-except (ImportError, ModuleNotFoundError):
-    CheckpointMetadataCache = ABC
-    NVRxAsyncRequest = ABC
+else:
+    CheckpointMetadataCache = Any
+    NVRxAsyncRequest = Any
+
+HAVE_NVRX = has_nvrx_async_support()
 
 try:
     if not torch.cuda.is_available():
@@ -103,17 +99,8 @@ class MCoreSavePlan:
     pass
 
 
-def register_default_torch_strategies():
-    """Register default strategies related to PyT Distributed backend."""
-    register_default_strategy(
-        StrategyAction.LOAD_SHARDED, 'torch_dist', 1, TorchDistLoadShardedStrategy()
-    )
-    register_default_strategy(
-        StrategyAction.SAVE_SHARDED, 'torch_dist', 1, TorchDistSaveShardedStrategy()
-    )
-
-
 logger = getLogger(__name__)
+_logged_mcore_async_deprecation = False
 
 
 def flatten_state_dict(
@@ -596,7 +583,7 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
         return super().commit_tensor(read_item, tensor)
 
 
-class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
+class TorchDistSaveShardedStrategy:
     """Async save strategy for the PyT Distributed format.
 
     The idea is to translate MCore ShardedTensors into PyT ShardedTensors
@@ -627,7 +614,8 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
             separation_hint(str, optional): If provided, all tensors whose keys have this
                 prefix will be saved to a separate file.
         """
-        super().__init__(backend, version)
+        self.backend = backend
+        self.version = version
         self.keep_only_main_replica = keep_only_main_replica
         self.thread_count = thread_count
 
@@ -654,6 +642,12 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
 
         self.validated_loaded_metadata_reuse = False
 
+    def save(self, sharded_state_dict: ShardedStateDict, checkpoint_dir: Path):
+        """Sync save always uses the built-in implementation."""
+        async_request = self.async_save(sharded_state_dict, checkpoint_dir, async_strategy="mcore")
+        async_request.execute_sync()
+        del async_request
+
     def async_save(
         self,
         sharded_state_dict: ShardedStateDict,
@@ -668,11 +662,14 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
 
         Returns: None
         """
+        global _logged_mcore_async_deprecation
         if async_strategy == "mcore":
-            logger.warning(
-                "MCore's async save is deprecated and will be removed in the future releases. "
-                "Please, use NVRx async solution by setting `async_strategy` to `nvrx`."
-            )
+            if not _logged_mcore_async_deprecation:
+                logger.warning(
+                    "MCore's async save is deprecated and will be removed in the future releases. "
+                    "Please, use NVRx async solution by setting `async_strategy` to `nvrx`."
+                )
+                _logged_mcore_async_deprecation = True
 
         # Translate the state dict
         (sharded_state_dict, flat_mapping, rename_mapping) = (
@@ -698,7 +695,9 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
         if async_strategy == "nvrx":
             if self._metadata_cache is None:
                 self._metadata_cache = checkpointable_metadata_cache()
-                if self.cached_global_metadata is not None:
+                if self.cached_global_metadata is not None and hasattr(
+                    self._metadata_cache, "set_cached_global_metadata"
+                ):
                     self._metadata_cache.set_cached_global_metadata(self.cached_global_metadata)
             # Define additional arguments
             async_writer_kwargs["use_cached_data_structure"] = self.use_cached_ckpt_structure
@@ -803,14 +802,13 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
         def finalize_fn():
             save_state_dict_async_finalize(*save_state_dict_ret)
 
-        return async_request(save_fn, save_args, [finalize_fn], preload_fn=preload_fn)
-
-    def can_handle_sharded_objects(self):
-        return True
+        return make_nvrx_async_request(
+            async_request, save_fn, save_args, [finalize_fn], preload_fn=preload_fn
+        )
 
 
 def _get_filesystem_reader(
-    checkpoint_dir: Union[str, Path], cache_metadata: bool = False, async_strategy: str = "nvrx"
+    checkpoint_dir: Union[str, Path], cache_metadata: bool = False, async_strategy: str = "mcore"
 ) -> FileSystemReader:
     if MultiStorageClientFeature.is_enabled():
         msc = MultiStorageClientFeature.import_package()
@@ -823,19 +821,18 @@ def _get_filesystem_reader(
     return FileSystemReader(checkpoint_dir)
 
 
-class TorchDistLoadShardedStrategy(LoadShardedStrategy):
+class TorchDistLoadShardedStrategy:
     """Basic load strategy for the PyT Distributed format."""
 
     def __init__(self, cache_metadata: bool = False):
         self.cached_global_metadata: Optional[Metadata] = None
         self.cache_metadata = cache_metadata
-        super().__init__()
 
     def load(
         self,
         sharded_state_dict: ShardedStateDict,
         checkpoint_dir: Path,
-        async_strategy: str = "nvrx",
+        async_strategy: str = "mcore",
     ) -> StateDict:
         """Translates MCore ShardedTensors to PyT ShardedTensors & loads from PyT Distributed fmt.
 
@@ -1012,15 +1009,6 @@ class TorchDistLoadShardedStrategy(LoadShardedStrategy):
         else:
             fs_writer.fs.rm_file(old_path)
 
-    def can_handle_sharded_objects(self):
-        return True
-
-    def check_backend_compatibility(self, loaded_version):
-        pass  # TODO
-
-    def check_version_compatibility(self, loaded_version):
-        pass  # TODO
-
 
 def get_async_strategy(async_strategy: str = "nvrx", module: str = None) -> tuple:
     """Returns async strategy and related async imported modules"""
@@ -1059,9 +1047,8 @@ def get_async_strategy(async_strategy: str = "nvrx", module: str = None) -> tupl
             async_strategy = "nvrx"
         except (ImportError, ModuleNotFoundError):
             raise ModuleNotFoundError(
-                "nvidia-resiliency-ext package is not installed. "
-                "Please, install nvidia-resiliency-ext package or set `async_strategy` to `mcore` "
-                "to enable async save strategy."
+                "A compatible `nvidia-resiliency-ext` installation is required for "
+                '`async_strategy="nvrx"`. Please install it or set `async_strategy` to `mcore`.'
             )
     elif async_strategy == "mcore":
         # do mcore async imports
