@@ -1,4 +1,4 @@
-ARG BASE_DOCKER=rocm/pytorch:rocm7.1_ubuntu24.04_py3.12_pytorch_release_2.9.1
+ARG BASE_DOCKER=rocm/pytorch:rocm7.2.4_ubuntu24.04_py3.12_pytorch_release_2.10.0
 FROM $BASE_DOCKER
 
 ARG PYTORCH_ROCM_ARCH_OVERRIDE="gfx942"
@@ -37,6 +37,9 @@ pytest_mock \
 pytest-csv \
 pytest-asyncio \
 pytest-random-order \
+pyzmq \
+omegaconf \
+'multi-storage-client~=0.27' \
 sentencepiece \
 wrapt \
 zarr \
@@ -50,7 +53,9 @@ tiktoken \
 pynvml \
 fastapi \
 uvicorn \
-openai
+openai \
+msgpack \
+tensorboard
 
 RUN pip install "nltk==3.8.1"
 
@@ -86,7 +91,7 @@ RUN pip install cmake ninja
 # Clone TE repo and submodules
 WORKDIR ${STAGE_DIR}
 
-ARG TE_COMMIT=release_v2.2_rocm
+ARG TE_COMMIT=release_v2.12_rocm
 ENV NVTE_FRAMEWORK=pytorch
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH_OVERRIDE}
 ENV NVTE_USE_HIPBLASLT=1
@@ -108,7 +113,7 @@ RUN git clone https://github.com/caaatch22/grouped_gemm.git &&\
 
 RUN git clone https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git &&\
     cd Emerging-Optimizers &&\
-    git checkout v0.1.0 &&\
+    git checkout v0.3.1 &&\
     pip install --no-build-isolation .
 
 # MORI EP (MoE dispatch/combine) for --moe-flex-dispatcher-backend mori
