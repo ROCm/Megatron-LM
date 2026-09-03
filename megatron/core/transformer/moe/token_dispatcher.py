@@ -29,6 +29,7 @@ from megatron.core.transformer.moe.fused_a2a import (
 )
 from megatron.core.transformer.moe.moe_utils import (
     ProcessGroupCollection,
+    fused_permute_with_probs,
     get_align_size_for_quantization,
     get_capacity,
     maybe_move_tensor_to_cpu,
@@ -1442,6 +1443,8 @@ class _MoriManager(_DispatchManager):
                 )
             self.token_probs = self.token_probs.float()
 
+        from megatron.core.transformer.moe.quantized_dispatch import should_quantize_dispatch
+
         (
             hidden_states,
             dispatched_indices,
@@ -1458,6 +1461,7 @@ class _MoriManager(_DispatchManager):
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
+            fp8_dispatch=should_quantize_dispatch(self.config),
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
             kernel_type=self.kernel_type,
@@ -1624,25 +1628,49 @@ class _MoriManager(_DispatchManager):
                 self.dispatched_routing_map, self.tokens_per_expert
             )
 
+        from megatron.core.transformer.moe.quantized_dispatch import (
+            is_quantized_tensor,
+            unpack_rowwise,
+            wrap_rowwise,
+        )
+
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
-        # Both permute paths need an exact host-side num_out_tokens: the fused
-        # TE kernel to size its output, and the non-fused argsort-based permute
-        # to slice the sorted indices (see moe_utils.permute). Compute it once.
         num_out_tokens = int(self._synced_tokens_per_expert().sum())
-        (
-            hidden_states,
-            permuted_probs,
-            self.reversed_mapping_for_combine,
-            _,
-            _,
-        ) = permute(
-            hidden_states,
-            self.dispatched_routing_map,
-            probs=self.dispatched_probs,
-            num_out_tokens=num_out_tokens,
-            fused=self.permute_fusion,
-        )
+        fused = self.permute_fusion
+        if is_quantized_tensor(hidden_states):
+            fused = fused_permute_with_probs is not None
+        if is_quantized_tensor(hidden_states) and not fused:
+            data, scales, meta = unpack_rowwise(hidden_states)
+            (
+                permuted_data,
+                permuted_probs,
+                self.reversed_mapping_for_combine,
+                *rest,
+            ) = permute(
+                data,
+                self.dispatched_routing_map,
+                probs=self.dispatched_probs,
+                num_out_tokens=num_out_tokens,
+                fused=False,
+            )
+            permuted_scales = scales.index_select(0, self.reversed_mapping_for_combine)
+            hidden_states = wrap_rowwise(permuted_data, permuted_scales, meta)
+            del rest
+        else:
+            (
+                hidden_states,
+                permuted_probs,
+                self.reversed_mapping_for_combine,
+                _,
+                _,
+            ) = permute(
+                hidden_states,
+                self.dispatched_routing_map,
+                probs=self.dispatched_probs,
+                num_out_tokens=num_out_tokens,
+                fused=fused,
+            )
         if self.router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
 

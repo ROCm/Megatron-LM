@@ -456,7 +456,7 @@ FP8 training provides benefits across all three performance walls:
 |------|-------------|--------|
 | **Memory** | 50% activation reduction | Stores linear layer inputs in FP8 instead of BF16 |
 | **Memory** | Eliminate BF16 weight copies | Native FP8 casts directly from FP32 to FP8 |
-| **Communication** | 50% EP dispatch volume | Dispatches tokens in FP8 instead of BF16 |
+| **Communication** | ~50% EP **dispatch** volume | MORI quantized dispatch (``--moe-quantized-dispatch``, default on with flex+mori+FP8). Combine and dgrad stay BF16 (DeepSeek-V3 split), so total EP bytes are about 75% of BF16, not 50% end-to-end. Opt out with ``--no-moe-quantized-dispatch``. |
 | **Communication** | 50% parameter all-gather | With FP8 primary weights (except MXFP8) |
 | **Compute** | Faster Tensor Core GEMMs | FP8 ops on Hopper/Blackwell are faster than BF16 |
 
@@ -475,6 +475,7 @@ FP8 training provides benefits across all three performance walls:
 | Optimization | Description | Config |
 |--------------|-------------|--------|
 | **Routing Map Padding** | Pads routing map (not tokens) to align M dimension to 16/32, avoiding per-tensor padding overhead | `--moe-router-padding-for-fp8` |
+| **Quantized MORI dispatch** | Quantize unique sender tokens with the live TE recipe, communicate FP8+scales, reconstruct `QuantizedTensor` for experts. Combine/dgrad remain BF16. | `--moe-quantized-dispatch` (default on with flex+mori+FP8); `--no-moe-quantized-dispatch` to opt out |
 | **FP8 Primary Weights** | Casts FP32 master weights directly to FP8, eliminating BF16 intermediate copy | `--fp8-param-gather` (Need additional `--reuse-grad-buf-for-mxfp8-param-ag` for MXFP8) |
 
 

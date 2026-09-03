@@ -77,9 +77,17 @@ def should_free_input(name, is_moe, config, num_local_experts):
     # The input and output of A2A are not needed anymore after the forward pass,
     # so we can free the input memory after the forward pass.
 
-    # When low precision fp8/4 is enabled, the casted tensors are saved and the
-    # original bf16 tensors are safe to be freed.
+    # When low precision fp8/4 is enabled, TE GroupedLinear quantizes and saves
+    # activations, so the original dispatch tensor is safe to free after MLP
+    # forward. MORI quantized dispatch skips that second input quantize, so the
+    # dispatched QuantizedTensor must stay alive for wgrad.
     free_mlp = config.fp8 is not None or config.fp4 is not None
+    if (
+        enable_mori
+        and getattr(config, "moe_quantized_dispatch", True)
+        and (config.fp8 is not None or config.fp4 is not None)
+    ):
+        free_mlp = False
     if not free_mlp:
         # AlltoAll dispatcher with local_num_experts=1 and HybridEP both use identity
         # operation for `dispatch_postprocess`, hence the mlp inputs will be directly
@@ -546,7 +554,17 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             # backward graph from connecting to attn submodule
             token_dispatcher._comm_manager.token_probs = probs
 
-        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
+        from megatron.core.fp4_utils import get_fp4_context
+        from megatron.core.fp8_utils import get_fp8_context
+
+        if layer.config.fp8:
+            dispatch_quant_ctx = get_fp8_context(layer.config, layer.layer_number - 1)
+        elif layer.config.fp4:
+            dispatch_quant_ctx = get_fp4_context(layer.config, layer.layer_number - 1)
+        else:
+            dispatch_quant_ctx = nullcontext()
+        with dispatch_quant_ctx:
+            dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
 
         # `dispatched_probs` is needed by backward pass of swiglu, therefore it's
         # passed to moe_forward within `layer_state` to avoid the free_input process

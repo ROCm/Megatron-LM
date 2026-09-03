@@ -538,8 +538,10 @@ except ImportError:
     HAVE_MORI = False
 
 
-_mori_op = None
+# Process-wide MORI ops keyed by layout so FP8 dispatch and BF16 combine can coexist.
+_mori_ops = {}
 _mori_shmem_initialized = False
+_pending_dispatch_meta = None
 # Process-wide CUDA stream dedicated to MORI dispatch/combine kernel launches.
 # Mirrors DeepEP's `allocate_on_comm_stream` pattern so that op.dispatch() and
 # op.combine() can run concurrently with non-dependent work on the default
@@ -599,11 +601,12 @@ def reset_mori_op():
 
     Do not call between dispatch and combine in the same forward pass.
     """
-    global _mori_op, _mori_comm_stream
-    if _mori_op is not None:
+    global _mori_ops, _mori_comm_stream
+    if _mori_ops:
         _sync_mori_gpu_work()
-        _mori_op.reset()
-    _mori_op = None
+        for op in _mori_ops.values():
+            op.reset()
+    _mori_ops = {}
     _mori_comm_stream = None
 
 
@@ -705,31 +708,21 @@ def get_mori_op(
     data_type: torch.dtype = torch.bfloat16,
     kernel_type=None,
     fp8_dispatch: bool = False,
+    scale_dim: int = 0,
+    scale_type_size: int = 1,
 ):
-    """Return the process-wide :class:`EpDispatchCombineOp`, creating it once.
+    """Return a cached :class:`EpDispatchCombineOp` for this layout.
 
-    Dispatch and combine in the same forward pass share this instance; do not
-    call :func:`reset_mori_op` between dispatch and combine.
-    Call :func:`reset_mori_op` between parametrized tests when layout changes.
-    Call :func:`finalize_mori_shmem` once at session teardown.
+    FP8 forward dispatch uses ``scale_dim > 0``; BF16 combine and both
+    backwards use ``scale_dim == 0``. MORI binds ``scale_dim`` on the op
+    config (not per launch), so the two layouts are cached as separate ops.
+    Kernel launch dtype is inferred from the runtime tensor; ``max_token_type_size``
+    is 4 bytes so the BF16 combine heap is large enough when dispatch is FP8.
+    IntraNode and InterNodeV1 copy caller-provided ``scales`` when ``scale_dim > 0``.
 
-    Args:
-        group: Process group for EP communication.
-        hidden_dim: Hidden dimension of token embeddings.
-        num_local_experts: Number of experts per rank.
-        router_topk: Number of experts selected per token.
-        max_num_tokens_per_rank: Maximum input tokens per rank.
-        data_type: Token data type.
-        kernel_type: MORI kernel type as a string (e.g. 'IntraNode',
-            'InterNodeV1'), or None to auto-select based on world size.
-        fp8_dispatch: Whether dispatch uses FP8.
-
-    Note:
-        The op is cached process-wide and built on the first call, so
-        ``kernel_type`` only takes effect when the op is (re)created. Call
-        :func:`reset_mori_op` first to rebuild with a different kernel type.
+    Do not call :func:`reset_mori_op` between dispatch and combine.
     """
-    global _mori_op
+    global _mori_ops
 
     if max_num_tokens_per_rank is None:
         raise ValueError(
@@ -737,31 +730,37 @@ def get_mori_op(
             "Set --moe-mori-max-tokens-per-rank (e.g. to micro_batch_size * seq_length)."
         )
 
-    if _mori_op is not None:
-        return _mori_op
-    
     init_mori_shmem(group)
 
     world_size = group.size()
     rank = torch.distributed.get_rank(group)
-
     resolved_kernel_type = _resolve_mori_kernel_type(kernel_type, world_size)
+    cache_key = (
+        hidden_dim,
+        num_local_experts,
+        router_topk,
+        max_num_tokens_per_rank,
+        int(scale_dim),
+        int(scale_type_size),
+        str(resolved_kernel_type),
+    )
+    if cache_key in _mori_ops:
+        return _mori_ops[cache_key]
 
-    # MORI reads the launch-config mode only from this env var. Default to AUTO.
     launch_config_mode = os.environ.setdefault("MORI_EP_LAUNCH_CONFIG_MODE", "AUTO")
     if rank == 0:
-        print(f"[MORI EP] MORI_EP_LAUNCH_CONFIG_MODE={launch_config_mode}")
-
-    # TODO: Look into wiring fp8 dispatch in the future.
-    assert not fp8_dispatch, "MORI EP FP8 dispatch is not integrated yet"
+        print(
+            f"[MORI EP] MORI_EP_LAUNCH_CONFIG_MODE={launch_config_mode} "
+            f"scale_dim={scale_dim} fp8_dispatch={fp8_dispatch}"
+        )
 
     config = mori.ops.EpDispatchCombineConfig(
         data_type=data_type,
         rank=rank,
         world_size=world_size,
         hidden_dim=hidden_dim,
-        scale_dim=0,
-        scale_type_size=torch.tensor([], dtype=torch.float8_e4m3fnuz).element_size(),
+        scale_dim=int(scale_dim),
+        scale_type_size=int(scale_type_size),
         max_token_type_size=torch.tensor([], dtype=torch.float32).element_size(),
         max_num_inp_token_per_rank=max_num_tokens_per_rank,
         num_experts_per_rank=num_local_experts,
@@ -769,8 +768,8 @@ def get_mori_op(
         kernel_type=resolved_kernel_type,
     )
 
-    _mori_op = mori.ops.EpDispatchCombineOp(config)
-    return _mori_op
+    _mori_ops[cache_key] = mori.ops.EpDispatchCombineOp(config)
+    return _mori_ops[cache_key]
 
 
 class MoriDispatch(torch.autograd.Function):
@@ -799,19 +798,44 @@ class MoriDispatch(torch.autograd.Function):
         kernel_type=None,
     ):
         """Forward pass: dispatch tokens to correct ranks via MORI."""
+        from megatron.core.transformer.moe.quantized_dispatch import (
+            current_dispatch_recipe,
+            mori_scale_dim,
+            mori_scale_type_size,
+            quantize_hidden_for_dispatch,
+            view_payload_for_mori,
+        )
+
         hidden_dim = x.shape[1]
+        dispatch_meta = None
+        scales = None
+        payload = x
+        scale_dim = 0
+        scale_type_size = 1
+        if fp8_dispatch:
+            recipe = current_dispatch_recipe()
+            if recipe is None:
+                fp8_dispatch = False
+            else:
+                payload, scales, dispatch_meta = quantize_hidden_for_dispatch(x, recipe)
+                payload = view_payload_for_mori(payload)
+                scale_dim = mori_scale_dim(recipe, hidden_dim)
+                scale_type_size = mori_scale_type_size(recipe)
+
         op = get_mori_op(
             group=group,
             hidden_dim=hidden_dim,
             num_local_experts=num_local_experts,
             router_topk=router_topk,
             max_num_tokens_per_rank=max_num_tokens_per_rank,
-            data_type=x.dtype,
+            data_type=payload.dtype,
             kernel_type=kernel_type,
             fp8_dispatch=fp8_dispatch,
+            scale_dim=scale_dim,
+            scale_type_size=scale_type_size,
         )
 
-        # x -> [num_tokens, hidden_dim]
+        # payload -> [num_tokens, hidden_dim] (BF16 or quantized)
         # token_probs -> [num_tokens, router_topk]
         # token_indices -> [num_tokens, router_topk]
         # scales=None: BF16 path uses scale_dim=0
@@ -822,15 +846,15 @@ class MoriDispatch(torch.autograd.Function):
         (
             dispatch_out,
             dispatch_weights,
-            _,
+            recv_scales,
             dispatch_indices,
             recv_num_token,
             routing_handle,
         ) = _run_mori_op_on_stream(
             lambda: op.dispatch(
-                x,
+                payload,
                 token_probs.float(),
-                None,
+                scales,
                 token_indices.to(torch.int32),
                 return_routing=True,
             ),
@@ -882,40 +906,25 @@ class MoriDispatch(torch.autograd.Function):
         ctx.num_local_experts = num_local_experts
         ctx.router_topk = router_topk
         ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
-        ctx.fp8_dispatch = fp8_dispatch
+        ctx.fp8_dispatch = bool(fp8_dispatch)
+        ctx.kernel_type = kernel_type
         ctx.local_num_tokens = token_indices.shape[0]
-        # Stash comm-stream flags for backward
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
-        # Stashed so backward can replay this layer's exact routing layout.
         ctx.routing_handle = routing_handle
-        # token_indices: sender-layout topk indices (same tensor as dispatch()'s
-        # input) required by backward's op.combine().
+        global _pending_dispatch_meta
+        _pending_dispatch_meta = dispatch_meta
         ctx.save_for_backward(token_indices)
 
-        # NOTE: recv_x, recv_token_probs and dispatch_weights are the FULL [max_recv, ...] buffers
-        # (no slicing). recv_token_indices carries `-1` in every invalid/padding row.
-        #
-        # dispatch_weights is exposed in two slots because the caller consumes it two ways:
-        #   - slot 2 (recv_probs): fed into _indices_to_multihot / fused_indices_to_multihot,
-        #     which transforms it into the routing map + permuted probs (overwritten downstream).
-        #     This is the autograd-carrying copy.
-        #   - slot 4 (raw dispatch_weights): kept RAW as the recv-layout weights buffer that
-        #     op.combine() needs in the combine forward (MoriCombine.forward's recv_token_probs).
-        #     It is exposed as a separate tensor object and marked non-differentiable below:
-        #     op.combine() only reads its values and MoriCombine.backward returns None for it,
-        #     so it must not carry a grad_fn. Otherwise the combine node (which consumes this buffer) and the
-        #     dispatch node would each backward through this same MoriDispatch, tripping a
-        #     double-backward error in the fine-grained 1f1b overlap schedule where the two
-        #     nodes are backwarded as separate autograd subgraphs.
-        #
-        # .clone(): dispatch_weights views MORI's reusable dispatch buffer, but combine()
-        # reads it much later (a sibling dispatch may overwrite it); clone a private copy.
-        # dispatch_out needs no such clone: _MoriManager.dispatch permutes it right away in
-        # the dispatch node, so its only reader runs before any sibling dispatch overwrites.
         raw_dispatch_weights = dispatch_weights.detach().clone()
-        ctx.mark_non_differentiable(recv_token_indices, tokens_per_expert, raw_dispatch_weights)
-        
+        if recv_scales is None:
+            recv_scales = torch.empty(0, device=device)
+        elif recv_scales.numel() > 0:
+            recv_scales = recv_scales.detach().clone()
+        ctx.mark_non_differentiable(
+            recv_token_indices, tokens_per_expert, raw_dispatch_weights, recv_scales
+        )
+
         return (
             dispatch_out,
             recv_token_indices,
@@ -923,6 +932,7 @@ class MoriDispatch(torch.autograd.Function):
             tokens_per_expert,
             raw_dispatch_weights,
             routing_handle,
+            recv_scales,
         )
 
     @staticmethod
@@ -934,8 +944,9 @@ class MoriDispatch(torch.autograd.Function):
         grad_tpe,
         grad_weights_global,
         grad_routing_handle,
+        grad_scales,
     ):
-        """Backward pass: combine gradients back using MORI."""
+        """Backward pass: combine gradients back using MORI (always BF16)."""
         (token_indices,) = ctx.saved_tensors
         op = get_mori_op(
             group=ctx.group,
@@ -944,7 +955,9 @@ class MoriDispatch(torch.autograd.Function):
             router_topk=ctx.router_topk,
             max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
             data_type=grad_output.dtype,
-            fp8_dispatch=ctx.fp8_dispatch,
+            kernel_type=ctx.kernel_type,
+            fp8_dispatch=False,
+            scale_dim=0,
         )
         num_tokens = ctx.local_num_tokens
         
@@ -1022,7 +1035,8 @@ class MoriCombine(torch.autograd.Function):
             router_topk=router_topk,
             max_num_tokens_per_rank=max_num_tokens_per_rank,
             data_type=x.dtype,
-            fp8_dispatch=fp8_dispatch,
+            fp8_dispatch=False,
+            scale_dim=0,
         )
         num_tokens = sender_token_indices.shape[0]
 
@@ -1069,7 +1083,8 @@ class MoriCombine(torch.autograd.Function):
             router_topk=ctx.router_topk,
             max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
             data_type=grad_output.dtype,
-            fp8_dispatch=ctx.fp8_dispatch,
+            fp8_dispatch=False,
+            scale_dim=0,
         )
         # Mode-2 replay: dispatch along the matching forward's cached layout.
         dispatch_out, _, _, _, _ = _run_mori_op_on_stream(
@@ -1164,19 +1179,44 @@ if HAVE_MORI:
             that the matching :func:`mori_combine` must pass back so combine/backward dispatch
             reads the same layout this dispatch produced.
         """
-        return MoriDispatch.apply(
-            x.contiguous(),
-            token_indices,
-            token_probs,
-            num_experts,
-            group,
-            num_local_experts,
-            router_topk,
-            max_num_tokens_per_rank,
-            fp8_dispatch,
-            async_finish,
-            allocate_on_comm_stream,
-            kernel_type,
+        from megatron.core.transformer.moe.quantized_dispatch import wrap_dispatched_quantized
+
+        try:
+            (
+                recv_x,
+                recv_indices,
+                recv_probs,
+                tokens_per_expert,
+                dispatch_weights,
+                routing_handle,
+                recv_scales,
+            ) = MoriDispatch.apply(
+                x.contiguous(),
+                token_indices,
+                token_probs,
+                num_experts,
+                group,
+                num_local_experts,
+                router_topk,
+                max_num_tokens_per_rank,
+                fp8_dispatch,
+                async_finish,
+                allocate_on_comm_stream,
+                kernel_type,
+            )
+            global _pending_dispatch_meta
+            meta = _pending_dispatch_meta
+            if meta is not None and recv_scales is not None and recv_scales.numel() > 0:
+                recv_x = wrap_dispatched_quantized(recv_x, recv_scales, meta)
+        finally:
+            _pending_dispatch_meta = None
+        return (
+            recv_x,
+            recv_indices,
+            recv_probs,
+            tokens_per_expert,
+            dispatch_weights,
+            routing_handle,
         )
 
     def mori_combine(

@@ -774,6 +774,12 @@ class TransformerConfig(ModelParallelConfig):
     config; pass an explicit value only to pre-allocate a larger SHMEM heap
     for variable-batch scenarios."""
 
+    moe_quantized_dispatch: bool = True
+    """Quantize MoE token dispatch with the live TE FP8 recipe (MORI backend).
+    Default on; use --no-moe-quantized-dispatch to keep BF16 dispatch.
+    Combine and gradient dispatch stay BF16. No-op unless flex+mori and FP8 autocast
+    are enabled. FP4 dispatch is not supported yet."""
+
     moe_per_layer_logging: bool = False
     """Enable per-layer logging for MoE, currently supports auxiliary loss and z loss."""
 
@@ -1276,6 +1282,32 @@ class TransformerConfig(ModelParallelConfig):
                     "TransformerConfig directly) must set it explicitly, e.g. to "
                     "micro_batch_size * seq_length adjusted for sequence/context parallelism."
                 )
+            if self.moe_quantized_dispatch and (self.fp8 or self.fp4):
+                if self.fp4 and not self.fp8:
+                    raise ValueError(
+                        "moe_quantized_dispatch does not support FP4 yet. "
+                        "Use --no-moe-quantized-dispatch with --fp4-format."
+                    )
+                if self.moe_apply_probs_on_input:
+                    raise ValueError(
+                        "moe_apply_probs_on_input is not supported with quantized MORI dispatch."
+                    )
+                block = 1
+                if self.fp8_recipe == Fp8Recipe.blockwise:
+                    block = 128
+                elif self.fp8_recipe == Fp8Recipe.mxfp8:
+                    block = 32
+                if block > 1 and self.hidden_size % block != 0:
+                    raise ValueError(
+                        f"hidden_size ({self.hidden_size}) must be divisible by {block} "
+                        f"for quantized MORI dispatch with fp8_recipe={self.fp8_recipe}."
+                    )
+                if not self.moe_router_padding_for_quantization and self.fp8:
+                    warnings.warn(
+                        "Quantized MORI dispatch is enabled without "
+                        "moe_router_padding_for_quantization. Enable it for grouped GEMM "
+                        "alignment with FP8/MXFP8."
+                    )
 
         if self.moe_token_dispatcher_type == "flex":
             if self.moe_pad_expert_input_to_capacity and (

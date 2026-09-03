@@ -345,14 +345,28 @@ class TEGroupedMLP(MegatronModule):
         if isinstance(tokens_per_expert, tuple):
             tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
         tokens_per_expert: list[int] = tokens_per_expert.tolist()
+        applied_quant_padding = False
+        already_quantized = False
         if self.config.fp8 or self.config.fp4:
-            actual_tokens_per_expert = tokens_per_expert
-            permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
-                permuted_local_hidden_states, tokens_per_expert
-            )
-            permuted_probs, _ = self.quantization_padding(
-                permuted_probs.unsqueeze(-1), actual_tokens_per_expert
-            )
+            from megatron.core.transformer.moe.quantized_dispatch import is_quantized_tensor
+
+            already_quantized = is_quantized_tensor(permuted_local_hidden_states)
+            if already_quantized:
+                if self.config.moe_apply_probs_on_input:
+                    raise RuntimeError(
+                        "moe_apply_probs_on_input is not supported when expert inputs are "
+                        "already quantized from MORI dispatch."
+                    )
+                permuted_probs = permuted_probs.unsqueeze(-1)
+            else:
+                applied_quant_padding = True
+                actual_tokens_per_expert = tokens_per_expert
+                permuted_local_hidden_states, tokens_per_expert = self.quantization_padding(
+                    permuted_local_hidden_states, tokens_per_expert
+                )
+                permuted_probs, _ = self.quantization_padding(
+                    permuted_probs.unsqueeze(-1), actual_tokens_per_expert
+                )
         else:
             permuted_probs = permuted_probs.unsqueeze(-1)
 
@@ -401,7 +415,7 @@ class TEGroupedMLP(MegatronModule):
         output = self._apply_bias(output, output_bias, tokens_per_expert, permuted_probs)
 
         # upad and concat the output
-        if self.config.fp8 or self.config.fp4:
+        if applied_quant_padding:
             output = self.quantization_unpadding(output, actual_tokens_per_expert)
 
         output_bias = None
