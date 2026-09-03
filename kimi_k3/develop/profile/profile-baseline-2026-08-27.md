@@ -8,6 +8,18 @@
 > was shared at the time. Both sets are here — the second is the gate, the first
 > is now a depth cross-check that happens to confirm it.
 
+
+> **Caveat added 2026-09-03 (G49).** A cold proxy run reads roughly 6x slow on
+> this node: whichever arm runs first pays aiter `.co` kernel loads and
+> hipBLASLt tuning, and the cost survives across processes rather than being
+> absorbed by the 3 discarded warmup iterations. The TE 2.12 -> 2.18 + CK
+> comparison below was taken on different days in different processes, so the
+> wall-clock **1.44x may carry a warm-cache contribution** and should be
+> re-measured with the arms adjacent and order-reversed. The 5.36x drop in
+> kernel launches is structural and is not affected. See
+> `results/weight_decay_ab.md`.
+
+
 ## The EP=8 baseline (added after the node was freed)
 
 The full configuration the gate asks for: 4 L official, **EP=8**, seq 512,

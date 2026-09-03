@@ -138,6 +138,12 @@ CPU offload works (100% of state tensors on host, verified per-tensor) but costs
 26x at this geometry; the overhead is param-bound and fixed per step, so it
 should compress at production sequence length.
 
+The AdamW/Adam decay mode was A/B'd after this table was taken (G49): reversed
+order gives 330.4 vs 330.5 ms and identical peak memory, so the mode is free and
+these numbers stand as AdamW results. That A/B also found that a **cold proxy
+run reads ~6x slow** on this node — relevant to anyone comparing arms measured
+on different days. See [`../results/weight_decay_ab.md`](../results/weight_decay_ab.md).
+
 Two notes: the flag is `--optimizer adam_dist`, not `adamw`. And
 `--optimizer dist_muon --cpu-offload` now **raises** rather than silently
 no-opping — under Muon only the 0.085% scalar group is eligible (finding A20),
