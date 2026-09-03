@@ -713,9 +713,10 @@ def get_mori_op(
 ):
     """Return a cached :class:`EpDispatchCombineOp` for this layout.
 
-    FP8 forward dispatch uses ``scale_dim > 0``; BF16 combine and both
-    backwards use ``scale_dim == 0``. MORI binds ``scale_dim`` on the op
-    config (not per launch), so the two layouts are cached as separate ops.
+    FP8 forward dispatch and combine-backward (dgrad) use ``scale_dim > 0``;
+    BF16 combine forward and dispatch-backward (activation dX) use ``scale_dim == 0``.
+    MORI binds ``scale_dim`` on the op config (not per launch), so the two
+    layouts are cached as separate ops.
     Kernel launch dtype is inferred from the runtime tensor; ``max_token_type_size``
     is 4 bytes so the BF16 combine heap is large enough when dispatch is FP8.
     IntraNode and InterNodeV1 copy caller-provided ``scales`` when ``scale_dim > 0``.
@@ -818,7 +819,7 @@ class MoriDispatch(torch.autograd.Function):
                 fp8_dispatch = False
             else:
                 payload, scales, dispatch_meta = quantize_hidden_for_dispatch(x, recipe)
-                payload = view_payload_for_mori(payload)
+                payload = view_payload_for_mori(payload, recipe, fprop_tensor=True)
                 scale_dim = mori_scale_dim(recipe, hidden_dim)
                 scale_type_size = mori_scale_type_size(recipe)
 
@@ -1015,6 +1016,7 @@ class MoriCombine(torch.autograd.Function):
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        fp8_recipe=None,
     ):
         """Forward pass: combine expert outputs back to original ranks via MORI.
 
@@ -1026,7 +1028,7 @@ class MoriCombine(torch.autograd.Function):
           ``[num_sender_tokens, topk]``, not ``dispatch_indices`` from the return tuple.
 
         Backward ``op.dispatch()`` uses ``sender_token_probs`` and
-        ``sender_token_indices``.
+        ``sender_token_indices``. Combine stays BF16; dgrad dispatch may be FP8.
         """
         op = get_mori_op(
             group=group,
@@ -1058,7 +1060,8 @@ class MoriCombine(torch.autograd.Function):
         ctx.num_local_experts = num_local_experts
         ctx.router_topk = router_topk
         ctx.max_num_tokens_per_rank = max_num_tokens_per_rank
-        ctx.fp8_dispatch = fp8_dispatch
+        ctx.fp8_dispatch = bool(fp8_dispatch) and fp8_recipe is not None
+        ctx.fp8_recipe = fp8_recipe if ctx.fp8_dispatch else None
         # Stash comm-stream flags for backward — backward can't receive new
         # arguments via apply(), so we have to carry them through ctx.
         ctx.async_finish = async_finish
@@ -1073,38 +1076,65 @@ class MoriCombine(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        """Backward pass: dispatch gradients using MORI."""
-        # Both args to `op.dispatch()` below MUST be sender-side
+        """Backward pass: dispatch dY (rowwise FP8 when enabled)."""
+        from megatron.core.transformer.moe.quantized_dispatch import (
+            mori_scale_dim,
+            mori_scale_type_size,
+            quantize_hidden_for_dispatch,
+            view_payload_for_mori,
+            wrap_rowwise,
+        )
+
         sender_token_indices, sender_token_probs = ctx.saved_tensors
+        hidden_dim = grad_output.shape[1]
+        payload = grad_output.contiguous()
+        scales = None
+        scale_dim = 0
+        scale_type_size = 1
+        dispatch_meta = None
+        fp8_dispatch = bool(getattr(ctx, "fp8_dispatch", False))
+        recipe = getattr(ctx, "fp8_recipe", None)
+        if fp8_dispatch and recipe is not None:
+            payload, scales, dispatch_meta = quantize_hidden_for_dispatch(
+                payload, recipe, fprop_tensor=False
+            )
+            payload = view_payload_for_mori(payload, recipe, fprop_tensor=False)
+            scale_dim = mori_scale_dim(recipe, hidden_dim)
+            scale_type_size = mori_scale_type_size(recipe)
+        else:
+            fp8_dispatch = False
+
         op = get_mori_op(
             group=ctx.group,
-            hidden_dim=grad_output.shape[1],
+            hidden_dim=hidden_dim,
             num_local_experts=ctx.num_local_experts,
             router_topk=ctx.router_topk,
             max_num_tokens_per_rank=ctx.max_num_tokens_per_rank,
-            data_type=grad_output.dtype,
-            fp8_dispatch=False,
-            scale_dim=0,
+            data_type=payload.dtype,
+            fp8_dispatch=fp8_dispatch,
+            scale_dim=scale_dim,
+            scale_type_size=scale_type_size,
         )
-        # Mode-2 replay: dispatch along the matching forward's cached layout.
-        dispatch_out, _, _, _, _ = _run_mori_op_on_stream(
+        dispatch_out, _, recv_scales, _, _ = _run_mori_op_on_stream(
             lambda: op.dispatch(
-                grad_output.contiguous(),
+                payload,
                 sender_token_probs.float(),
-                None,
+                scales,
                 sender_token_indices.to(torch.int32),
                 routing=ctx.routing_handle,
             ),
             ctx.async_finish,
             ctx.allocate_on_comm_stream,
         )
-        # NO clone needed here. dispatch_out is a raw view into MORI's reusable buffer, which a
-        # later MORI op will overwrite. That's safe because the next thing to read this grad is the
-        # fused unpermute's backward (in _MoriManager.combine), which runs on the same comm stream
-        # right after this op.dispatch -- so it reads the view and creates an unpermuted tensor
-        # before any later op can overwrite it.
+        grad_x = dispatch_out[: ctx.total_recv]
+        if dispatch_meta is not None and recv_scales is not None and recv_scales.numel() > 0:
+            recv_scales = recv_scales[: ctx.total_recv]
+            if recv_scales.dim() == 1:
+                recv_scales = recv_scales.reshape(grad_x.shape[0], -1)
+            grad_x = wrap_rowwise(grad_x, recv_scales, dispatch_meta)
         return (
-            dispatch_out[: ctx.total_recv],
+            grad_x,
+            None,
             None,
             None,
             None,
@@ -1232,6 +1262,7 @@ if HAVE_MORI:
         fp8_dispatch=False,
         async_finish=True,
         allocate_on_comm_stream=True,
+        fp8_recipe=None,
     ):
         """Perform fused combine using MORI EP backend.
 
@@ -1283,6 +1314,7 @@ if HAVE_MORI:
             fp8_dispatch,
             async_finish,
             allocate_on_comm_stream,
+            fp8_recipe,
         )
 
 else:

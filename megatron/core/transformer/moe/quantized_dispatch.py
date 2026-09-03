@@ -112,6 +112,51 @@ def _e4m3_dtype():
     return tex.DType.kFloat8E4M3
 
 
+def _e5m2_dtype():
+    return tex.DType.kFloat8E5M2
+
+
+def fp8_dtype_for_recipe(recipe, fprop_tensor: bool = True):
+    """TE FP8 dtype of the *quantizer / QuantizedTensor* (numeric interpretation).
+
+    Hybrid recipes use E5M2 for gradient tensors and E4M3 for forward
+    activations; every other recipe is E4M3. This governs how amax->scale is
+    computed and how the ``uint8`` FP8 storage bytes are interpreted -- it is
+    independent of the byte-transport dtype used on the MORI wire (see
+    :func:`mori_wire_dtype`).
+    """
+    if not HAVE_TE or recipe is None:
+        return _e4m3_dtype()
+    fmt = getattr(recipe, "fp8_format", None)
+    hybrid = getattr(te_recipe.Format, "HYBRID", None)
+    if fmt == hybrid and not fprop_tensor:
+        return _e5m2_dtype()
+    return _e4m3_dtype()
+
+
+def mori_wire_dtype() -> torch.dtype:
+    """A MORI-supported 1-byte dtype for FP8 byte transport.
+
+    TE stores both E4M3 and E5M2 payloads as raw ``uint8`` (rowwise and
+    columnwise alike); the E4M3/E5M2 distinction is only an interpretation of
+    those bytes. MORI dispatch is a pure token routing/all-to-all that never
+    does arithmetic on the payload, so any 1-byte dtype in MORI's kernel table
+    transports the bytes verbatim. MORI only registers E4M3 (OCP/FNUZ) and FP4,
+    so we present every FP8 payload -- including E5M2 dgrad -- as ``e4m3fnuz``
+    on the wire and reinterpret it back to the true FP8 dtype on recv. This
+    keeps E5M2 dgrad numerics intact without needing a MORI E5M2 kernel.
+    """
+    if hasattr(torch, "float8_e4m3fnuz"):
+        try:
+            _ = torch.empty(0, dtype=torch.float8_e4m3fnuz)
+            return torch.float8_e4m3fnuz
+        except Exception:  # pylint: disable=broad-except
+            pass
+    if hasattr(torch, "float8_e4m3fn"):
+        return torch.float8_e4m3fn
+    return torch.uint8
+
+
 def dispatch_block_size(recipe) -> int:
     """Hidden-dim alignment for the recipe's rowwise scales."""
     if not HAVE_TE or recipe is None:
@@ -143,24 +188,22 @@ def mori_scale_type_size(recipe) -> int:
     return torch.float32.itemsize
 
 
-def mori_payload_dtype(recipe) -> torch.dtype:
-    """Torch dtype of the quantized payload MORI communicates."""
-    del recipe
-    if hasattr(torch, "float8_e4m3fnuz"):
-        try:
-            _ = torch.empty(0, dtype=torch.float8_e4m3fnuz)
-            return torch.float8_e4m3fnuz
-        except Exception:  # pylint: disable=broad-except
-            pass
-    if hasattr(torch, "float8_e4m3fn"):
-        return torch.float8_e4m3fn
-    return torch.uint8
+def mori_payload_dtype(recipe=None, fprop_tensor: bool = True) -> torch.dtype:
+    """Torch dtype of the quantized payload MORI communicates (byte transport).
+
+    Always a MORI-supported 1-byte type; the E4M3/E5M2 numeric interpretation is
+    carried separately by the quantizer and reapplied on recv, so this is
+    independent of ``recipe``/``fprop_tensor``.
+    """
+    return mori_wire_dtype()
 
 
-def view_payload_for_mori(data: torch.Tensor) -> torch.Tensor:
-    """Reinterpret TE uint8 FP8 storage as a MORI kernel dtype (no copy)."""
+def view_payload_for_mori(
+    data: torch.Tensor, recipe=None, fprop_tensor: bool = True
+) -> torch.Tensor:
+    """Reinterpret TE uint8 FP8 storage as MORI's 1-byte wire dtype (no copy)."""
     if data.dtype in (torch.uint8, torch.int8):
-        return data.view(mori_payload_dtype(None))
+        return data.view(mori_wire_dtype())
     return data
 
 
@@ -172,14 +215,16 @@ def view_payload_for_te(data: torch.Tensor, meta: DispatchQuantMeta) -> torch.Te
     return data.view(target)
 
 
-def make_dispatch_quantizer(recipe, device: torch.device) -> Quantizer:
+def make_dispatch_quantizer(
+    recipe, device: torch.device, fprop_tensor: bool = True
+) -> Quantizer:
     """Build a rowwise-only TE quantizer from ``recipe`` (not Linear fp8_meta)."""
     if not HAVE_TE:
         raise RuntimeError("Transformer Engine is required for quantized MORI dispatch.")
     if _is_fp4_recipe(recipe):
         raise NotImplementedError("FP4 MORI dispatch is not supported yet.")
 
-    fp8_dtype = _e4m3_dtype()
+    fp8_dtype = fp8_dtype_for_recipe(recipe, fprop_tensor)
     if isinstance(recipe, te_recipe.Float8BlockScaling):
         return Float8BlockQuantizer(
             fp8_dtype=fp8_dtype,
@@ -294,13 +339,15 @@ def wrap_rowwise(
     te_scales = scales
     if meta.scales_need_transpose:
         te_scales = scales.transpose(0, 1).contiguous()
-    elif meta.kind == "mxfp8" and meta.te_scale_shape is not None:
+    elif meta.kind == "mxfp8" and meta.te_scale_shape is not None and meta.te_scale_shape[0] == T:
         padded = torch.zeros(meta.te_scale_shape, dtype=scales.dtype, device=scales.device)
         sl0 = min(T, padded.shape[0])
         sl1 = min(scales.shape[1], padded.shape[1]) if padded.dim() > 1 else scales.numel()
         if padded.dim() == 2:
             padded[:sl0, :sl1] = scales[:sl0, :sl1]
             te_scales = padded
+        else:
+            te_scales = scales.reshape(T, -1)[:T]
     if meta.kind == "mxfp8":
         return MXFP8Tensor(
             shape=data.shape,
@@ -328,7 +375,7 @@ def wrap_rowwise(
 
 
 def quantize_hidden_for_dispatch(
-    hidden: torch.Tensor, recipe
+    hidden: torch.Tensor, recipe, fprop_tensor: bool = True
 ) -> Tuple[torch.Tensor, torch.Tensor, DispatchQuantMeta]:
     """Quantize ``[T, H]`` hidden states; return payload, per-row scales, meta."""
     if hidden.numel() == 0:
@@ -347,7 +394,7 @@ def quantize_hidden_for_dispatch(
             ),
             device=hidden.device,
         )
-        quantizer = make_dispatch_quantizer(recipe, hidden.device)
+        quantizer = make_dispatch_quantizer(recipe, hidden.device, fprop_tensor=fprop_tensor)
         kind = "mxfp8" if isinstance(recipe, te_recipe.MXFP8BlockScaling) else (
             "blockwise" if isinstance(recipe, te_recipe.Float8BlockScaling) else "per_tensor"
         )
@@ -360,7 +407,7 @@ def quantize_hidden_for_dispatch(
         )
         return empty_data, empty_scales, meta
 
-    quantizer = make_dispatch_quantizer(recipe, hidden.device)
+    quantizer = make_dispatch_quantizer(recipe, hidden.device, fprop_tensor=fprop_tensor)
     quantized = quantizer(hidden.contiguous())
     data, scales, meta = unpack_rowwise(quantized)
     meta.quantizer = quantizer

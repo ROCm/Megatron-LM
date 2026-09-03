@@ -8,6 +8,7 @@ import torch
 from megatron.core.transformer.moe.moe_utils import fused_permute_with_probs, permute
 from megatron.core.transformer.moe.quantized_dispatch import (
     dispatch_block_size,
+    fp8_dtype_for_recipe,
     is_quantized_tensor,
     make_dispatch_quantizer,
     mori_scale_dim,
@@ -202,7 +203,7 @@ class TestPermuteQuantizedTokens:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 class TestBf16CombineContract:
-    def test_mori_combine_and_dispatch_bwd_force_scale_dim_zero(self):
+    def test_mori_combine_fwd_and_dispatch_bwd_stay_bf16(self):
         import inspect
 
         from megatron.core.transformer.moe.fused_a2a import MoriCombine, MoriDispatch
@@ -213,8 +214,47 @@ class TestBf16CombineContract:
         assert "scale_dim=0" in bwd_src
         assert "fp8_dispatch=False" in bwd_src
         assert "scale_dim=0" in comb_src
-        assert "scale_dim=0" in comb_bwd_src
         assert "fp8_dispatch=False" in comb_src
+        assert "fprop_tensor=False" in comb_bwd_src
+        assert "wrap_rowwise" in comb_bwd_src
+
+
+class TestDgradQuantDtype:
+    def test_hybrid_dgrad_quantizer_is_e5m2(self):
+        pytest.importorskip("transformer_engine")
+        import transformer_engine_torch as tex
+
+        te_recipe = _te_recipes()
+        recipe = te_recipe.DelayedScaling(fp8_format=te_recipe.Format.HYBRID)
+        # Forward activations are E4M3; dgrad quantizer is recipe-correct E5M2.
+        assert fp8_dtype_for_recipe(recipe, fprop_tensor=True) == tex.DType.kFloat8E4M3
+        assert fp8_dtype_for_recipe(recipe, fprop_tensor=False) == tex.DType.kFloat8E5M2
+
+    def test_e4m3_and_mxfp8_dgrad_stay_e4m3(self):
+        pytest.importorskip("transformer_engine")
+        import transformer_engine_torch as tex
+
+        te_recipe = _te_recipes()
+        delayed = te_recipe.DelayedScaling(fp8_format=te_recipe.Format.E4M3)
+        mx = te_recipe.MXFP8BlockScaling()
+        assert fp8_dtype_for_recipe(delayed, fprop_tensor=False) == tex.DType.kFloat8E4M3
+        assert fp8_dtype_for_recipe(mx, fprop_tensor=False) == tex.DType.kFloat8E4M3
+
+    def test_mori_wire_dtype_is_one_byte_and_recipe_independent(self):
+        # The wire dtype is pure byte transport: a MORI-supported 1-byte type,
+        # independent of the E4M3/E5M2 numeric interpretation.
+        from megatron.core.transformer.moe.quantized_dispatch import (
+            mori_payload_dtype,
+            mori_wire_dtype,
+        )
+
+        wire = mori_wire_dtype()
+        assert torch.empty(0, dtype=wire).element_size() == 1
+        assert wire != torch.float8_e5m2fnuz if hasattr(torch, "float8_e5m2fnuz") else True
+        te_recipe = _te_recipes()
+        hybrid = te_recipe.DelayedScaling(fp8_format=te_recipe.Format.HYBRID)
+        assert mori_payload_dtype(hybrid, fprop_tensor=False) == wire
+        assert mori_payload_dtype(hybrid, fprop_tensor=True) == wire
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -260,6 +300,44 @@ class TestGroupedLinearAlreadyQuantized:
         assert calls["n"] >= 1
         assert y_q.shape == y_x.shape
         torch.testing.assert_close(y_q, y_x, rtol=0.25, atol=0.25)
+
+    def test_quantized_grad_output_skips_dgrad_quantize(self, monkeypatch):
+        pytest.importorskip("transformer_engine")
+        import transformer_engine.pytorch.module.grouped_linear as grouped_linear_mod
+        import transformer_engine.pytorch as te
+        from transformer_engine.common.recipe import Float8BlockScaling
+
+        calls = {"n": 0}
+        orig = grouped_linear_mod.tex.split_quantize
+
+        def counted(*args, **kwargs):
+            calls["n"] += 1
+            return orig(*args, **kwargs)
+
+        monkeypatch.setattr(grouped_linear_mod.tex, "split_quantize", counted)
+
+        recipe = Float8BlockScaling()
+        in_features, out_features = 128, 256
+        m_splits = [32, 32]
+        x = torch.randn(64, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        layer = te.GroupedLinear(
+            2,
+            in_features,
+            out_features,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+        )
+        with te.fp8_autocast(enabled=True, fp8_recipe=recipe):
+            y = layer(x, m_splits)
+            calls["n"] = 0
+            dy = torch.randn_like(y)
+            q_dy = make_dispatch_quantizer(recipe, x.device, fprop_tensor=False)(dy)
+            y.backward(q_dy)
+        # Rowwise dY is already quantized; only columnwise rebuild should quantize.
+        assert calls["n"] == 1
+        assert x.grad is not None
+        assert x.grad.shape == x.shape
 
     def test_fused_permute_used_for_quantized_tokens(self):
         if fused_permute_with_probs is None:

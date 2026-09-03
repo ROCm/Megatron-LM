@@ -30,6 +30,7 @@ from megatron.core.transformer.moe.fused_a2a import (
 from megatron.core.transformer.moe.moe_utils import (
     ProcessGroupCollection,
     fused_permute_with_probs,
+    fused_unpermute,
     get_align_size_for_quantization,
     get_capacity,
     maybe_move_tensor_to_cpu,
@@ -1397,6 +1398,8 @@ class _MoriManager(_DispatchManager):
         self._raw_dispatched_probs: Optional[torch.Tensor] = None
         # Per-call routing snapshot from mori_dispatch, consumed by mori_combine.
         self._routing_handle = None
+        self._fp8_dispatch = False
+        self._fp8_recipe = None
 
         # Deferred-sync prefetch of per-local-expert counts. mori_dispatch returns
         # a device tokens_per_expert plus full recv buffers. We async-copy the counts into a pinned CPU buffer right
@@ -1443,7 +1446,13 @@ class _MoriManager(_DispatchManager):
                 )
             self.token_probs = self.token_probs.float()
 
-        from megatron.core.transformer.moe.quantized_dispatch import should_quantize_dispatch
+        from megatron.core.transformer.moe.quantized_dispatch import (
+            current_dispatch_recipe,
+            should_quantize_dispatch,
+        )
+
+        self._fp8_dispatch = should_quantize_dispatch(self.config)
+        self._fp8_recipe = current_dispatch_recipe() if self._fp8_dispatch else None
 
         (
             hidden_states,
@@ -1461,7 +1470,7 @@ class _MoriManager(_DispatchManager):
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
-            fp8_dispatch=should_quantize_dispatch(self.config),
+            fp8_dispatch=self._fp8_dispatch,
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
             kernel_type=self.kernel_type,
@@ -1545,12 +1554,17 @@ class _MoriManager(_DispatchManager):
     ) -> torch.Tensor:
         # Mirror HybridEP: fuse the unpermute into the combine node (comm stream) so MoriCombine.backward
         # can skip its clone -- its backward gather reads the grad view before a later op overwrites it.
+        # Fused unpermute backward gathers rowwise FP8 dY + scales after quantized
+        # combine-backward dispatch. Native scatter cannot move scales.
+        fused_unpermute_bwd = self.permute_fusion
+        if getattr(self, "_fp8_dispatch", False) and fused_unpermute is not None:
+            fused_unpermute_bwd = True
         hidden_states = unpermute(
             hidden_states,
             self.reversed_mapping_for_combine,
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
-            fused=self.permute_fusion,
+            fused=fused_unpermute_bwd,
         )
         assert self._routing_handle is not None, (
             "Mori combine() called without a matching dispatch(); "
@@ -1566,8 +1580,10 @@ class _MoriManager(_DispatchManager):
             self.num_local_experts,
             self.router_topk,
             self.max_num_tokens_per_rank,
+            fp8_dispatch=getattr(self, "_fp8_dispatch", False),
             async_finish=async_finish,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            fp8_recipe=getattr(self, "_fp8_recipe", None),
         )
         # Combine Function keeps its own ctx-side ref for backward.
         self._routing_handle = None
