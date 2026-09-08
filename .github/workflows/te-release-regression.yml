@@ -7,10 +7,15 @@
 #
 # Megatron itself is the revision you dispatch from (the selected workflow branch).
 # Keep that fixed when comparing TE releases so only TE changes.
+#
+# pull_request is a registrar only: GitHub will not list workflow_dispatch until this
+# file has produced at least one Actions run (or exists on the default branch).
+# The GPU suite still runs only on manual dispatch.
 
 name: TE release regression
 
 on:
+  pull_request:
   workflow_dispatch:
     inputs:
       te_version:
@@ -30,7 +35,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  register:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Register workflow for workflow_dispatch
+        run: echo "TE release regression is now visible for Actions → Run workflow."
+
   build_and_test:
+    if: github.event_name == 'workflow_dispatch'
     name: TE ${{ github.event.inputs.te_version }} unit tests
     timeout-minutes: 720
     runs-on: linux-megatron-mi325-8
