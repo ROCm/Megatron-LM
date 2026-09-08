@@ -1,28 +1,56 @@
-name: Megatron-LM CI
+# Manual TransformerEngine regression sweep through Megatron unit tests.
+#
+# Run from Actions → "TE release regression" → Run workflow.
+# Input is a TE version (e.g. 2.12). It is normalized to the ROCm/TransformerEngine
+# branch release_v<version>_rocm, that branch is built in place of the image TE,
+# then the full unit-test suite from megatron-ci.yml is executed.
+#
+# Megatron itself is the revision you dispatch from (the selected workflow branch).
+# Keep that fixed when comparing TE releases so only TE changes.
+#
+# pull_request is a registrar only: GitHub will not list workflow_dispatch until this
+# file has produced at least one Actions run (or exists on the default branch).
+# The GPU suite still runs only on manual dispatch.
+
+name: TE release regression
 
 on:
-  push:
-    branches:
-      - rocm_dev
   pull_request:
-    branches:
-      - '**'
   workflow_dispatch:
     inputs:
+      te_version:
+        description: 'ROCm TransformerEngine version (e.g. 2.12). Normalized to release_v<version>_rocm. Full branch names are accepted.'
+        required: true
+        type: string
+        default: '2.12'
       gpu_arch:
         description: 'GPU architecture to use for build/tests (e.g. gfx942)'
         required: false
+        type: string
         default: 'gfx942'
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  # Do not cancel a different TE version running on the same Megatron ref.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.te_version }}
   cancel-in-progress: true
 
 jobs:
+  register:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Register workflow for workflow_dispatch
+        run: echo "TE release regression is now visible for Actions → Run workflow."
+
   build_and_test:
-    name: Build and Test on GPU
+    if: github.event_name == 'workflow_dispatch'
+    name: TE ${{ github.event.inputs.te_version }} unit tests
     timeout-minutes: 720
     runs-on: linux-megatron-mi325-8
+    permissions:
+      contents: read
+      checks: write
+      actions: read
 
     steps:
       - name: Checkout repository
@@ -64,29 +92,39 @@ jobs:
           echo "Using GPU arch: $ARCH"
           echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
 
-      - name: Resolve TransformerEngine commit for branch
+      - name: Normalize TransformerEngine branch
         id: te-ref
+        env:
+          TE_VERSION_INPUT: ${{ github.event.inputs.te_version }}
         run: |
-          set -e
-          BRANCH=release_v2.12_rocm
-          SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
-          if [ -z "$SHA" ]; then
-            echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
+          set -euo pipefail
+          RAW="$(echo "$TE_VERSION_INPUT" | xargs)"
+          if [ -z "$RAW" ]; then
+            echo "::error::te_version input is empty"
             exit 1
           fi
-          echo "Using TransformerEngine commit: $SHA"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
-      - name: Determine whether to push image
-        id: push-image
-        run: |
-          # PR and workflow_dispatch jobs build locally only. Push (and cache export)
-          # runs on trusted branch pushes so registry tags stay branch-controlled.
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/rocm_dev" ]; then
-            echo "should_push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_push=false" >> "$GITHUB_OUTPUT"
+          # Accept 2.12, v2.12, release_v2.12, or release_v2.12_rocm.
+          RAW="${RAW#refs/heads/}"
+          RAW="${RAW#release_v}"
+          RAW="${RAW#v}"
+          RAW="${RAW%_rocm}"
+
+          BRANCH="release_v${RAW}_rocm"
+          if [[ ! "$BRANCH" =~ ^release_v[0-9][0-9.]*_rocm$ ]]; then
+            echo "::error::Could not form a TE branch from '$TE_VERSION_INPUT' (got '$BRANCH'). Expected something like 2.12 or release_v2.12_rocm."
+            exit 1
           fi
+
+          SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
+          if [ -z "$SHA" ]; then
+            echo "::error::No branch '$BRANCH' on https://github.com/ROCm/TransformerEngine"
+            exit 1
+          fi
+
+          echo "Using TransformerEngine branch: $BRANCH ($SHA)"
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
 
       - name: Login to Docker Hub
         uses: docker/login-action@v3
@@ -97,27 +135,41 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # Build the same cached CI image as megatron-ci.yml (pinned image TE).
+      # The requested TE release is swapped in the test container below so we
+      # do not bust docker layers after TE (grouped_gemm, MORI, …).
+      - name: Resolve image TransformerEngine pin
+        id: image-te-ref
+        run: |
+          set -e
+          BRANCH=release_v2.12_rocm
+          SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
+          if [ -z "$SHA" ]; then
+            echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
+            exit 1
+          fi
+          echo "Image TransformerEngine pin: $BRANCH ($SHA)"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
       - name: Build Docker image with registry cache
         uses: docker/build-push-action@v5
         with:
           context: .
           file: ./Dockerfile_rocm.ci
-          push: ${{ steps.push-image.outputs.should_push == 'true' }}
-          # Write image to disk so `docker run` does not need registry pull (works for PR builds).
+          push: false
           outputs: type=docker,dest=${{ runner.temp }}/megatron-ci-image.tar
           tags: |
-            rocm/megatron-lm-private:${{ github.sha }}
+            rocm/megatron-lm-private:te-regression-${{ github.run_id }}
           build-args: |
             PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
-            TE_COMMIT=${{ steps.te-ref.outputs.sha }}
+            TE_COMMIT=${{ steps.image-te-ref.outputs.sha }}
           cache-from: |
             type=registry,ref=rocm/megatron-lm-private:cache
-          cache-to: ${{ steps.push-image.outputs.should_push == 'true' && 'type=registry,ref=rocm/megatron-lm-private:cache,mode=max' || '' }}
 
       - name: Load image for docker run
         run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
 
-      - name: Run unit tests in container
+      - name: Swap TransformerEngine and run unit tests
         run: |
           set -euxo pipefail
           DEVICE_FLAGS="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
@@ -132,20 +184,93 @@ jobs:
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
             --shm-size=128G \
+            -e TE_BRANCH="${{ steps.te-ref.outputs.branch }}" \
+            -e TE_SHA="${{ steps.te-ref.outputs.sha }}" \
+            -e PYTORCH_ROCM_ARCH="${{ steps.gpu-arch.outputs.arch }}" \
+            -e HIP_ARCHITECTURES="${{ steps.gpu-arch.outputs.arch }}" \
+            -e NVTE_FRAMEWORK=pytorch \
+            -e NVTE_USE_HIPBLASLT=1 \
             -v "${{ github.workspace }}:/workspace/Megatron-LM" \
             --workdir /workspace/Megatron-LM \
             --name megatron-lm-container \
-            --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
-            rocm/megatron-lm-private:${{ github.sha }}
+            --entrypoint bash \
+            rocm/megatron-lm-private:te-regression-${{ github.run_id }} \
+            /workspace/Megatron-LM/.github/scripts/swap_te_and_run_unit_tests.sh
 
       - name: Publish test report
         if: always()
         uses: dorny/test-reporter@v1
         with:
-          name: Megatron-LM unit tests report
+          name: TE ${{ steps.te-ref.outputs.branch }} unit tests report
           path: output/junit_report_*.xml
           reporter: java-junit
           fail-on-error: false
+
+      - name: Write job summary
+        if: always()
+        run: |
+          set -euo pipefail
+          {
+            echo "## TransformerEngine regression"
+            echo ""
+            echo "| Setting | Value |"
+            echo "|---|---|"
+            echo "| Megatron ref | \`${{ github.ref }}\` (\`${{ github.sha }}\`) |"
+            echo "| TE input | \`${{ github.event.inputs.te_version }}\` |"
+            echo "| TE branch | [\`${{ steps.te-ref.outputs.branch }}\`](https://github.com/ROCm/TransformerEngine/tree/${{ steps.te-ref.outputs.branch }}) |"
+            echo "| TE SHA | [\`${{ steps.te-ref.outputs.sha }}\`](https://github.com/ROCm/TransformerEngine/commit/${{ steps.te-ref.outputs.sha }}) |"
+            echo "| GPU arch | \`${{ steps.gpu-arch.outputs.arch }}\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY" || true
+          import glob
+          import os
+          import xml.etree.ElementTree as ET
+
+          files = sorted(glob.glob("output/junit_report_*.xml"))
+          tests = failures = errors = skipped = 0
+          failed_suites = []
+          for path in files:
+              try:
+                  root = ET.parse(path).getroot()
+              except ET.ParseError:
+                  failed_suites.append(f"{os.path.basename(path)} (unparseable)")
+                  continue
+              suites = list(root.iter("testsuite"))
+              if not suites and root.tag == "testsuite":
+                  suites = [root]
+              for suite in suites:
+                  t = int(suite.get("tests") or 0)
+                  f = int(suite.get("failures") or 0)
+                  e = int(suite.get("errors") or 0)
+                  s = int(suite.get("skipped") or 0)
+                  tests += t
+                  failures += f
+                  errors += e
+                  skipped += s
+                  if f or e:
+                      failed_suites.append(
+                          f"{os.path.basename(path)} (failures={f}, errors={e})"
+                      )
+
+          print("### Results")
+          print("")
+          print("| Metric | Count |")
+          print("|---|---|")
+          print(f"| JUnit files | {len(files)} |")
+          print(f"| Tests | {tests} |")
+          print(f"| Failures | {failures} |")
+          print(f"| Errors | {errors} |")
+          print(f"| Skipped | {skipped} |")
+          print("")
+          if failed_suites:
+              print("### Failed suites")
+              print("")
+              for name in failed_suites:
+                  print(f"- `{name}`")
+              print("")
+          PY
 
       - name: List test reports
         if: always()
@@ -161,15 +286,15 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: megatron-lm-test-reports
+          name: te-regression-${{ steps.te-ref.outputs.branch }}-${{ github.run_id }}
           path: |
             output/unified_test_report.csv
             output/junit_report_*.xml
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
 
       - name: Cleanup Docker image
         if: always()
         run: |
-          docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
+          docker image rm rocm/megatron-lm-private:te-regression-${{ github.run_id }} || true
           rm -f "${{ runner.temp }}/megatron-ci-image.tar"
