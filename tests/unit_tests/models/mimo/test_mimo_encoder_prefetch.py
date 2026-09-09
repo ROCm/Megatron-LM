@@ -424,6 +424,11 @@ def test_real_cuda_pending_handoff_waits_for_encode():
     read_ahead_started = threading.Event()
     release_read_ahead = threading.Event()
     backbone = nn.Linear(4, 4, bias=False, device="cuda")
+    # First Linear launch can take seconds (lazy HIP/CUDA init). Warm up so the
+    # producer can reach CPU read-ahead within the wait below.
+    with torch.no_grad():
+        backbone(torch.ones(32, 4, device="cuda"))
+    torch.cuda.synchronize()
 
     class _BlockingSource:
         def __init__(self):
@@ -451,7 +456,8 @@ def test_real_cuda_pending_handoff_waits_for_encode():
         source=_BlockingSource(), encoder_name=ENCODER, feature_producer=produce, depth=1
     )
     loader.start()
-    assert read_ahead_started.wait(timeout=1)
+    # 30s: first side-stream encode can still be slow after warmup on ROCm.
+    assert read_ahead_started.wait(timeout=30)
 
     try:
         assert len(loader._ready) == 0

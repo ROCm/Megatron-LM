@@ -1749,12 +1749,18 @@ def test_cudnn_sparse_loss_masks_invalid_query_rows_for_backward(monkeypatch):
     torch.testing.assert_close(seen["grad_loss"], torch.tensor(2.0))
 
 
+@pytest.mark.failing_on_rocm(
+    "cuDNN sparse indexer loss uses NVIDIA fused DSA kernels; fake ProcessGroup is not a valid RCCL group."
+)
 def test_cudnn_sparse_loss_reduces_attention_target_across_tp(monkeypatch):
     seen = {"all_reduce_calls": 0}
 
     class FakeTPGroup:
         def size(self):
             return 2
+
+        def rank(self):
+            return 0
 
     tp_group = FakeTPGroup()
 

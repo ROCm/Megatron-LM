@@ -51,6 +51,7 @@ try:
     from transformer_engine.pytorch.graph import set_capture_end as te_set_capture_end
     from transformer_engine.pytorch.graph import set_capture_start as te_set_capture_start
     from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+    from transformer_engine.pytorch.utils import make_weak_ref
 
     HAVE_TE_GRAPHS = True
 except:
@@ -419,7 +420,7 @@ def make_weakref(ten, inplace=True):
         # transformer_engine/pytorch/utils.py.
         if torch.distributed.get_rank() == 0:
             logger.warning(
-                f"Could not create weak ref for tensor with dtype {arg.dtype}; "
+                f"Could not create weak ref for tensor with dtype {ten.dtype}; "
                 f"keeping strong ref with a potential memory overhead."
             )
 

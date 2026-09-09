@@ -30,7 +30,7 @@ from tests.unit_tests.paths import unit_test_data_dir
 from tests.unit_tests.test_utilities import Utils
 
 
-def pytest_configure(config):
+def _set_nccl_defaults():
     """Set NCCL defaults for the unit-test suite.
 
     These previously lived as ``export``s in ``tests/unit_tests/run_ci_test.sh``.
@@ -52,8 +52,7 @@ def _insert_rank_suffix(path: str, rank: str) -> str:
     return f"{root}.rank{rank}{ext}"
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_configure(config):
+def _suffix_report_paths_with_rank(config):
     """Give each distributed rank its own report file.
 
     Under ``torchrun`` every rank runs pytest and, by default, writes to the
@@ -73,6 +72,12 @@ def pytest_configure(config):
     csvpath = getattr(config.option, "csvpath", None)
     if csvpath:
         config.option.csvpath = _insert_rank_suffix(csvpath, rank)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    _set_nccl_defaults()
+    _suffix_report_paths_with_rank(config)
 
 
 def pytest_addoption(parser):

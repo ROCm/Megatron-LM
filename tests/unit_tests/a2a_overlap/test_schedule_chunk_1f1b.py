@@ -315,7 +315,7 @@ class TestA2AOverlap:
 
         # create TransformerConfig with a node-spanning MORI expert-parallel layout
         flex_backend = "mori"
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", flex_backend)
+        extra_kwargs = apply_flex_backend_kwargs({}, "flex", flex_backend)
         extra_kwargs["expert_model_parallel_size"] = ep_size
         extra_kwargs["tensor_model_parallel_size"] = tp_size
         extra_kwargs["sequence_parallel"] = tp_size > 1

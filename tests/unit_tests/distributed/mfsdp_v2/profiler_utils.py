@@ -2,6 +2,7 @@
 
 """Helpers for parsing ``torch.profiler`` events in the mfsdp_v2 tests."""
 
+import pytest
 from torch.autograd import DeviceType
 from torch.autograd.profiler_util import FunctionEvent
 from torch.profiler import profile as TorchProfiler
@@ -31,6 +32,12 @@ def collect_linked_kernels(
     # not the enclosing matched op, so walk cpu_parent up from each correlated leaf. Id 0
     # is the "no device correlation" sentinel and is skipped.
     events = prof.events()
+    # ROCm/older Kineto FunctionEvent has no linked_correlation_id (NVIDIA Kineto only).
+    if events and not hasattr(events[0], "linked_correlation_id"):
+        pytest.skip(
+            "torch.profiler FunctionEvent.linked_correlation_id is required to attribute "
+            "device kernels to CPU collectives; this PyTorch build does not provide it."
+        )
     matching_correlations: set[int] = set()
     for event in events:
         if event.device_type != DeviceType.CPU or not event.linked_correlation_id:

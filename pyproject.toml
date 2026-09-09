@@ -144,7 +144,8 @@ test = [
     "pytest-asyncio",
     "pygithub",
     "pydantic",
-    "tensorboard",
+    "tensorboard",  # torch.utils.tensorboard (RL / DSA tests)
+    "msgpack",  # inference request serialize round-trip
     "pyyaml",
     "nemo-run",
 ]
@@ -273,7 +274,7 @@ markers = [
     "failing_on_rocm_mi250: Tests failing on MI250",
     "test_on_rocm: Tests run on ROCm specifically",
     "failing_on_upstream: Failing on upsteam",
-    "experimental: marks a test as an experimental feature."
+    "experimental: marks a test as an experimental feature.",
     "launch_on_gb200: mark a unit test to be launched on GB200 hardware (4 GPUs/node)",
 ]
 

@@ -441,6 +441,12 @@ class TestMambaPrefixCachingE2E:
             ), f"req {req_id}: pc=off {off_outputs[req_id]} != pc=on {on_outputs[req_id]}"
         assert off_prefill == 3800 and on_prefill == 2008 and on_prefill < off_prefill
 
+    @pytest.mark.failing_on_rocm(
+        reason="Greedy-decode outputs diverge under ROCm bf16 rounding: async "
+        "chunked-prefill + prefix-cache vs legacy eager prefill reduce GEMMs in a "
+        "different order and flip an argmax after a few generated tokens (req 2). "
+        "Same class of NVIDIA-tuned bf16 margin as test_mamba_prefix_caching_multi_group_e2e."
+    )
     @torch.inference_mode()
     def test_async_sched_mamba_prefix_caching_with_chunked_prefill_e2e(self):
         """Async combined chunking and Mamba prefix caching matches legacy output."""

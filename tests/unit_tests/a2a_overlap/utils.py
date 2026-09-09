@@ -256,10 +256,12 @@ def get_test_config(num_layers=1, num_moe_experts=8, extra_kwargs={}, moe_groupe
 def get_valid_token_dispatcher_types():
     from megatron.core.transformer.moe.fused_a2a import HAVE_DEEP_EP, HAVE_HYBRIDEP
 
+    # MORI is omitted on purpose. Its EpDispatchCombineHandle requires a node-spanning
+    # EP group, and shmem cannot be mixed with later alltoall/DeepEP cases in the same
+    # process. Dedicated MORI 1F1B tests re-init that layout themselves.
     if HAVE_HYBRIDEP or HAVE_DEEP_EP:
         return ["alltoall", "flex"]
-    else:
-        return ["alltoall"]
+    return ["alltoall"]
 
 
 def get_valid_flex_dispatcher_backend():
@@ -286,7 +288,8 @@ def get_valid_flex_dispatcher_backends():
 
     backends = []
     primary = get_valid_flex_dispatcher_backend()
-    if primary is not None:
+    # Keep MORI out of the shared EP=4 1F1B sweep (see get_valid_token_dispatcher_types).
+    if primary is not None and primary != "mori":
         backends.append(primary)
     if HAVE_TE_EP and "ncclep" not in backends:
         backends.append("ncclep")
@@ -314,6 +317,12 @@ def apply_flex_backend_kwargs(extra_kwargs, dispatcher_type, flex_backend):
     extra_kwargs["moe_token_dispatcher_type"] = dispatcher_type
     if dispatcher_type == "flex":
         extra_kwargs["moe_flex_dispatcher_backend"] = flex_backend
+        # DeepEP and MORI fused EP backends require fp32 router probabilities.
+        extra_kwargs["moe_router_dtype"] = "fp32"
+        if flex_backend == "mori":
+            # Sender-side row capacity for MORI's symmetric-memory buffers. The test
+            # sequences are tiny (seq_len=32, batch=1), so 4096 is comfortably large.
+            extra_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         if flex_backend == "ncclep":
             # ncclep sizes a per-rank receive buffer from this and overflow hard-traps (the
             # em_scan_kernel "padded slots > max_recv_tokens_per_rank" device check). These overlap
@@ -522,20 +531,6 @@ def get_compare_tolerances(flex_backend):
     if flex_backend == "mori":
         return MORI_COMPARE_ATOL, MORI_COMPARE_RTOL
     return None, None
-
-
-def apply_dispatcher_extra_kwargs(extra_kwargs, dispatcher_type, flex_backend):
-    """Populate ``extra_kwargs`` with the config needed for the given dispatcher backend."""
-    extra_kwargs["moe_token_dispatcher_type"] = dispatcher_type
-    if dispatcher_type == "flex":
-        extra_kwargs["moe_flex_dispatcher_backend"] = flex_backend
-        # DeepEP and MORI fused EP backends require fp32 router probabilities.
-        extra_kwargs["moe_router_dtype"] = "fp32"
-        if flex_backend == "mori":
-            # Sender-side row capacity for MORI's symmetric-memory buffers. The test
-            # sequences are tiny (seq_len=32, batch=1), so 4096 is comfortably large.
-            extra_kwargs["moe_mori_max_tokens_per_rank"] = 4096
-    return extra_kwargs
 
 
 def get_valid_fp8_flags():

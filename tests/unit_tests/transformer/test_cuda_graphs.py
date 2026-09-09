@@ -512,6 +512,9 @@ class TestPackedSeqCudagraphs:
             pad_between_seqs=True,
         )
 
+    @pytest.mark.failing_on_rocm(
+        "TE fused attention (NVTE_FUSED_ATTN=1) has no ROCm backend for THD packed seq."
+    )
     @pytest.mark.parametrize("cp_size", [1, 2])
     def test_thd_capture_with_pad_between_seqs(self, cp_size):
         initialize_rng_tracker(use_te_rng_tracker=True, force_reset=True)
