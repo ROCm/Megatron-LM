@@ -140,7 +140,7 @@ jobs:
 
       - name: Publish test report
         if: always()
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         with:
           name: Megatron-LM unit tests report
           path: output/junit_report_*.xml

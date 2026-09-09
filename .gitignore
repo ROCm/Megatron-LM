@@ -4,6 +4,7 @@ build
 .coverage_*
 *.egg-info
 *~
+*.swp
 slurm*
 logs
 .vscode
@@ -25,3 +26,4 @@ docs/apidocs
 
 # Git worktrees
 .worktrees/
+.claude/worktrees/
