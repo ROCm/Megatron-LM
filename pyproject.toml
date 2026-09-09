@@ -95,12 +95,13 @@ dev = [
     "tqdm",
     "einops~=0.8",
     "tensorstore~=0.1,!=0.1.46,!=0.1.72",
-    "multi-storage-client~=0.27",
+    "multi-storage-client~=0.50",
     "opentelemetry-api~=1.33.1",
     "flash-linear-attention~=0.4.0",
     "megatron-energon[av_decode]~=7.0",
     "av",
     "flashinfer-python>=0.5.0,<0.7.0",
+    "nvidia-cudnn-frontend[cutedsl]==1.26.0",
     "wget",
     "onnxscript",
     "fastapi~=0.50",                                    # Forcing a little bit more recent version of fastapi to be compatible with pydantic 2.0
@@ -110,6 +111,8 @@ dev = [
     "quart",
     "openai[aiohttp]",
     "orjson",
+    "fast-hadamard-transform",
+    "zstandard",
 ]
 
 ### 'lts' extra is deprecated                                                   ###
@@ -124,7 +127,7 @@ te = [
 ]
 
 ssm = [
-    "mamba-ssm~=2.2",
+    "mamba-ssm",
     "causal-conv1d~=1.5",
 ]
 
@@ -160,7 +163,8 @@ build = [
     "pybind11",
     "Cython>=3.0.0",
     "torch",
-    "nvidia-mathdx",              # for TE
+    "nvidia-cudnn-frontend>=1.25.0",  # for TE
+    "nvidia-mathdx",                  # for TE
 ]
 linting = [
     "ruff~=0.9.0",
@@ -173,6 +177,7 @@ ci = ["python-gitlab", "slack-sdk", "pandas"]
 no_pypi_wheels = ["flash_mla", "emerging_optimizers"]
 
 [tool.uv]
+managed = true
 default-groups = ["linting", "build", "test"]
 no-build-isolation-package = [
     "causal-conv1d",
@@ -180,6 +185,7 @@ no-build-isolation-package = [
     "mamba-ssm",
     "transformer-engine",
     "transformer-engine-torch",
+    "fast-hadamard-transform",
 ]
 link-mode = "copy"
 # We don't define override-dependencies globally but rather locally where we need it.
@@ -191,19 +197,48 @@ override-dependencies = [
     "triton; sys_platform == 'never'",
 ]
 
+[[tool.uv.dependency-metadata]]
+name = "flash-mla"
+version = "1.0.0+9edee0c"
+requires-dist = []
+
+[[tool.uv.dependency-metadata]]
+name = "transformer-engine"
+version = "2.18.0+e7c550c5"
+requires-dist = [
+    # Cap below 2.14: pydantic 2.14 breaks langchain_core's module-level
+    # RunnablePassthrough() instantiation, which is imported transitively in
+    # downstream consumers (e.g. Megatron-Bridge via nvidia-resiliency-ext).
+    "pydantic<2.14",
+    "importlib-metadata>=1.0",
+    "packaging",
+    "torch>=2.1",
+    "einops",
+    "onnxscript",
+    "onnx",
+    "nvdlfw-inspect",
+]
+
+[[tool.uv.dependency-metadata]]
+name = "fast-hadamard-transform"
+version = "1.0.4.post1"
+requires-dist = ["torch", "packaging", "ninja"]
+
 [tool.uv.sources]
 
 flash_mla = [
-    { git = "https://github.com/deepseek-ai/FlashMLA", rev = "9edee0c022cd0938148a18e334203b0aab43aa19" },
+    { git = "https://github.com/deepseek-ai/FlashMLA", rev = "nv_dev" },
 ]
-transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", rev = "f8a01cd5ac55a6b669bacc4b222242bfff2c822a" }
+transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", rev = "e7c550c5f80636cf841a8204b1d6f85a5f3f28b7" }
 nemo-run = { git = "https://github.com/NVIDIA-NeMo/Run.git", rev = "17ae86b64d7f75653351664f5d8c9e466faede00" }
 emerging_optimizers = { git = "https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git", rev = "v0.2.0" }
+fast-hadamard-transform = { git = "https://github.com/Dao-AILab/fast-hadamard-transform.git", rev = "f134af63deb2df17e1171a9ec1ea4a7d8604d5ca" }
+mamba-ssm = { git = "https://github.com/state-spaces/mamba.git", rev = "0048fbf2e7b2f214dcbe703ea3dec2b9647595e1" }
 
 [tool.isort]
 profile = "black"                                                          # black-compatible
 line_length = 100                                                          # should match black parameters
-py_version = 310                                                           # python 3.10 as a target version
+py_version = 312                                                           # python 3.12 as a target version
 known_first_party = ["megatron"]                                           # FIRSTPARTY section
 known_third_party = ["transformer_engine"]                                 # THIRDPARTY section
 sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
@@ -239,6 +274,7 @@ markers = [
     "test_on_rocm: Tests run on ROCm specifically",
     "failing_on_upstream: Failing on upsteam",
     "experimental: marks a test as an experimental feature."
+    "launch_on_gb200: mark a unit test to be launched on GB200 hardware (4 GPUs/node)",
 ]
 
 [tool.coverage.run]
