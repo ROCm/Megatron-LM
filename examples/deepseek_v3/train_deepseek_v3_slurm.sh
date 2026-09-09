@@ -81,7 +81,7 @@ AC=full \
 TP=2 PP=16 ETP=1 EP=4 \
 GEMM_TUNING=0 \
 NVTE_CK_USES_BWD_V3=1 \
-USE_GROUPED_GEMM=true MOE_USE_LEGACY_GROUPED_GEMM=true \
+USE_GROUPED_GEMM=true \
 GPT_LAYER_IN_TE=true \
 bash examples/deepseek_v3/train_deepseekv3.sh 2>&1 | tee log_deepseek-v3.txt; \
 echo $(date)"'

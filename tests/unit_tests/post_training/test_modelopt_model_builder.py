@@ -5,7 +5,7 @@
 from argparse import Namespace
 
 import model_provider as mp
-import pytest
+
 
 def _sentinel_builder(return_value, calls):
     """Create a builder stub that records invocation."""
@@ -25,7 +25,6 @@ def _sentinel_builder(return_value, calls):
 
     return _builder
 
-@pytest.mark.failing_on_rocm
 def test_model_provider_switches_to_modelopt_builder(monkeypatch):
     """Ensure model_provider delegates to ModelOpt builder when enabled."""
     args = Namespace(record_memory_history=False, modelopt_enabled=True)
@@ -35,11 +34,17 @@ def test_model_provider_switches_to_modelopt_builder(monkeypatch):
     modelopt_result = object()
     original_result = object()
 
-    # Force ModelOpt availability and stub builders.
-    monkeypatch.setattr(mp, "has_nvidia_modelopt", True)
+    # Force ModelOpt availability and stub builders. Use raising=False so the
+    # test simulates ModelOpt being installed even in environments where the
+    # nvidia-modelopt package is absent (the name is only bound in model_provider
+    # when the real import succeeds).
+    monkeypatch.setattr(mp, "has_nvidia_modelopt", True, raising=False)
     monkeypatch.setattr(mp, "get_args", lambda: args)
     monkeypatch.setattr(
-        mp, "modelopt_gpt_mamba_builder", _sentinel_builder(modelopt_result, modelopt_calls)
+        mp,
+        "modelopt_gpt_mamba_builder",
+        _sentinel_builder(modelopt_result, modelopt_calls),
+        raising=False,
     )
 
     # original_builder should be ignored when ModelOpt is enabled.

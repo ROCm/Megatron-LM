@@ -35,6 +35,7 @@ export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-1} # Reducing 
 export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export HSA_ENABLE_SDMA=${HSA_ENABLE_SDMA:-0}
+export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 
 GPUS_PER_NODE=`python3 -c "import torch; print(torch.cuda.device_count())"`
 # cluster envs
@@ -146,19 +147,19 @@ echo ""
 OPTIMIZER_OFFLOAD=false
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
-# FP8 MoE requires TE grouped GEMM; legacy grouped_gemm does not implement FP8 expert matmuls.
-if [ "$PR" = fp8 ]; then
-    if [ "$MOE_USE_LEGACY_GROUPED_GEMM" = true ]; then
-        echo "[INFO] PR=fp8: disabling legacy grouped GEMM (TE grouped GEMM required for FP8 MoE)."
-    fi
-    MOE_USE_LEGACY_GROUPED_GEMM=false
+# Grouped-GEMM backend for MoE experts: CK grouped GEMM is faster for bf16,
+# so enable it for bf16 and keep the default multi-stream (hipBLASLt) grouped GEMM for fp8.
+# Override NVTE_USE_CK_GROUPED_GEMM to force a specific backend.
+if [ "${PR}" = bf16 ]; then
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-1}"
+else
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-0}"
 fi
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
 echo "GEMM_TUING: $GEMM_TUNING"
 echo "USE_GROUPED_GEMM: $USE_GROUPED_GEMM"
-echo "MOE_USE_LEGACY_GROUPED_GEMM: $MOE_USE_LEGACY_GROUPED_GEMM"
+echo "NVTE_USE_CK_GROUPED_GEMM: $NVTE_USE_CK_GROUPED_GEMM"
 echo "NVTE_CK_USES_BWD_V3: $NVTE_CK_USES_BWD_V3"
 echo "GPT_LAYER_IN_TE: $GPT_LAYER_IN_TE"
 echo ""
@@ -444,11 +445,8 @@ else
     USE_GROUPED_GEMM_OPTION=""
 fi
 
-if [ $MOE_USE_LEGACY_GROUPED_GEMM = true ]; then
-    USE_LEGACY_GROUPED_GEMM_OPTION="--moe-use-legacy-grouped-gemm"
-else
-    USE_LEGACY_GROUPED_GEMM_OPTION=""
-    # disable gemm tuning when using TE Group GEMM.
+# TE grouped GEMM is always used; disable gemm tuning when grouped GEMM is enabled.
+if [ $USE_GROUPED_GEMM = true ]; then
     GEMM_TUNING=0
     echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
 fi
@@ -513,6 +511,11 @@ elif [ $PR = fp8 ]; then
         exit 1
         ;;
     esac
+    # FP8 amax reduction scope. Default on: restrict amax reduction to the TP (or TP-CP) group
+    TP_ONLY_AMAX_RED="${TP_ONLY_AMAX_RED:-1}"
+    if [ "$TP_ONLY_AMAX_RED" -eq 1 ]; then
+        pr_options="$pr_options --tp-only-amax-red"
+    fi
 fi
 
 if [ $OPTIMIZER_OFFLOAD != false ] && [ $DO = false ]; then
@@ -584,7 +587,6 @@ fi
 megatron_options="  \
 	--log-throughput \
 	${ga_fusion_opt} \
-	--no-async-tensor-model-parallel-allreduce \
 	${data_args} \
         --lr ${LR} \
         --min-lr ${MIN_LR} \
@@ -623,9 +625,9 @@ megatron_options="  \
         --pipeline-model-parallel-size ${PP} \
         --num-workers 8 \
         --extra-vocab-size ${EXTRA_VOCAB_SIZE} \
-        --tokenizer-type DeepSeekV3Tokenizer \
+        --tokenizer-type HuggingFaceTokenizer \
         --tokenizer-model ${TOKENIZER_MODEL} \
-        --legacy-tokenizer \
+        --trust-remote-code \
         --dataset LLama-Pretrain-Idxmap \
         --swiglu \
         --use-te-activation-func \
@@ -640,7 +642,6 @@ megatron_options="  \
         --rotary-scaling-factor ${SCALE_FACTOR} \
         --transformer-impl ${TRANSFORMER_IMPL} \
         $USE_GROUPED_GEMM_OPTION \
-        $USE_LEGACY_GROUPED_GEMM_OPTION \
         --distributed-timeout-minutes 60 \
         --eod-mask-loss \
         ${pao_options} \

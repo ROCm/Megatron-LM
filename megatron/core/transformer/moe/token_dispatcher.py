@@ -297,11 +297,13 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
 
         tokens_per_expert = self.local_map.sum(dim=0).long().cpu()
 
-        (permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping) = permute(
-            hidden_states,
-            self.local_map,
-            num_out_tokens=tokens_per_expert.sum(),
-            fused=self.config.moe_permute_fusion,
+        permuted_local_hidden_states, _, self.reversed_local_input_permutation_mapping, _, _ = (
+            permute(
+                hidden_states,
+                self.local_map,
+                num_out_tokens=tokens_per_expert.sum().item(),
+                fused=self.config.moe_permute_fusion,
+            )
         )
 
         self.local_probs = self.local_probs.T.contiguous().masked_select(
@@ -638,6 +640,8 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             permutated_local_input_tokens,
             permuted_probs,
             self.reversed_local_input_permutation_mapping,
+            _,
+            _,
         ) = permute(
             hidden_states,
             self.routing_map,
@@ -663,6 +667,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Returns:
             A tuple of tokens and probabilities after All-to-All.
         """
+
         # Perform expert parallel AlltoAll communication
         self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
             "before_ep_alltoall", self.tokens_per_expert
@@ -1304,12 +1309,20 @@ class _DeepepManager(_DispatchManager):
 
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "DeepEP only supports float32 probs"
-        hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
+        (
+            hidden_states,
+            permuted_probs,
+            self.reversed_mapping_for_combine,
+            self.pad_offsets,
+            self.tokens_per_expert,
+        ) = permute(
             hidden_states,
             self.dispatched_routing_map,
             probs=self.dispatched_probs,
             num_out_tokens=self.tokens_per_expert.sum().item(),
             fused=self.permute_fusion,
+            tokens_per_expert=self.tokens_per_expert,
+            align_size=get_align_size_for_quantization(self.config),
         )
         if self.router_dtype == "fp64":
             permuted_probs = permuted_probs.to(torch.float64)
@@ -1322,6 +1335,7 @@ class _DeepepManager(_DispatchManager):
             restore_shape=self.hidden_shape_before_permute,
             routing_map=self.dispatched_routing_map,
             fused=self.permute_fusion,
+            pad_offsets=self.pad_offsets,
         )
         return hidden_states
 
@@ -1612,10 +1626,11 @@ class _MoriManager(_DispatchManager):
 
         self.hidden_shape_before_permute = hidden_states.shape
         assert self.dispatched_probs.dtype == torch.float32, "MORI EP only supports float32 probs"
-        # Only the fused permute path needs an exact host int for num_out_tokens;
-        # the non-fused masked_select path ignores it, so we pass None there and skip host sync for now.
+        # Both permute paths need an exact host-side num_out_tokens: the fused
+        # TE kernel to size its output, and the non-fused argsort-based permute
+        # to slice the sorted indices (see moe_utils.permute). Compute it once.
+        num_out_tokens = int(self._synced_tokens_per_expert().sum())
         if self.permute_fusion:
-            num_out_tokens = int(self._synced_tokens_per_expert().sum())
             # Clamp to >= 1 so the fused permute never emits a [0, H] tensor.
             # On a cold rank (zero tokens received under skewed routing)
             # num_out_tokens is 0; the empty permute output makes TE's fused
@@ -1627,9 +1642,13 @@ class _MoriManager(_DispatchManager):
             # routing_map has no 1s, so unpermute never reads it and the
             # restored output stays all-zero on the cold rank.
             num_out_tokens = max(num_out_tokens, 1)
-        else:
-            num_out_tokens = None
-        hidden_states, permuted_probs, self.reversed_mapping_for_combine = permute(
+        (
+            hidden_states,
+            permuted_probs,
+            self.reversed_mapping_for_combine,
+            _,
+            _,
+        ) = permute(
             hidden_states,
             self.dispatched_routing_map,
             probs=self.dispatched_probs,
