@@ -538,6 +538,10 @@ def test_sparse_mla_delta_pads_partial_sequence_tile(monkeypatch):
     torch.testing.assert_close(delta, expected)
 
 
+@pytest.mark.skipif(
+    indexer.lighting_indexer_indices is None,
+    reason="TileLang indexer kernels are not available on this platform",
+)
 def test_lighting_indexer_indices_preserves_single_head_weight_axis(monkeypatch):
     seen = {}
 

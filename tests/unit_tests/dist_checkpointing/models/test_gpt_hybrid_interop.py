@@ -780,6 +780,9 @@ class TestGPTToHybridOptimizerLoad:
         )
 
 
+@pytest.mark.failing_on_rocm(
+    "Megatron-FSDP DTensor load cannot resolve DeviceMesh process-group names on ROCm."
+)
 class TestGPTToHybridFSDPLoad:
     def teardown_method(self, method):
         Utils.destroy_model_parallel()

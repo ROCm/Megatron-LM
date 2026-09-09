@@ -163,6 +163,7 @@ from megatron.training.initialize import (
     set_jit_fusion_options,
     write_args_to_tensorboard,
 )
+from megatron.training.memory_tracer.memstats_collector import MemStatsCollector
 from megatron.training.utils import is_gtp_remat_active, is_hybrid_model
 
 # Local.

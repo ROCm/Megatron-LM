@@ -17,7 +17,10 @@ class TestA2AOverlapMori:
     """Run process-scoped MORI coverage in a fresh torchrun invocation."""
 
     def teardown_method(self, method):
-        # Keep process-scoped MORI symmetric allocations alive while TP changes.
+        # Drop the per-TP op; keep shmem alive across TP sizes until class teardown.
+        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
+
+        reset_mori_op()
         Utils.destroy_model_parallel()
 
     @classmethod

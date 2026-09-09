@@ -54,6 +54,9 @@ def test_fully_shard_symmetric_memory_matches_default_and_profiles_nccl(
     device = distributed_setup.device
     if world_size < 2:
         pytest.skip("This test requires at least 2 ranks.")
+    # ncclSymk / NCCL window registration is NVIDIA-only; RCCL has no equivalent.
+    if getattr(torch.version, "hip", None) is not None:
+        pytest.skip("NCCL symmetric-memory staging (ncclSymk / NCCL windows) is not supported on RCCL.")
 
     mesh = init_device_mesh(device.type, (world_size,))
     num_training_steps = 5
@@ -165,6 +168,11 @@ def test_fully_shard_zero_cta_moves_all_gather_to_copy_engine(distributed_setup)
     device = distributed_setup.device
     if world_size < 2:
         pytest.skip("This test requires at least 2 ranks.")
+    # Zero-CTA copy-engine all-gather is NVIDIA NCCL; RCCL does not expose this policy.
+    if not hasattr(dist.ProcessGroupNCCL, "NCCL_CTA_POLICY_ZERO"):
+        pytest.skip(
+            "NCCL_CTA_POLICY_ZERO is not available on this PyTorch/NCCL (or RCCL) build."
+        )
 
     # new_group requires a default process group. Initialize it here so this test works
     # in isolation. Do not eagerly initialize it with device_id in the shared fixture:

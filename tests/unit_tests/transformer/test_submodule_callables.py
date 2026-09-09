@@ -12,6 +12,7 @@ from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     DummyNode,
     DummyState,
+    apply_flex_backend_kwargs,
     build_data,
     compare_captures,
     deterministic_mode,
@@ -21,6 +22,18 @@ from tests.unit_tests.a2a_overlap.utils import (
     reset_model,
 )
 from tests.unit_tests.test_utilities import Utils
+
+
+def _dispatcher_types_for_submodule_callables():
+    """Dispatchers that can share this file's EP=2 / PP=4 process group.
+
+    Flex/MORI needs a node-spanning EP group and cannot be finalized then mixed
+    with alltoall in the same process (see dedicated a2a_overlap MORI tests).
+    """
+    dispatcher_types = get_valid_token_dispatcher_types()
+    if get_valid_flex_dispatcher_backend() == "mori":
+        return [t for t in dispatcher_types if t != "flex"]
+    return dispatcher_types
 
 
 def run_model_ref_with_capture(model, input_tensors, iterations):
@@ -179,10 +192,13 @@ class TestTransformerLayerSubmoduleCallables:
         pass
 
     def teardown_method(self, method):
-        pass
+        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
+
+        reset_mori_op()
+        Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type", _dispatcher_types_for_submodule_callables())
     @pytest.mark.parametrize("grouped_gemm", [True, False])
     @pytest.mark.parametrize("permute_fusion", [True, False])
     def test_1f1b_overlap(self, dispatcher_type, grouped_gemm, permute_fusion):
@@ -206,7 +222,10 @@ class TestTransformerLayerSubmoduleCallables:
             "qk_layernorm": qk_layernorm,
         }
         if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = get_valid_flex_dispatcher_backend()
+            # MORI needs moe_mori_max_tokens_per_rank; ncclep needs capacity factor.
+            apply_flex_backend_kwargs(
+                extra_kwargs, dispatcher_type, get_valid_flex_dispatcher_backend()
+            )
         config = get_test_config(extra_kwargs=extra_kwargs, moe_grouped_gemm=grouped_gemm)
         microbatches = 4
         with deterministic_mode():

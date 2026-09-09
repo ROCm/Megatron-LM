@@ -25,6 +25,7 @@ from tests.unit_tests.a2a_overlap.utils import (
     get_compare_tolerances,
     get_test_config,
     get_valid_dispatcher_configs,
+    get_valid_flex_dispatcher_backend,
     get_valid_fp8_flags,
     reinitialize_model_parallel_for_mori,
     reset_model,
@@ -501,7 +502,7 @@ class TestA2AOverlap:
         count is not a power of two.
         """
         ep_size = reinitialize_model_parallel_for_mori()
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", "mori")
+        extra_kwargs = apply_flex_backend_kwargs({}, "flex", "mori")
         extra_kwargs["expert_model_parallel_size"] = ep_size
         config = get_test_config(extra_kwargs=extra_kwargs)
         atol, rtol = get_compare_tolerances("mori")
@@ -713,7 +714,7 @@ class TestA2AOverlap:
         being interleaved into the sub-node parametrization.
         """
         ep_size = reinitialize_model_parallel_for_mori()
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", "mori")
+        extra_kwargs = apply_flex_backend_kwargs({}, "flex", "mori")
         extra_kwargs["expert_model_parallel_size"] = ep_size
         extra_kwargs["mtp_num_layers"] = 1
         extra_kwargs["mtp_loss_scaling_factor"] = 1.1

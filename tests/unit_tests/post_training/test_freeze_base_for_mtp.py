@@ -6,6 +6,9 @@ import pytest
 import torch
 from packaging.version import Version
 
+# NVIDIA ModelOpt is not shipped on ROCm.
+pytest.importorskip("modelopt", reason="NVIDIA ModelOpt is not available on ROCm")
+
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_layer_specs,
     get_gpt_mtp_block_spec,

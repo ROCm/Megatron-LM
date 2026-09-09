@@ -499,6 +499,11 @@ def test_overlaps_communication_and_compute(distributed_setup, use_symm_mem):
         dist.init_process_group(backend="nccl")
 
     if use_symm_mem:
+        # Zero-CTA is an NVIDIA NCCL option; RCCL / some PyTorch builds omit it.
+        if not hasattr(dist.ProcessGroupNCCL, "NCCL_CTA_POLICY_ZERO"):
+            pytest.skip(
+                "NCCL_CTA_POLICY_ZERO is not available on this PyTorch/NCCL (or RCCL) build."
+            )
         # Dedicated communicator with NCCL's zero-CTA policy. cta_policy is a
         # per-communicator property, so scoping it to this group leaves the rest of the
         # bucket on default-CTA symmetric-memory kernels (test_symmetric_memory.py asserts
