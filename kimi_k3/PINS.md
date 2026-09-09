@@ -123,7 +123,7 @@ whole MLA layer at seq 8192 (11.51 → 6.89 ms).
 |---|---|
 | full test suite | **288 passed, 11 skipped** |
 | anchored MLA parity vs the release | **rel-L2 5.8240e-03, cosine 0.999983** — identical to the old build |
-| CK grouped GEMM vs hipBLASLt | 1.536 ms vs 2.212 ms — **1.44x**, unchanged |
+| CK grouped GEMM vs hipBLASLt | 1.536 ms vs 2.212 ms at the microbenchmark. **End to end this is worth 1.3%, not 1.44x** — see G50 `develop/results/te_ck_warm_ab.md` |
 | MLA attention operator | 2.169 ms / 72.2 % of peak — unchanged |
 | Newton-Schulz on ROCm (**A20**) | still absent: no `newton_schulz`, `CusolverMpCtx` or `cusolvermp_ctx_create`. The finding rested on reading `cuda_only_cpp_sources` and the `_IS_HIP_EXTENSION` guard; a HEAD build now confirms it empirically |
 

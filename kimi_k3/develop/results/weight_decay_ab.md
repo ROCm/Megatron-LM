@@ -58,6 +58,9 @@ launches is structural and cannot be a caching artifact, but the wall-clock
 1.44x could carry some warm-cache contribution. Re-measure with the arms
 adjacent and order-reversed before quoting it as a pure pin/kernel win.
 
+**Done, and it did (G50, `te_ck_warm_ab.md`): warm, the figure is 1.038x, not
+1.44x. TE 2.12 runs at 1,912.6 ms rather than 2,653.5. The 1.44x is retracted.**
+
 ## Method note
 
 Order reversal is now the cheapest guard available against this, and it costs

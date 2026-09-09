@@ -9,15 +9,31 @@
 > is now a depth cross-check that happens to confirm it.
 
 
-> **Caveat added 2026-09-03 (G49).** A cold proxy run reads roughly 6x slow on
-> this node: whichever arm runs first pays aiter `.co` kernel loads and
-> hipBLASLt tuning, and the cost survives across processes rather than being
-> absorbed by the 3 discarded warmup iterations. The TE 2.12 -> 2.18 + CK
-> comparison below was taken on different days in different processes, so the
-> wall-clock **1.44x may carry a warm-cache contribution** and should be
-> re-measured with the arms adjacent and order-reversed. The 5.36x drop in
-> kernel launches is structural and is not affected. See
-> `results/weight_decay_ab.md`.
+> **Correction, 2026-09-09 (G50). Every wall-clock number on this page is
+> inflated by cold-cache overhead, and the 1.44x TE-pin speed-up is retracted.**
+>
+> A cold proxy run reads roughly 6x slow on this node (G49): the first run of a
+> given kernel set pays aiter `.co` loads and hipBLASLt tuning, and the cost
+> survives across processes rather than being absorbed by the 3 discarded warmup
+> iterations. This baseline was taken cold.
+>
+> Re-measured warm at the same EP=8 geometry, with a discarded run per
+> configuration and both orders (`results/te_ck_warm_ab.md`):
+>
+> | | published here | measured warm |
+> |---|---|---|
+> | TE 2.12 steady iteration | 2,653.5 ms | **1,912.6 ms** |
+> | TE 2.18 + CK steady iteration | 1,845.0 ms | **1,842.3 ms** |
+> | end-to-end speed-up | **1.44x** | **1.038x** |
+>
+> Attribution was also wrong: CK grouped GEMM is worth **1.3%**, the pin **2.5%**
+> — not the reverse. The 5.36x launch-count and 3.19x collective reductions come
+> from a profiled trace, not wall-clock, and stand.
+>
+> **The percentages on this page are unaffected**, because every row in a given
+> trace paid the same cold cost — the Muon step really is 21.1% of device time,
+> and `k3.attn_res` really is 0.09%. Only cross-run wall-clock comparisons are
+> void. The phase's conclusion is unchanged: the optimizer is the bottleneck.
 
 
 ## The EP=8 baseline (added after the node was freed)
@@ -28,7 +44,7 @@ The full configuration the gate asks for: 4 L official, **EP=8**, seq 512,
 | | EP=8, 4 layers | EP=4, 2 layers (first run) |
 |---|---|---|
 | cold iteration | 18.45 s | 11.48 s |
-| **steady iteration** (median of 5) | **2653.5 ms** | 1747.6 ms |
+| **steady iteration** (median of 5) — *cold, see correction* | **2653.5 ms** | 1747.6 ms |
 | spread across the 5 | 2643–2659 ms | — |
 | peak HBM per rank | **193.6 GiB** | 139.8 GiB |
 | kernel launches | 321,116 | 213,113 |
