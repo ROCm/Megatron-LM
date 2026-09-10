@@ -2,15 +2,12 @@
 #
 # Run from Actions → "TE release regression" → Run workflow.
 # Input is a TE version (e.g. 2.12). It is normalized to the ROCm/TransformerEngine
-# branch release_v<version>_rocm, that branch is built in place of the image TE,
-# then the full unit-test suite from megatron-ci.yml is executed.
+# branch release_v<version>_rocm. That SHA is passed to Dockerfile_rocm.ci as
+# TE_COMMIT, then the full unit-test suite is executed.
 #
 # Megatron itself is the revision you dispatch from (the selected workflow branch).
 # Keep that fixed when comparing TE releases so only TE changes.
-#
-# pull_request is a registrar only: GitHub will not list workflow_dispatch until this
-# file has produced at least one Actions run (or exists on the default branch).
-# The GPU suite still runs only on manual dispatch.
+# The requested TE release is passed to Dockerfile_rocm.ci as TE_COMMIT.
 
 name: TE release regression
 
@@ -135,22 +132,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Build the same cached CI image as megatron-ci.yml (pinned image TE).
-      # The requested TE release is swapped in the test container below so we
-      # do not bust docker layers after TE (grouped_gemm, MORI, …).
-      - name: Resolve image TransformerEngine pin
-        id: image-te-ref
-        run: |
-          set -e
-          BRANCH=release_v2.12_rocm
-          SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
-          if [ -z "$SHA" ]; then
-            echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
-            exit 1
-          fi
-          echo "Image TransformerEngine pin: $BRANCH ($SHA)"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-
       - name: Build Docker image with registry cache
         uses: docker/build-push-action@v5
         with:
@@ -162,14 +143,14 @@ jobs:
             rocm/megatron-lm-private:te-regression-${{ github.run_id }}
           build-args: |
             PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
-            TE_COMMIT=${{ steps.image-te-ref.outputs.sha }}
+            TE_COMMIT=${{ steps.te-ref.outputs.sha }}
           cache-from: |
             type=registry,ref=rocm/megatron-lm-private:cache
 
       - name: Load image for docker run
         run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
 
-      - name: Swap TransformerEngine and run unit tests
+      - name: Run unit tests in container
         run: |
           set -euxo pipefail
           DEVICE_FLAGS="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
@@ -184,18 +165,11 @@ jobs:
             --security-opt seccomp=unconfined \
             --security-opt apparmor=unconfined \
             --shm-size=128G \
-            -e TE_BRANCH="${{ steps.te-ref.outputs.branch }}" \
-            -e TE_SHA="${{ steps.te-ref.outputs.sha }}" \
-            -e PYTORCH_ROCM_ARCH="${{ steps.gpu-arch.outputs.arch }}" \
-            -e HIP_ARCHITECTURES="${{ steps.gpu-arch.outputs.arch }}" \
-            -e NVTE_FRAMEWORK=pytorch \
-            -e NVTE_USE_HIPBLASLT=1 \
             -v "${{ github.workspace }}:/workspace/Megatron-LM" \
             --workdir /workspace/Megatron-LM \
             --name megatron-lm-container \
-            --entrypoint bash \
-            rocm/megatron-lm-private:te-regression-${{ github.run_id }} \
-            /workspace/Megatron-LM/.github/scripts/swap_te_and_run_unit_tests.sh
+            --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
+            rocm/megatron-lm-private:te-regression-${{ github.run_id }}
 
       - name: Publish test report
         if: always()
