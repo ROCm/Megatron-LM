@@ -73,6 +73,11 @@ git checkout --detach "$TE_SHA"
 git submodule update --init --recursive
 echo "TransformerEngine at commit: $(git rev-parse HEAD)"
 test "$(git rev-parse HEAD)" = "$TE_SHA"
+# CK-JIT/aiter wrap the compiler in cxx_interceptor; a runner- or image-injected
+# CXX makes `cxx_interceptor -v` fail and aborts te_libmha_fwd. Let hipcc/clang++
+# come from ROCm instead.
+echo "CXX before unset: ${CXX-<unset>}"
+unset CXX
 pip install --no-build-isolation .
 
 echo "=== TE after swap ==="
