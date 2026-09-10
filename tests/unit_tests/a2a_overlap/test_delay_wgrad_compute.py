@@ -42,6 +42,10 @@ def _train_step(model, optimizer, data):
     return loss.detach().clone()
 
 
+@pytest.mark.failing_on_rocm(
+    "Hangs on MI325 at MoE A2A D2H stream sync (d2h_event.synchronize) during the "
+    "first train step of test_overlap_dispatch_backward_with_experts_wgrad."
+)
 class TestDelayWgradCompute:
     """Verify that overlap_dispatch_backward_with_experts_wgrad produces identical
     training behaviour (per-step loss and final weights) as the non-delayed baseline
