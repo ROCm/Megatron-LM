@@ -17,17 +17,14 @@ class TestA2AOverlapMori:
     """Run process-scoped MORI coverage in a fresh torchrun invocation."""
 
     def teardown_method(self, method):
-        # Drop the per-TP op; keep shmem alive across TP sizes until class teardown.
+        # Drop the per-TP op; keep shmem alive across TP sizes. MORI shmem is
+        # process-scoped and cannot be finalized then reinitialized, so finalize is
+        # owned solely by the session-scoped conftest fixture (finalize once at
+        # session end), never per class/method.
         from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 
         reset_mori_op()
         Utils.destroy_model_parallel()
-
-    @classmethod
-    def teardown_class(cls):
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
-
-        finalize_mori_shmem()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.skipif(
