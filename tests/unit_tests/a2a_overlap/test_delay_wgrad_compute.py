@@ -42,10 +42,6 @@ def _train_step(model, optimizer, data):
     return loss.detach().clone()
 
 
-@pytest.mark.failing_on_rocm(
-    "Hangs on MI325 at MoE A2A D2H stream sync (d2h_event.synchronize) during the "
-    "first train step of test_overlap_dispatch_backward_with_experts_wgrad."
-)
 class TestDelayWgradCompute:
     """Verify that overlap_dispatch_backward_with_experts_wgrad produces identical
     training behaviour (per-step loss and final weights) as the non-delayed baseline
@@ -60,7 +56,19 @@ class TestDelayWgradCompute:
         )
 
     def teardown_method(self, method):
-        Utils.destroy_model_parallel()
+        try:
+            from megatron.core.transformer.moe.fused_a2a import reset_mori_op
+            reset_mori_op()
+        finally:
+            Utils.destroy_model_parallel()
+
+    @classmethod
+    def teardown_class(cls):
+        try:
+            from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
+            finalize_mori_shmem()
+        except Exception:
+            pass
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     @pytest.mark.parametrize("shared_expert_intermediate_size", [None, 512])

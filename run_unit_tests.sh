@@ -3,6 +3,9 @@
 set -u -o pipefail
 set -x
 
+# Number of ROCm/HIP hardware queues each process may use.
+export GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-8}
+
 NUM_GPUS=$(python -c "import torch; print(torch.cuda.device_count())")
 export HIP_VISIBLE_DEVICES=$(seq -s, 0 $((NUM_GPUS-1)))
 echo "Number of GPUs: $NUM_GPUS"
