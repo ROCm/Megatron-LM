@@ -96,12 +96,15 @@ ENV NVTE_FRAMEWORK=pytorch
 ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH_OVERRIDE}
 ENV NVTE_USE_HIPBLASLT=1
 ENV NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
+# Skip aiter's cxx_interceptor -v ABI probe (CK-JIT wrapper is not a real clang).
+ENV TORCH_DONT_CHECK_COMPILER_ABI=1
 
 RUN git clone --recursive https://github.com/ROCm/TransformerEngine.git && \
     cd TransformerEngine && \
     git checkout ${TE_COMMIT} && \
     git submodule update --init --recursive && \
     echo "TransformerEngine at commit:" $(git rev-parse HEAD) && \
+    unset CXX && \
     pip install --no-build-isolation .
 
 RUN git clone https://github.com/caaatch22/grouped_gemm.git &&\

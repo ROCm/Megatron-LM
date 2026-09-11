@@ -173,7 +173,7 @@ jobs:
 
       - name: Publish test report
         if: always()
-        uses: dorny/test-reporter@v3
+        uses: dorny/test-reporter@v1
         with:
           name: TE ${{ steps.te-ref.outputs.branch }} unit tests report
           path: output/junit_report_*.xml
