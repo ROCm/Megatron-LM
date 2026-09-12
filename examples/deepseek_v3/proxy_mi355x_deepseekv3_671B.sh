@@ -52,7 +52,7 @@ export ENABLE_MORI=true
 export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true
 
-export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
+export CE_FUSION_ARGS="--cross-entropy-fusion-impl native --cross-entropy-loss-fusion"
 export GA_FUSION=true
 
 export PROFILE_START=12
