@@ -102,3 +102,55 @@ region rather than silently going blind.
 - `anchor_moe.py` still does not compare expert output against released weights.
   The gate above anchors against the formula, not the checkpoint; a released-weight
   expert parity remains the stronger check and is not done.
+
+---
+
+# G54 — the open item, closed: expert parity against released weights
+
+> `python -m kimi_k3.tools.anchor_expert --expert 0 --weights /tmp/k3_expert0.pt`
+> Raw: `results/raw/anchor_expert{0,1}.json`.
+
+G53 anchors our activation against the released *formula*, transcribed by us. The
+stronger check — the release's own module on the release's own weights — is what
+`anchor_moe.py` never did, and its absence is how G52 survived five phases.
+
+`anchor_moe.py` skipped it for a stated reason: dequantised experts are ~59 GB per
+layer, so the release block and ours cannot both be resident. **That reasoning
+over-scoped the problem.** A single expert is enough to validate the activation,
+and the released expert is MXFP4, so `w1/w3/w2` plus scales is **17 MiB** by ranged
+read (`tools/fetch_release_tensors.py`) — against the 49.25 GiB the earlier
+anchored-parity work fetched. Two experts cost 34 MiB.
+
+Running the release's `KimiBlockSparseMLP` + `SituAndMul` (HF moonshotai/Kimi-K3)
+and ours on the same dequantised weights and input:
+
+| expert | input std | \|gate\|max | rel-L2 | cosine | GeGLU | SwiGLU |
+|---|---|---|---|---|---|---|
+| 0 | 1.0 | 7.30 | **0.0** | **1.0** | 2.69e-01 | 1.97e-01 |
+| 1 | 1.0 | 6.71 | **0.0** | **1.0** | 2.67e-01 | 1.97e-01 |
+| 0 | 3.0 | 21.90 | **0.0** | 0.99999988 | 1.00e+00 | 9.98e-01 |
+
+Exact, on both experts. Confirmed against the release config rather than assumed:
+`text_config.hidden_act = situ`, `activation_situ_beta = 4.0`,
+`activation_situ_linear_beta = 25.0`, and the fetched shapes
+(`w1` packed `[3072, 1792]` -> `[3072, 3584]`, `w2` `[3584, 3072]`) confirm the
+experts live in the **latent** 3584 space, not the 7168 hidden.
+
+At input std 3.0 the pre-activations reach `|gate| = 21.9`, well inside SiTU's
+tanh-limited regime, and the wrong activations are off by ~100% while ours stays
+at 0.0 — the discriminating power grows with scale exactly as G53 predicted.
+
+Gated by `test_expert_matches_the_release_on_released_weights`, which skips with
+the fetch command in its reason when the weight file is absent, and asserts
+`discriminating` before asserting agreement so it cannot pass blind.
+
+## Still not covered
+
+- **One expert of 896, one layer of 93.** The activation is shared, so this
+  validates the activation; it does not validate per-expert weight loading or the
+  dispatch/combine path end to end.
+- The **dense** FFN (layer 1, intermediate 33792) and the **shared** experts now
+  get `SituGLU` from the spec walk, and the G53 gate covers the routed path in both
+  grouped and sequential form, but neither has been anchored against released
+  weights.
+- Nothing here re-validates the convergence results that predate G52.

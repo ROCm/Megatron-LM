@@ -8,6 +8,9 @@ written reference, measured estimator error, and the behaviour it exists to
 produce -- and never on a claim of release parity.
 """
 
+import os
+import sys
+import json
 import pytest
 import torch
 
@@ -306,4 +309,49 @@ def test_expert_ffn_matches_the_released_situ_activation(single_rank_world, grou
         assert bad_rel > 1e-1, (
             f"{wrong.__name__} is indistinguishable from SiTU here (rel-L2 {bad_rel:.3e}); "
             "the gate would not catch the G52 regression"
+        )
+
+
+RELEASED_EXPERT = "/tmp/k3_expert0.pt"
+
+
+@pytest.mark.skipif(
+    not os.path.exists(RELEASED_EXPERT),
+    reason=f"needs a released expert at {RELEASED_EXPERT}; fetch with "
+           "`python -m kimi_k3.tools.fetch_release_tensors --shard "
+           "model-00002-of-000096.safetensors --match layers.1.block_sparse_moe.experts.0. "
+           "--max-gib 0.1 --out /tmp/k3_expert0.pt` (~17 MiB, ranged read)",
+)
+def test_expert_matches_the_release_on_released_weights():
+    """G54: the strong form of the G53 gate -- released weights, release module.
+
+    G53 anchors our activation against the released *formula*, transcribed by us.
+    This runs the release's own `KimiBlockSparseMLP` + `SituAndMul` on the release's
+    own dequantised MXFP4 weights, which is the check `anchor_moe.py` never did and
+    whose absence let G52 survive five phases.
+
+    Kept out of the default tier only because it needs a weight file the repo does
+    not carry; it is not slow (~17 MiB, one expert).
+    """
+    import subprocess
+
+    out = subprocess.run(
+        [sys.executable, "-m", "kimi_k3.tools.anchor_expert",
+         "--weights", RELEASED_EXPERT, "--expert", "0", "--scale", "1.0"],
+        capture_output=True, text=True, timeout=900,
+        env={**os.environ, "PYTHONPATH": f"/tmp/tf4562:{os.getcwd()}"},
+    )
+    assert out.returncode == 0, f"anchor_expert failed:\n{out.stderr[-1500:]}"
+    row = json.loads(out.stdout[out.stdout.index("{"):])
+
+    assert row["discriminating"], (
+        f"|gate|max {row['gate_abs_max']} never reached beta {row['situ_beta']}; "
+        "SiTU and SwiGLU agree below that, so this would prove nothing"
+    )
+    assert row["rel_l2"] < 1e-5, f"expert disagrees with the release: rel-L2 {row['rel_l2']:.3e}"
+    assert row["cosine"] > 1 - 1e-6, f"cosine {row['cosine']}"
+    for name, bad in row["wrong_activation_rel_l2"].items():
+        assert bad > 1e-1, (
+            f"{name} is within {bad:.3e} of the release here; the gate would not "
+            "catch a regression back to it"
         )

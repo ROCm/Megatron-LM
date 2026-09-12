@@ -1,0 +1,14 @@
+{
+  "expert": 1,
+  "tokens": 64,
+  "input_scale": 1.0,
+  "gate_abs_max": 6.708,
+  "situ_beta": 4.0,
+  "rel_l2": 0.0,
+  "cosine": 1.0,
+  "wrong_activation_rel_l2": {
+    "geglu": 0.2672991454601288,
+    "swiglu": 0.19731630384922028
+  },
+  "discriminating": true
+}
