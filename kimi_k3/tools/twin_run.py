@@ -74,8 +74,15 @@ def run(preset: str, steps: int, seed: int, **overrides) -> List[float]:
     )
 
 
-def noise_band(preset: str, steps: int, seeds: Sequence[int] = (0, 1, 2)) -> Dict:
-    """Run the same configuration under several seeds and measure the spread."""
+def noise_band(preset: str, steps: int, seeds: Sequence[int] = (0, 1, 2, 3, 4, 5)) -> Dict:
+    """Run the same configuration under several seeds and measure the spread.
+
+    Six seeds, not three (G55). The band is a **max over pairs**, so few seeds
+    sample that maximum badly and it reads low. Measured: the three-seed band puts
+    `final_delta` at 0.0593 and the six-seed band at 0.0794, +34%, and **16 of the
+    20 possible three-seed subsets would have wrongly failed the `kda_backend`
+    twin** at 0.0754. Three seeds is three pairs; six is fifteen.
+    """
     curves = {seed: run(preset, steps, seed) for seed in seeds}
     pairs = {
         f"{a}v{b}": compare(curves[a], curves[b]) for a, b in itertools.combinations(seeds, 2)
@@ -99,6 +106,11 @@ AXES = (
     # band is still the right yardstick -- the question is whether a change that
     # costs 1.75x on the largest row moves the loss further than reseeding does.
     ("per_head_muon", {"k3_per_head_muon": False}, {"k3_per_head_muon": True}),
+    # Also not a no-op, and deliberately so: this is the G52 fix. Before it, every
+    # preset-built model ran GeGLU on the routed experts instead of the released
+    # SiTU-GLU. Included as a control -- if wiring the correct activation moved the
+    # loss no further than reseeding does, the gate would not be measuring anything.
+    ("situ_activation", {"k3_situ_activation": False}, {"k3_situ_activation": True}),
 )
 
 
@@ -159,7 +171,8 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="tiny")
     ap.add_argument("--steps", type=int, default=40)
-    ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
+    ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5],
+                    help="six by default; three under-samples a max-over-pairs band (G55)")
     ap.add_argument("--axes", nargs="*", default=[a[0] for a in AXES])
     ap.add_argument("--out")
     args = ap.parse_args()

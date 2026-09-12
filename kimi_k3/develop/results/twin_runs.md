@@ -88,3 +88,70 @@ re-measured at that geometry — a band measured here says nothing about one the
 The comparison is also same-seed by construction: the twin shares its
 initialisation with its partner, while the band's runs do not, which makes the
 band the more permissive of the two comparisons.
+
+---
+
+# G55 — re-run under SiTU, and the three-seed band was too narrow
+
+> `python -m kimi_k3.tools.twin_run --preset tiny --steps 40 --seeds 0 1 2 3 4 5`
+> Raw: `results/raw/twin_run_tiny_situ.json` (3 seeds),
+> `results/raw/twin_run_tiny_situ_6seed.json` (6 seeds).
+
+Every twin verdict before this ran **GeGLU** experts (G52). The band is a property
+of a configuration, so it was re-measured rather than reused -- the same rule this
+document already applied across the eager->fla flip.
+
+## The band
+
+| seeds | pairs | max Δ | mean Δ | final Δ |
+|---|---|---|---|---|
+| 0,1,2 | 3 | 0.2911 | 0.0900 | 0.0593 |
+| **0..5** | **15** | **0.3114** | **0.1271** | **0.0794** |
+
+The three-seed estimate is low on every statistic, worst on `final_delta` (+34%).
+That is structural, not luck: the band is a **max over pairs**, and three seeds
+samples that maximum three times. Across the 15 pairs the median `final_delta` is
+0.0465 against a max of 0.0794, so the tail the band is trying to capture is well
+above typical.
+
+## The axes, against the six-seed band
+
+| axis | max Δ | mean Δ | final Δ | inside band |
+|---|---|---|---|---|
+| `recompute` | **0.0** | **0.0** | **0.0** | yes -- bitwise, 4 checkpoint calls vs 0 |
+| `kda_backend` | 0.1702 | 0.0266 | 0.0754 | **yes** |
+| `per_head_muon` | 0.3598 | 0.1721 | 0.1044 | no (max and mean both outside) |
+| `situ_activation` | 0.1776 | 0.0709 | 0.0892 | no (`final` only) |
+
+`recompute` is bitwise identical, which is the correct answer and unchanged by
+SiTU -- recompute cannot alter arithmetic. `kda_backend` is inside: eager vs fla is
+still not shown to move the model.
+
+## The near-miss
+
+Against the three-seed band `kda_backend` read **outside** it, on `final_delta`
+alone (0.0754 vs 0.0593), and it would have been written up as a finding: "SiTU
+tightened run-to-run variance and exposed a pre-existing eager/fla difference". It
+is not true. With a properly sampled band the twin is inside.
+
+Quantified, because one near-miss does not establish how bad the default was:
+**16 of the 20 possible three-seed subsets produce a band that fails
+`kda_backend`.** The default was wrong 80% of the time on this axis. It is now six
+seeds, and the docstring carries the measurement.
+
+## The control, and an honest caveat about it
+
+`situ_activation` (the G52 fix itself) was added as a control: if wiring the
+correct activation moved the loss no further than reseeding does, the tool would
+not be measuring anything. It lands outside the band -- but **only on
+`final_delta`** (0.0892 vs 0.0794), and inside on max and mean. That is a weaker
+control than a single-statistic reading suggests, and by the standard applied to
+`kda_backend` above it is close enough to the boundary to deserve the same
+scepticism. What can be said is that the fix is *not* clearly inside the band; a
+stronger statement needs more seeds or more steps.
+
+## Scope
+
+Tiny preset, 40 steps, fixed batch, fp32. This re-validates the twin axes under
+the corrected activation. It does **not** re-validate the QAT convergence study or
+the flatness probes, which also predate G52.
