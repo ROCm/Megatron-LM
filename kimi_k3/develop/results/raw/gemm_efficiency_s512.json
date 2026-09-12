@@ -1,0 +1,65 @@
+{
+  "fwd_bwd": {
+    "aten::matmul": {
+      "calls": 78,
+      "ms": 0.0
+    },
+    "aten::mm": {
+      "calls": 123,
+      "ms": 12.44
+    },
+    "aten::bmm": {
+      "calls": 31,
+      "ms": 1.42
+    }
+  },
+  "optimizer_step": {
+    "aten::matmul": {
+      "calls": 3400,
+      "ms": 0.0
+    },
+    "aten::mm": {
+      "calls": 3400,
+      "ms": 436.53
+    },
+    "aten::addmm": {
+      "calls": 6800,
+      "ms": 947.98
+    }
+  },
+  "fwd_bwd_kernels": {
+    "other/elementwise": {
+      "ms": 724.23,
+      "calls": 4947
+    },
+    "GEMM": {
+      "ms": 77.1,
+      "calls": 316
+    },
+    "collectives": {
+      "ms": 201.25,
+      "calls": 68
+    },
+    "attention": {
+      "ms": 0.15,
+      "calls": 5
+    }
+  },
+  "optimizer_kernels": {
+    "other/elementwise": {
+      "ms": 2457.21,
+      "calls": 33431
+    },
+    "collectives": {
+      "ms": 720.89,
+      "calls": 4
+    },
+    "GEMM": {
+      "ms": 1235.29,
+      "calls": 10210
+    }
+  },
+  "preset": "4L",
+  "ep": 8,
+  "seq": 512
+}

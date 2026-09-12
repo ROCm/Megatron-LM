@@ -1,4 +1,16 @@
-"""Achieved TFLOP/s and GB/s for the kernels K3 actually runs.
+"""Achieved TFLOP/s and GB/s for **isolated** kernels at K3's shapes.
+
+.. warning::
+
+   This measures standalone ``a @ b`` calls, not the model running, and its
+   ``m`` comes from ``--seq`` (default 8192) while the proxy traces run at seq
+   512. Its numbers are therefore an upper bound on machine capability at these
+   shapes -- **not** K3's achieved efficiency. Measured in situ the same GEMMs
+   reach 44-93%, and the routed experts 24-29%, against the 92-99% and 48-55%
+   this file reports. The expert rows here are a *dense* stand-in and do not
+   exercise the grouped GEMM at all. See ``develop/results/gemm_efficiency.md``
+   (G51) before quoting anything from here.
+
 
     python -m kimi_k3.tools.roofline
 

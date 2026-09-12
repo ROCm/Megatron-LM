@@ -222,6 +222,14 @@ def main() -> None:
                     help="run with the chunked AttnRes mixer (G44/G45)")
     ap.add_argument("--attn-res-chunk", type=int, default=4096)
     ap.add_argument("--trace-dir", default=None)
+    ap.add_argument("--record-shapes", action="store_true",
+                    help="record input shapes for every op, so per-GEMM efficiency can "
+                         "be derived. Note TE-dispatched GEMMs surface as raw Tensile "
+                         "kernels with no aten parent and carry no shapes regardless.")
+    ap.add_argument("--with-stack", action="store_true",
+                    help="record the Python/C++ call stack per op. Expensive -- inflates "
+                         "both the trace size and the CPU time of the traced iteration, "
+                         "so do not compare its wall clock against an untraced run.")
     ap.add_argument("--no-trace", action="store_true",
                     help="skip the profiled iteration; the profiler inflates peak memory, "
                          "so any memory-scaling measurement must not include it")
@@ -289,7 +297,13 @@ def main() -> None:
             raise _Done()
         from torch.profiler import ProfilerActivity, profile
 
-        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                     record_shapes=args.record_shapes,
+                     with_stack=args.with_stack,
+                     with_flops=args.record_shapes,
+                     experimental_config=(
+                         torch._C._profiler._ExperimentalConfig(verbose=True)
+                         if args.with_stack else None)) as prof:
             traced = time.perf_counter()
             one_step(ddp, opt, vocab, args.seq, args.iterations)
             torch.cuda.synchronize()
@@ -297,9 +311,20 @@ def main() -> None:
         row["trace"] = summarise(prof, traced_ms)
         if args.trace_dir and rank == 0:
             os.makedirs(args.trace_dir, exist_ok=True)
-            path = os.path.join(args.trace_dir, f"proxy_ep{args.ep}_{args.preset}_rank0.json")
+            suffix = ("_shapes" if args.record_shapes else "") + ("_stack" if args.with_stack else "")
+            path = os.path.join(
+                args.trace_dir, f"proxy_ep{args.ep}_{args.preset}_rank0{suffix}.json")
             prof.export_chrome_trace(path)
             row["chrome_trace"] = path
+            if args.with_stack:
+                # Flat text of the same data, since a stack-annotated chrome trace is
+                # awkward to read for "who called this".
+                stacks = os.path.join(args.trace_dir, f"proxy_ep{args.ep}_{args.preset}_rank0.stacks")
+                try:
+                    prof.export_stacks(stacks, "self_cuda_time_total")
+                    row["stacks"] = stacks
+                except Exception as exc:      # export_stacks needs with_stack at capture
+                    row["stacks_error"] = str(exc)[:120]
 
         row["resolved"] = resolved_dispatcher(model.config)
         from kimi_k3.tools.ep_smoke import routing_load
