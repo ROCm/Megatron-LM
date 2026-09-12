@@ -137,6 +137,15 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     k3_situ_beta: float = 4.0
     k3_situ_linear_beta: float = 25.0
+    k3_situ_activation: bool = True
+    """Use the released SiTU-GLU on every gated MLP (routed experts, shared
+    experts and the leading dense FFN).
+
+    Left as a switch only so the gate can A/B it. Turning it off does **not**
+    give a K3 model: core then falls back to `activation_func` through its own
+    GLU, which was silently GeGLU for every preset-built model before G52 --
+    `presets.py` sets `gated_linear_unit=True` but never `activation_func`, and
+    core's default is `F.gelu`."""
     k3_router_quantile_balancing: bool = True
     k3_qb_num_bins: int = 1024
 
@@ -149,6 +158,21 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     """Optional (kda_stride, total) shorthand used by the tiny preset."""
 
     def __post_init__(self):
+        if self.k3_situ_activation:
+            import torch.nn.functional as F   # local: this module imports no torch at scope
+
+            # Must precede super(): core validates these against each other, and
+            # `use_te_activation_func` is what routes the *whole* [gate|up] tensor
+            # to our module instead of through core's GLU (see moe/situ.SituGLU).
+            self.use_te_activation_func = True
+            self.bias_activation_fusion = False
+            # Unused on this path -- self.activation_func is replaced by the
+            # SituGLU module -- but core asserts it is one of gelu/silu/relu
+            # (transformer_config.py:1730), so it has to hold a legal value.
+            self.activation_func = F.silu
+            self.gated_linear_unit = True
+            self.activation_func_fp8_input_store = False
+
         super().__post_init__()
 
         if self.k3_routed_expert_hidden_size and self.num_moe_experts:

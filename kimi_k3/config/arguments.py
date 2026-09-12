@@ -69,6 +69,11 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     group.add_argument("--k3-latent-moe-use-norm", action=argparse.BooleanOptionalAction,
                        default=True, help="RMSNorm on the combined expert output before up-proj")
     group.add_argument("--k3-first-k-dense-replace", type=int, default=1)
+    group.add_argument("--k3-situ-activation", action=argparse.BooleanOptionalAction,
+                       default=True,
+                       help="SiTU-GLU on every gated MLP. Off does NOT give a K3 model -- "
+                            "core then falls back to its own GLU, which was silently GeGLU "
+                            "for preset-built models before G52.")
     group.add_argument("--k3-situ-beta", type=float, default=4.0)
     group.add_argument("--k3-situ-linear-beta", type=float, default=25.0)
     group.add_argument("--k3-router-quantile-balancing", action=argparse.BooleanOptionalAction,

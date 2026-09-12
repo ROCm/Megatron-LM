@@ -114,7 +114,47 @@ def _layer_spec_for(config, entry: K3LayerPlan) -> ModuleSpec:
 
         spec.submodules.mlp.module = K3MoELayer
         spec.submodules.mlp.submodules.router = QuantileBalancingRouter
+    if getattr(config, "k3_situ_activation", False):
+        _use_situ(spec.submodules.mlp)
     return spec
+
+
+def _use_situ(mlp_spec) -> int:
+    """Point every gated MLP under `mlp_spec` at SiTU-GLU. Returns how many.
+
+    G52: before this, no preset-built model computed SiTU at all. `situ_glu` was
+    implemented and unit-tested but never reached the model -- routed experts ran
+    **GeGLU** (core's `activation_func` default is `F.gelu`, and `presets.py` sets
+    only `gated_linear_unit`), while the `--args` path ran SwiGLU from
+    `k3_config_builder.py:42`. Anchored parity covered MLA, KDA, AttnRes and
+    routing, but never the expert FFN, so nothing caught it.
+
+    Walks routed experts, shared experts and the leading dense FFN, because the
+    release applies `hidden_act: situ` to all of them.
+    """
+    from kimi_k3.moe.situ import SituGLU
+
+    n = 0
+    subs = getattr(mlp_spec, "submodules", None)
+    if subs is None:
+        return 0
+    if hasattr(subs, "activation_func"):          # a plain (dense) MLP
+        subs.activation_func = SituGLU
+        return 1
+    for name in ("experts", "shared_experts"):    # MoELayer
+        entry = getattr(subs, name, None)
+        if entry is None:
+            continue
+        # `experts` is a functools.partial(TEGroupedMLP, submodules=...); the
+        # shared-expert entry is a ModuleSpec. Both carry a submodules dataclass.
+        inner = getattr(entry, "keywords", {}).get("submodules") if hasattr(entry, "keywords") \
+            else getattr(entry, "submodules", None)
+        if inner is not None and hasattr(inner, "activation_func"):
+            inner.activation_func = SituGLU
+            n += 1
+        elif inner is not None and hasattr(inner, "mlp"):
+            n += _use_situ(inner.mlp)
+    return n
 
 
 def get_k3_layer_specs(

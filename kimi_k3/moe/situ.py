@@ -27,3 +27,31 @@ def situ_glu(
     if linear_beta is not None:
         up = linear_beta * torch.tanh(up / linear_beta)
     return (situ_a * up).to(gate_up.dtype)
+
+
+class SituGLU(torch.nn.Module):
+    """SiTU-GLU as a core activation-module, for `MLPSubmodules.activation_func`.
+
+    Core's own GLU path cannot express SiTU. It computes
+    ``activation_func(gate) * (up + glu_linear_offset)`` (`mlp.py:324`,
+    `moe/experts.py:310`), which gives the *up* branch no non-linearity -- but
+    SiTU applies ``linear_beta * tanh(up / linear_beta)`` to it. So an
+    ``activation_func`` callable, which only ever sees the gate half, is
+    structurally incapable of producing SiTU.
+
+    The seam that does work is `config.use_te_activation_func`: on that path both
+    `MLP.forward` (`mlp.py:268-271`) and `TEGroupedMLP.bias_act_func`
+    (`moe/experts.py:274`) hand the **whole** concatenated ``[gate | up]`` tensor
+    to `self.activation_func` and do no chunking of their own, which is exactly
+    what `situ_glu` wants.
+    """
+
+    def __init__(self, config=None):
+        super().__init__()
+        self.beta = getattr(config, "k3_situ_beta", SITU_BETA) if config else SITU_BETA
+        self.linear_beta = (
+            getattr(config, "k3_situ_linear_beta", SITU_LINEAR_BETA) if config else SITU_LINEAR_BETA
+        )
+
+    def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        return situ_glu(gate_up, beta=self.beta, linear_beta=self.linear_beta)

@@ -39,6 +39,11 @@ def k3_config_from_args(args: Any, **overrides) -> KimiK3TransformerConfig:
             kw[name] = value
 
     if getattr(args, "swiglu", False):
+        # Only reachable with --no-k3-situ-activation: otherwise __post_init__
+        # replaces activation_func with the SiTU module. Kept because --swiglu is
+        # core's own flag and silently ignoring it would be worse. Note this branch
+        # is what made the args path compute SwiGLU while every preset-built model
+        # computed GeGLU -- the divergence G52 closes.
         kw["activation_func"] = F.silu
         kw["gated_linear_unit"] = True
 

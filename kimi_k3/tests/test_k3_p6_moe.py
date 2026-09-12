@@ -215,3 +215,95 @@ def test_core_bias_update_dispatches_to_the_router():
     assert len(called) == len(routers), (
         f"core reached {len(called)} of {len(routers)} routers; the dispatch is not installed"
     )
+
+
+def _released_expert_reference(x, w1, w3, w2, beta=4.0, linear_beta=25.0):
+    """`w2( situ_glu([w1 x | w3 x]) )` -- the released SituAndMul expert, in fp32.
+
+    Deliberately written out here rather than calling `situ_glu`, so a regression
+    in `situ_glu` itself cannot be cancelled out by the same bug on both sides.
+    """
+    gate = torch.nn.functional.linear(x.float(), w1.float())
+    up = torch.nn.functional.linear(x.float(), w3.float())
+    situ_a = beta * torch.tanh(gate / beta) * torch.sigmoid(gate)
+    up = linear_beta * torch.tanh(up / linear_beta)
+    return torch.nn.functional.linear(situ_a * up, w2.float())
+
+
+@pytest.mark.parametrize("grouped", [False, True])
+def test_expert_ffn_matches_the_released_situ_activation(single_rank_world, grouped):
+    """G53 gate: the model's routed expert must compute SiTU-GLU, not Ge/SwiGLU.
+
+    This is the gate that was missing. Anchored parity (G32) covered gated MLA,
+    KDA, AttnRes and routing but never the expert FFN, so for the whole of P6-P11
+    every preset-built model ran **GeGLU** on all 896 experts -- core's
+    `activation_func` default is `F.gelu` and `presets.py` sets only
+    `gated_linear_unit`. `situ_glu` existed and its unit tests passed; it was
+    simply never wired in (G52). A correct-but-unreachable function with a green
+    test is exactly what this asserts against.
+    """
+    from kimi_k3.config.k3_config_builder import config_from_preset
+    from kimi_k3.config.presets import preset
+    from kimi_k3.moe.situ import SituGLU
+
+    cfg = config_from_preset(
+        preset("tiny")["config"], moe_grouped_gemm=grouped, num_moe_experts=4,
+        moe_router_topk=2,
+    )
+    assert cfg.use_te_activation_func, "SiTU needs core's whole-tensor activation seam"
+    assert not cfg.bias_activation_fusion, "fusion would bypass the activation module"
+
+    from kimi_k3.specs.layer_specs import get_k3_layer_specs
+    from megatron.core.transformer.spec_utils import build_module
+
+    moe = [s for s in get_k3_layer_specs(cfg) if not hasattr(
+        getattr(s.submodules.mlp, "submodules", None), "activation_func")]
+    assert moe, "no MoE layer in the tiny preset"
+    layer = build_module(moe[0].submodules.mlp, config=cfg, layer_number=2).cuda()
+
+    experts = layer.experts
+    acts = [m for m in experts.modules() if isinstance(m, SituGLU)]
+    assert acts, f"no SituGLU under the experts (grouped={grouped}); the wiring is gone"
+
+    # Take one expert's real weights and check the whole FFN, not just the activation.
+    if grouped:
+        w1w3 = experts.linear_fc1.weight0            # [2*inter, hidden]
+        w2 = experts.linear_fc2.weight0              # [hidden, inter]
+    else:
+        e0 = experts.local_experts[0]
+        w1w3 = e0.linear_fc1.weight
+        w2 = e0.linear_fc2.weight
+    inter = w2.shape[-1]
+    w1, w3 = w1w3[:inter], w1w3[inter:]
+
+    torch.manual_seed(0)
+    # Input scale is load-bearing, and the first version of this test got it wrong.
+    # SiTU is *defined* by its tanh limiting (beta 4, linear_beta 25), so below
+    # |gate| ~ beta it is nearly indistinguishable from SwiGLU -- measured rel-L2
+    # of SwiGLU against SiTU is 9.0e-05 at x*0.1 and 3.4e-02 at x*2.0, but 5.6e-01
+    # at x*10. A gate run at small scale passes with the wrong activation.
+    x = torch.randn(8, w1.shape[-1], device="cuda", dtype=w1w3.dtype) * 10.0
+    gate_up = torch.nn.functional.linear(x, w1w3)
+    g, u = torch.chunk(gate_up, 2, dim=-1)
+    # Guard the regime rather than trusting the scale above to survive a future
+    # change to the preset's widths or init.
+    assert g.abs().max() > cfg.k3_situ_beta, (
+        f"|gate|max {g.abs().max():.2f} never reaches beta {cfg.k3_situ_beta}; at this "
+        "scale SiTU and SwiGLU agree to ~1e-04 and the assertions below prove nothing"
+    )
+
+    want = _released_expert_reference(x, w1, w3, w2)
+    got = torch.nn.functional.linear(acts[0](gate_up), w2)
+    rel = (got.float() - want).norm() / want.norm().clamp_min(1e-12)
+    # Same arithmetic on both sides in fp32: measured 0.00e+00, so this is tight
+    # on purpose. A loose bound here is what let the wrong activation hide.
+    assert rel < 1e-5, f"expert FFN is not SiTU-GLU (grouped={grouped}): rel-L2 {rel:.3e}"
+
+    # Teeth: the two activations K3 was accidentally running must both fail.
+    for wrong in (torch.nn.functional.gelu, torch.nn.functional.silu):
+        bad = torch.nn.functional.linear(wrong(g) * u, w2)
+        bad_rel = (bad.float() - want).norm() / want.norm().clamp_min(1e-12)
+        assert bad_rel > 1e-1, (
+            f"{wrong.__name__} is indistinguishable from SiTU here (rel-L2 {bad_rel:.3e}); "
+            "the gate would not catch the G52 regression"
+        )
