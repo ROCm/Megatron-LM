@@ -33,7 +33,15 @@ def test_every_k3_config_field_is_settable_from_the_command_line():
     dests = {a.dest for a in parser._actions}
     missing = k3_field_names() - dests
     # k3_kda_layers and k3_kda_pattern come from the preset, not a flag
-    assert missing <= {"k3_kda_layers", "k3_kda_pattern"}, sorted(missing)
+    allowed = {
+        "k3_kda_layers", "k3_kda_pattern",
+        # Deprecated alias of k3_attn_res_chunked, kept so old configs still load.
+        # Deliberately has no dest of its own: `--k3-attn-res-fused` is an argparse
+        # alias that writes to k3_attn_res_chunked, so exposing a second dest would
+        # let the two disagree.
+        "k3_attn_res_fused",
+    }
+    assert missing <= allowed, sorted(missing)
 
 
 def test_flags_survive_into_the_config():

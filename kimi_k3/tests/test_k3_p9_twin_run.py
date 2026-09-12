@@ -68,3 +68,75 @@ def test_the_recompute_axis_actually_engages(single_rank_world):
     assert evidence["differs"], evidence
     assert evidence["checkpoint_calls"][0] == 0
     assert evidence["checkpoint_calls"][1] > 0
+
+
+def test_permutation_test_finds_a_real_shift():
+    """A clear offset between arms must come out significant."""
+    from kimi_k3.tools.twin_run import permutation_test
+
+    a = [[10.0 - 0.1 * i + 0.001 * s for i in range(40)] for s in range(5)]
+    b = [[10.5 - 0.1 * i + 0.001 * s for i in range(40)] for s in range(5)]
+    r = permutation_test(a, b)
+    assert r["exact"], "5 per arm should enumerate exactly"
+    assert r["splits"] == 126, r["splits"]          # C(10,5)/2
+    assert r["significant_at_05"], r["p_value_holm"]
+
+
+def test_permutation_test_does_not_flag_pure_noise():
+    """Eight runs from one distribution must not look like two populations.
+
+    This is the property the old max-over-pairs band never had: a stated,
+    checkable false-positive behaviour rather than a threshold that moved with
+    sample size.
+    """
+    import random
+
+    from kimi_k3.tools.twin_run import permutation_test
+
+    rng = random.Random(7)
+    flags = 0
+    trials = 20
+    for _ in range(trials):
+        runs = [[10.0 - 0.1 * i + rng.gauss(0, 0.05) for i in range(40)] for _ in range(10)]
+        r = permutation_test(runs[:5], runs[5:])
+        flags += bool(r["significant_at_05"])
+    # alpha = 0.05 over 20 trials: 0 or 1 is expected, 3+ would mean the test is
+    # mis-calibrated rather than unlucky.
+    assert flags <= 2, f"{flags}/{trials} false positives; the test is not calibrated"
+
+
+def test_p_value_can_never_be_zero():
+    """The observed labelling is one of the enumerated splits, so p >= 1/splits.
+
+    A p-value of exactly 0 would be a sign the observed split had been left out of
+    its own null distribution -- the classic off-by-one in a permutation test.
+    """
+    from kimi_k3.tools.twin_run import permutation_test
+
+    a = [[float(i) for i in range(40)] for _ in range(5)]
+    b = [[float(i) + 99.0 for i in range(40)] for _ in range(5)]
+    r = permutation_test(a, b)
+    assert min(r["p_value"].values()) >= r["min_attainable_p"] - 1e-12
+    assert min(r["p_value"].values()) > 0.0
+
+
+def test_four_seeds_per_arm_cannot_reach_significance():
+    """Below 5 per arm the test is powerless, and must say so rather than pass.
+
+    Holm multiplies the smallest of three p-values by 3, so alpha = 0.05 needs a raw
+    p <= 0.0167 and therefore >= 60 splits. 4 per arm gives 35 splits: min raw p
+    0.029, which Holm inflates to 0.086. The first version of this tool defaulted to
+    4 for exactly the reason this test exists -- the resolution was computed without
+    accounting for the correction applied on top of it.
+    """
+    from kimi_k3.tools.twin_run import permutation_test
+
+    a = [[float(i) for i in range(40)] for _ in range(4)]
+    b = [[float(i) + 99.0 for i in range(40)] for _ in range(4)]
+    r = permutation_test(a, b)
+    assert r["splits"] == 35, r["splits"]
+    assert abs(r["min_attainable_p"] - 1 / 35) < 1e-9
+    assert not r["significant_at_05"], (
+        "4 per arm reaches raw p 0.029 but 0.086 after Holm; it must not be reported "
+        "as significant"
+    )

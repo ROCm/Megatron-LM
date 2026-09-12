@@ -79,3 +79,79 @@ kernel can hold the fp32 accumulation in registers and pay neither.
   transport, and P11's trace gives the in-situ share.
 * `torch.compile` was not applied; the P11 comparison should include it as the
   cheap baseline before any hand-written kernel.
+
+---
+
+# G56 — "fused" was never fused, and the rename found a live bug
+
+Raised in review: *"attn_res_mix_fused does not really fuse it."* Correct.
+
+## It is chunking
+
+```python
+return torch.cat([attn_res_mix(prefix_sum[start:start+chunk], ...)
+                  for start in range(0, prefix_sum.shape[0], chunk)], dim=0)
+```
+
+A Python loop calling the eager mixer on row slices. **No kernel, no fusion.** It
+issues the eager op sequence once *per chunk*, so it launches strictly more work
+than the eager path -- which is exactly what G44/G45 measured and nobody read as a
+contradiction at the time:
+
+| | baseline | "fused" |
+|---|---|---|
+| kernel launches | 321,116 | **321,163 (+47)** |
+| peak HBM | 193.63 GiB | 193.63 GiB (0.00) |
+| steady iteration | 2653.5 ms | 2649.6 ms (noise) |
+
+*More* launches and *zero* memory saved. A genuinely fused kernel would show fewer
+launches; that number was in the results table for two weeks arguing against the
+name.
+
+The name also propagated a promise. `attn_res.py`'s header said "the fused kernel
+in P11 must reproduce it" and described a fold that was "free for the P11 fused
+kernel". **No such kernel was ever written** -- P11 rescoped once the trace put
+AttnRes at 0.09% of device time. The docstrings were describing planned work as
+though it existed.
+
+## Renamed
+
+`attn_res_mix_chunked`, `k3_attn_res_chunked`, `--k3-attn-res-chunked`,
+`AttnResMixer.chunked`, `tools/proxy_ep8 --chunked-attn-res`, and
+`tests/test_k3_p11_chunked_attn_res.py`. `attn_res_mix_fused`,
+`--k3-attn-res-fused` and `--fused-attn-res` remain as aliases; the config field
+`k3_attn_res_fused` is kept, deprecated, and warns.
+
+## The rename exposed a real bug
+
+`k3_transformer_block.py:38` read `k3_attn_res_fused` to build the **model-output**
+mixer, separately from `k3_transformer_layer.py` which builds the per-layer ones.
+Renaming the field left the block reading the now-`None` deprecated alias, and
+`decoder.output_attn_res` came back with `chunked=None` -- so with the flag on, the
+output mix silently ran the **eager** path while all eight layer mixes ran chunked.
+
+The pre-existing test `test_the_flag_selects_the_path_and_the_model_agrees` is what
+caught it, and its docstring says exactly why it exists: *"a flag that reaches only
+some of them would still pass a unit test."* That test was written for this failure
+mode and duly found it.
+
+Whether the bug predates the rename is worth being precise about: **it does not.**
+Before the rename both sites read the same field name, so both got the flag. The
+rename created it and the test caught it within minutes. What the episode shows is
+that the flag has **two independent construction sites**, which is a standing
+hazard the test now guards.
+
+## A process note on how I nearly missed it
+
+My first sweep for stale references was `grep ... | head -20`, which returned
+exactly 20 lines -- and I treated that as the complete list. `k3_transformer_block.py`
+was line 21. Truncating an enumeration and then reasoning from it as if it were
+exhaustive is how the block site got left behind.
+
+## Status unchanged
+
+The optimisation is still correct (G43, bit-identical forward at any chunk size)
+and still pointless at any geometry that fits on one node: the temporary it removes
+is 29 MB at 4 layers / seq 512, against the 109.6 GiB it was built for at 93 layers
+/ seq 8192. Default stays off. What changed is only that the name no longer claims
+something that does not exist.

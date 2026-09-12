@@ -60,10 +60,12 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     group.add_argument("--k3-attn-res-block-size", type=int, default=12,
                        help="release: 12, giving 8 residual slots over 93 layers")
     group.add_argument("--k3-attn-res-fp32", action=argparse.BooleanOptionalAction, default=True)
-    group.add_argument("--k3-attn-res-fused", action=argparse.BooleanOptionalAction, default=False,
-                       help="P11 fused mixer; off until its parity gate is green")
-
-    # --- MoE ---
+    group.add_argument("--k3-attn-res-chunked", "--k3-attn-res-fused",
+                       dest="k3_attn_res_chunked",
+                       action=argparse.BooleanOptionalAction, default=False,
+                       help="chunk the AttnRes mix over rows. NOT a fused kernel -- no "
+                            "kernel exists; this trades more launches for a smaller peak "
+                            "fp32 temporary. --k3-attn-res-fused is a deprecated alias.")
     group.add_argument("--k3-routed-expert-hidden-size", type=int, default=3584,
                        help="latent width the routed experts run at (mirrored to moe_latent_size)")
     group.add_argument("--k3-latent-moe-use-norm", action=argparse.BooleanOptionalAction,

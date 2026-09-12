@@ -46,10 +46,10 @@ class K3TransformerLayer(TransformerLayer):
         super().__init__(config, submodules, layer_number=layer_number, **kwargs)
         eps = config.layernorm_epsilon
         fp32 = getattr(config, "k3_attn_res_fp32", True)
-        fused = getattr(config, "k3_attn_res_fused", False)
+        chunked = getattr(config, "k3_attn_res_chunked", False)
         chunk = getattr(config, "k3_attn_res_chunk", 4096)
-        self.attn_res_attn = AttnResMixer(config.hidden_size, eps, fp32, fused, chunk)
-        self.attn_res_mlp = AttnResMixer(config.hidden_size, eps, fp32, fused, chunk)
+        self.attn_res_attn = AttnResMixer(config.hidden_size, eps, fp32, chunked, chunk)
+        self.attn_res_mlp = AttnResMixer(config.hidden_size, eps, fp32, chunked, chunk)
         self.block_size = config.k3_attn_res_block_size
 
     @property

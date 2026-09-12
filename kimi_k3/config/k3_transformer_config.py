@@ -114,7 +114,13 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     position satisfies layer_idx % block_size == 0. For 93 layers: 8 slots."""
 
     k3_attn_res_fp32: bool = True
-    k3_attn_res_fused: bool = False
+    k3_attn_res_chunked: bool = False
+    """Chunk the AttnRes mix over rows. **Not a fused kernel** -- no kernel exists;
+    see `block/attn_res.attn_res_mix_chunked`. Trades more kernel launches for a
+    smaller peak fp32 temporary, which only pays at production geometry."""
+
+    k3_attn_res_fused: Optional[bool] = None
+    """Deprecated spelling of `k3_attn_res_chunked`, kept so old configs load."""
     """Chunked mixer (P11). Off by default: the eager path is the oracle, and this
     turns on once G44 records a measured win (R5.3). Parity is G43."""
 
@@ -158,6 +164,16 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     """Optional (kda_stride, total) shorthand used by the tiny preset."""
 
     def __post_init__(self):
+        if self.k3_attn_res_fused is not None:
+            import warnings
+
+            warnings.warn(
+                "k3_attn_res_fused is a deprecated alias for k3_attn_res_chunked; the "
+                "mixer was never a fused kernel, only chunked.",
+                DeprecationWarning, stacklevel=2,
+            )
+            self.k3_attn_res_chunked = bool(self.k3_attn_res_fused)
+
         if self.k3_situ_activation:
             import torch.nn.functional as F   # local: this module imports no torch at scope
 

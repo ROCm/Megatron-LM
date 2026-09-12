@@ -79,7 +79,7 @@ def build(args, rank: int, world: int):
     if args.flex_backend:
         overrides["moe_flex_dispatcher_backend"] = args.flex_backend
     if args.fused_attn_res:
-        overrides.update(k3_attn_res_fused=True, k3_attn_res_chunk=args.attn_res_chunk)
+        overrides.update(k3_attn_res_chunked=True, k3_attn_res_chunk=args.attn_res_chunk)
     if args.layers:
         # k3_kda_layers is 1-indexed and preset-wide, so it has to be trimmed too
         from kimi_k3.config.presets import preset as get_preset
@@ -218,7 +218,8 @@ def main() -> None:
                          "with the number of experts local to a rank")
     ap.add_argument("--flex-backend", default=None,
                     help="deepep | mori | hybridep, only with --dispatcher flex")
-    ap.add_argument("--fused-attn-res", action="store_true",
+    ap.add_argument("--chunked-attn-res", "--fused-attn-res", dest="fused_attn_res",
+                    action="store_true",
                     help="run with the chunked AttnRes mixer (G44/G45)")
     ap.add_argument("--attn-res-chunk", type=int, default=4096)
     ap.add_argument("--trace-dir", default=None)

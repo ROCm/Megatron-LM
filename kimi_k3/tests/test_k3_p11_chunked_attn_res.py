@@ -1,7 +1,11 @@
-"""P11 / gate G43 -- the fused AttnRes mixer against the eager one.
+"""P11 / gate G43 -- the chunked AttnRes mixer against the eager one.
+
+Named "fused" until 2026-09-12. It never was: `attn_res_mix_chunked` is a Python
+loop over row slices calling the eager mixer, so it issues *more* kernel launches,
+not fewer. No fused kernel was ever written.
 
 The eager mixer is the transcription of the release and stays the oracle. The
-fused one is a memory optimisation, so the bar is **bit-identical**, forward and
+chunked one is a memory optimisation, so the bar is **bit-identical**, forward and
 backward, not "close enough": anything less would mean the optimisation changed
 the model, and the whole point is that it does not.
 """
@@ -9,7 +13,7 @@ the model, and the whole point is that it does not.
 import pytest
 import torch
 
-from kimi_k3.block.attn_res import attn_res_mix, attn_res_mix_fused
+from kimi_k3.block.attn_res import attn_res_mix, attn_res_mix_chunked
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
 
@@ -34,7 +38,7 @@ def operands(tokens, slots, hidden, dtype=torch.bfloat16, seed=0):
 def test_forward_is_bit_identical(shape, chunk):
     prefix, slots, norm, proj = operands(*shape)
     torch.testing.assert_close(
-        attn_res_mix_fused(prefix, slots, norm, proj, 1e-6, chunk=chunk),
+        attn_res_mix_chunked(prefix, slots, norm, proj, 1e-6, chunk=chunk),
         attn_res_mix(prefix, slots, norm, proj, 1e-6),
         rtol=0, atol=0,
     )
@@ -57,7 +61,7 @@ def test_per_token_gradients_are_bit_identical_at_the_default_chunk(shape):
     """Everything whose gradient belongs to one token is exact -- above the threshold."""
     from kimi_k3.block.attn_res import ATTN_RES_CHUNK
 
-    ours = backward_grads(shape, attn_res_mix_fused, chunk=ATTN_RES_CHUNK)
+    ours = backward_grads(shape, attn_res_mix_chunked, chunk=ATTN_RES_CHUNK)
     reference = backward_grads(shape, attn_res_mix)
     for name in ("prefix", "slots"):
         torch.testing.assert_close(ours[name], reference[name], rtol=0, atol=0, msg=name)
@@ -83,7 +87,7 @@ def test_a_small_chunk_stops_being_bitwise_at_release_width():
     from kimi_k3.block.attn_res import ATTN_RES_BITWISE_MIN_CHUNK
 
     reference = backward_grads(RELEASE, attn_res_mix)
-    small = backward_grads(RELEASE, attn_res_mix_fused, chunk=32)
+    small = backward_grads(RELEASE, attn_res_mix_chunked, chunk=32)
 
     differing = small["prefix"] != reference["prefix"]
     fraction = differing.float().mean().item()
@@ -96,7 +100,7 @@ def test_a_small_chunk_stops_being_bitwise_at_release_width():
     a, b = small["prefix"].float(), reference["prefix"].float()
     assert (a - b).abs().max().item() / b.abs().max().item() < 1e-3
 
-    big = backward_grads(RELEASE, attn_res_mix_fused, chunk=ATTN_RES_BITWISE_MIN_CHUNK)
+    big = backward_grads(RELEASE, attn_res_mix_chunked, chunk=ATTN_RES_BITWISE_MIN_CHUNK)
     torch.testing.assert_close(big["prefix"], reference["prefix"], rtol=0, atol=0)
     torch.testing.assert_close(big["slots"], reference["slots"], rtol=0, atol=0)
 
@@ -116,7 +120,7 @@ def test_the_shared_gain_gradient_differs_only_by_accumulation_order(shape):
     fast tier is meaningless there -- which is exactly how the first version of
     this test passed at 128 tokens and failed at 8192.
     """
-    ours = backward_grads(shape, attn_res_mix_fused, chunk=32)
+    ours = backward_grads(shape, attn_res_mix_chunked, chunk=32)
     reference = backward_grads(shape, attn_res_mix)
     assert not torch.equal(ours["norm"], reference["norm"]), "expected reordering, got none"
 
@@ -146,7 +150,7 @@ def test_the_gain_gradient_error_grows_sublinearly_in_the_chunk_count():
     scale = reference.abs().max().item()
 
     def error(chunk):
-        got = backward_grads(RELEASE, attn_res_mix_fused, chunk=chunk)["norm"]
+        got = backward_grads(RELEASE, attn_res_mix_chunked, chunk=chunk)["norm"]
         return (got - reference).abs().max().item() / scale
 
     assert error(T) == 0.0, "one chunk is the whole tensor and must be bitwise"
@@ -164,7 +168,7 @@ def test_the_forward_is_bitwise_at_every_chunk_size():
     reference = attn_res_mix(prefix, slots, norm, proj, 1e-6)
     for chunk in (1, 7, 16, 127, 128, 4096):
         torch.testing.assert_close(
-            attn_res_mix_fused(prefix, slots, norm, proj, 1e-6, chunk=chunk),
+            attn_res_mix_chunked(prefix, slots, norm, proj, 1e-6, chunk=chunk),
             reference, rtol=0, atol=0,
         )
 
@@ -175,7 +179,7 @@ def test_it_actually_uses_less_memory():
     peaks = {}
     for label, call in (
         ("eager", lambda: attn_res_mix(prefix, slots, norm, proj, 1e-6)),
-        ("fused", lambda: attn_res_mix_fused(prefix, slots, norm, proj, 1e-6, chunk=128)),
+        ("chunked", lambda: attn_res_mix_chunked(prefix, slots, norm, proj, 1e-6, chunk=128)),
     ):
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
@@ -184,17 +188,17 @@ def test_it_actually_uses_less_memory():
         call()
         torch.cuda.synchronize()
         peaks[label] = torch.cuda.max_memory_allocated() - before
-    assert peaks["fused"] < peaks["eager"] / 2, peaks
+    assert peaks["chunked"] < peaks["eager"] / 2, peaks
 
 
 def test_no_slots_is_a_no_op_in_both():
     prefix, _, norm, proj = operands(*FAST)
     empty = torch.zeros(FAST[0], 0, FAST[2], device="cuda", dtype=prefix.dtype)
-    assert torch.equal(attn_res_mix_fused(prefix, empty, norm, proj, 1e-6), prefix)
+    assert torch.equal(attn_res_mix_chunked(prefix, empty, norm, proj, 1e-6), prefix)
 
 
 def test_the_flag_selects_the_path_and_the_model_agrees(single_rank_world):
-    """G43 end to end: the whole model with `--k3-attn-res-fused` matches without it.
+    """G43 end to end: the whole model with `--k3-attn-res-chunked` matches without it.
 
     The mixer is used at three sites per model (two per layer plus the output),
     so a flag that reaches only some of them would still pass a unit test.
@@ -203,15 +207,15 @@ def test_the_flag_selects_the_path_and_the_model_agrees(single_rank_world):
 
     torch.manual_seed(0)
     eager = build_k3_model("tiny")
-    fused = build_k3_model("tiny", k3_attn_res_fused=True, k3_attn_res_chunk=4)
-    fused.load_state_dict(eager.state_dict(), strict=False)
+    chunked = build_k3_model("tiny", k3_attn_res_chunked=True, k3_attn_res_chunk=4)
+    chunked.load_state_dict(eager.state_dict(), strict=False)
 
-    mixers = [m for m in fused.modules() if hasattr(m, "fused")]
+    mixers = [m for m in chunked.modules() if hasattr(m, "chunked")]
     assert len(mixers) == 2 * 4 + 1, len(mixers)
-    assert all(m.fused for m in mixers), "the flag did not reach every site"
+    assert all(m.chunked for m in mixers), "the flag did not reach every site"
 
     tokens = torch.randint(0, 4096, (1, 16), device="cuda")
     with torch.no_grad():
         a = eager(input_ids=tokens, position_ids=None, attention_mask=None)
-        b = fused(input_ids=tokens, position_ids=None, attention_mask=None)
+        b = chunked(input_ids=tokens, position_ids=None, attention_mask=None)
     torch.testing.assert_close(b, a, rtol=0, atol=0)

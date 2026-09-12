@@ -2,7 +2,7 @@
 
 Transcribed from the released `KimiLinearModel._apply_attn_res`
 (HF moonshotai/Kimi-K3, revision a590ce09). Every parity test for AttnRes is
-against this function; the fused kernel in P11 must reproduce it.
+against this function.
 
 The mechanism, per decoder layer (develop/architecture §6):
 
@@ -16,7 +16,7 @@ Two facts the release's own code makes obvious and that matter later:
 
 * the RMSNorm gain and the `[1, H]` projection only ever appear multiplied
   together, so they collapse to a single `[H]` score vector -- a free fold for
-  the P11 fused kernel;
+  any future kernel;
 * the mix upcasts the whole `[T, K+1, H]` stack to fp32, twice, which is the
   dominant non-GEMM memory cost in the model (see `tools/attn_res_probe.py`).
 """
@@ -83,7 +83,7 @@ class AttnResMixer(torch.nn.Module):
         hidden_size: int,
         eps: float = 1e-5,
         fp32: bool = True,
-        fused: bool = False,
+        chunked: bool = False,
         chunk: int = 4096,
     ):
         super().__init__()
@@ -91,9 +91,10 @@ class AttnResMixer(torch.nn.Module):
         self.proj = torch.nn.Parameter(torch.zeros(1, hidden_size))
         self.eps = eps
         self.fp32 = fp32
-        #: `--k3-attn-res-fused`. Off by default: the eager path is the oracle,
-        #: and the chunked one turns on once G44 records a measured win (R5.3).
-        self.fused = fused
+        #: `--k3-attn-res-chunked`. Off by default: the eager path is the oracle,
+        #: and chunking has no measured win at any geometry that fits on one node
+        #: (G44/G45). Named `fused` until 2026-09-12, which was simply wrong.
+        self.chunked = chunked
         self.chunk = chunk
 
     def forward(
@@ -101,8 +102,8 @@ class AttnResMixer(torch.nn.Module):
     ) -> torch.Tensor:
         if block_residual is None:
             return prefix_sum
-        if self.fused and self.fp32:
-            return attn_res_mix_fused(
+        if self.chunked and self.fp32:
+            return attn_res_mix_chunked(
                 prefix_sum, block_residual, self.weight, self.proj, self.eps, self.chunk
             )
         return attn_res_mix(
@@ -132,7 +133,7 @@ ATTN_RES_CHUNK = 4096
 ATTN_RES_BITWISE_MIN_CHUNK = 1024
 
 
-def attn_res_mix_fused(
+def attn_res_mix_chunked(
     prefix_sum: torch.Tensor,
     block_residual: torch.Tensor,
     norm_weight: torch.Tensor,
@@ -141,6 +142,14 @@ def attn_res_mix_fused(
     chunk: int = ATTN_RES_CHUNK,
 ) -> torch.Tensor:
     """The same mix, without ever holding a full `[T, K+1, H]` fp32 stack.
+
+    **This is chunking, not fusion.** It is a Python loop that calls the eager
+    mixer on row slices and concatenates. Nothing is fused: there is no kernel,
+    and it issues the eager op sequence once *per chunk*, so it launches strictly
+    more work than the eager path (measured: +47 launches, G44/G45). It was named
+    `..._fused` until 2026-09-12, which promised something that does not exist.
+    The only thing it buys is peak fp32 temporary, and only at a geometry where
+    that temporary is large.
 
     The eager mixer materialises that stack twice -- once for the concatenation
     and once for the normalised copy `k` -- and at production shape that is the
@@ -190,3 +199,8 @@ def attn_res_mix_fused(
         ],
         dim=0,
     )
+
+
+#: Deprecated name. This was never a fused kernel -- see `attn_res_mix_chunked`.
+#: Kept so existing scripts and the P11 tests keep resolving.
+attn_res_mix_fused = attn_res_mix_chunked

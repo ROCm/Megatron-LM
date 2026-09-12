@@ -3,21 +3,45 @@
 Two runs that *should* be equivalent -- eager vs `fla` KDA, recompute on vs off --
 will not produce identical losses, because neither reassociates floating-point
 arithmetic the same way. So "did this change anything" cannot be answered by
-comparing to zero. It has to be answered against a **measured** band.
+comparing to zero.
 
-The band comes first, from runs that differ only by seed. That is the amount of
-loss movement this configuration produces for no reason at all. A twin whose
-statistics sit inside it has not been shown to change the model; a twin outside it
-has.
+**Method: a two-sample permutation test on the loss curves.** Each arm is run at
+`--seeds-per-arm` seeds. The statistic is a summary of the difference between the
+two arms' mean curves; its null distribution comes from relabelling which runs
+belong to which arm. If the real labelling produces no larger a difference than a
+random one, the change is not distinguishable from reseeding.
 
-Three statistics, because one hides things:
+Three summaries, because one hides things:
 
-* `max_delta` -- the worst single step. Catches a spike that a mean would absorb.
-* `mean_delta` -- the whole window. Catches a small constant offset.
-* `final_delta` -- the mean over the last quarter. Catches slow divergence, which
-  is the failure mode that matters and the one the first two miss.
+* `max` -- the worst single step. Catches a spike that a mean would absorb.
+* `mean` -- the whole window. Catches a small constant offset.
+* `final` -- the mean over the last quarter. Catches slow divergence, which is the
+  failure mode that matters and the one the first two miss.
 
-`python -m kimi_k3.tools.twin_run --preset tiny --steps 40`
+Three tests, so p-values are corrected Holm-Bonferroni for the verdict.
+
+## Why not the old "noise band" (G34-G55, superseded)
+
+The original method measured pairwise deltas between seed runs and used the
+**maximum** as a pass threshold. That was an ad-hoc rule of mine, never justified
+and not a standard statistical method. Its defects, in the order they matter:
+
+* The sample maximum is not a stable estimator -- it grows with the number of
+  seeds, so the threshold depended on how many runs happened to be done, and
+  *more* evidence made the test *more permissive*.
+* The pairwise deltas are not independent: k seeds give k(k-1)/2 pairs but only k
+  runs, so "15 pairs" was never 15 samples.
+* Each twin was measured at a **single seed** and compared against that threshold,
+  with no estimate of the twin statistic's own variability.
+* No confidence level, no false-positive rate, no correction across the three
+  statistics.
+
+G55 is the concrete cost: `kda_backend` read outside a three-seed band and inside
+a six-seed one, same number either way. A permutation test has none of these
+properties -- it is distribution-free, uses the runs themselves as the null, and
+reports a p-value at a stated level.
+
+    python -m kimi_k3.tools.twin_run --preset tiny --steps 40 --seeds-per-arm 4
 """
 
 import argparse
@@ -56,6 +80,81 @@ def compare(a: Sequence[float], b: Sequence[float]) -> Statistics:
 def widest(stats: Sequence[Statistics]) -> Statistics:
     """The band is the worst each statistic gets across the seed pairs."""
     return Statistics(*(max(getattr(s, f) for s in stats) for f in ("max_delta", "mean_delta", "final_delta")))
+
+
+def mean_curve(curves: Sequence[Sequence[float]]) -> List[float]:
+    return [sum(step) / len(step) for step in zip(*curves)]
+
+
+def group_statistic(a: Sequence[Sequence[float]], b: Sequence[Sequence[float]]) -> Statistics:
+    """Summaries of the gap between the two arms' mean curves."""
+    return compare(mean_curve(a), mean_curve(b))
+
+
+def permutation_test(
+    arm_a: Sequence[Sequence[float]], arm_b: Sequence[Sequence[float]], max_perms: int = 20000
+) -> Dict:
+    """Two-sample permutation test on the loss curves.
+
+    Pools the runs and enumerates every way of splitting them into two groups of
+    the original sizes. Label swaps give an identical statistic, so only half the
+    splits are distinct; the observed labelling is one of them and is included in
+    the count, which is what keeps the p-value valid (it can never be 0).
+
+    Exact whenever the number of distinct splits fits under `max_perms`.
+
+    Resolution is the binding constraint, and it interacts with the Holm correction
+    in a way that is easy to get wrong: Holm multiplies the smallest of the three
+    p-values by 3, so a verdict at alpha = 0.05 needs a raw p of 0.0167 or less,
+    hence **at least 60 distinct splits**. 4 seeds per arm gives C(8,4)/2 = 35
+    (min raw p 0.029, which Holm inflates to 0.086) and can therefore never reach
+    significance at all. 5 per arm gives 126 splits (0.0079 -> 0.024) and can.
+    """
+    pooled = list(arm_a) + list(arm_b)
+    n = len(arm_a)
+    observed = group_statistic(arm_a, arm_b)
+
+    index_sets = [frozenset(c) for c in itertools.combinations(range(len(pooled)), n)]
+    seen, splits = set(), []
+    for s in index_sets:                       # drop the label-swap duplicate
+        key = min(s, frozenset(range(len(pooled))) - s, key=sorted)
+        if key in seen:
+            continue
+        seen.add(key)
+        splits.append(s)
+    exact = len(splits) <= max_perms
+    if not exact:
+        import random
+
+        rng = random.Random(0)
+        splits = rng.sample(splits, max_perms)
+
+    fields = ("max_delta", "mean_delta", "final_delta")
+    counts = {f: 0 for f in fields}
+    for s in splits:
+        left = [pooled[i] for i in sorted(s)]
+        right = [pooled[i] for i in range(len(pooled)) if i not in s]
+        st = group_statistic(left, right)
+        for f in fields:
+            if getattr(st, f) >= getattr(observed, f) - 1e-12:
+                counts[f] += 1
+    p = {f: counts[f] / len(splits) for f in fields}
+
+    # Holm-Bonferroni across the three statistics.
+    order = sorted(fields, key=lambda f: p[f])
+    adjusted, running = {}, 0.0
+    for rank, f in enumerate(order):
+        running = max(running, min(1.0, p[f] * (len(fields) - rank)))
+        adjusted[f] = running
+    return {
+        "observed": asdict(observed),
+        "p_value": p,
+        "p_value_holm": adjusted,
+        "splits": len(splits),
+        "exact": exact,
+        "min_attainable_p": 1.0 / len(splits),
+        "significant_at_05": any(v <= 0.05 for v in adjusted.values()),
+    }
 
 
 def run(preset: str, steps: int, seed: int, **overrides) -> List[float]:
@@ -167,37 +266,68 @@ def _init_world() -> None:
         parallel_state.initialize_model_parallel(1, 1)
 
 
+def twin_arms(preset: str, steps: int, name: str, seeds: Sequence[int]) -> Dict:
+    """Both sides of one axis, at every seed. This is what the old method lacked.
+
+    G55 compared a **single** seed-0 twin against a threshold, so the twin statistic
+    had no measured variability of its own -- 0.0754 could as easily have come out
+    0.06 or 0.09. Running both arms across seeds is what makes a test possible.
+    """
+    axis = next(a for a in AXES if a[0] == name)
+    return {
+        "a": [run(preset, steps, sd, **axis[1]) for sd in seeds],
+        "b": [run(preset, steps, sd, **axis[2]) for sd in seeds],
+    }
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--preset", default="tiny")
     ap.add_argument("--steps", type=int, default=40)
-    ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5],
-                    help="six by default; three under-samples a max-over-pairs band (G55)")
+    ap.add_argument("--seeds-per-arm", type=int, default=5,
+                    help="runs per arm. Holm multiplies the smallest of three p-values "
+                         "by 3, so a verdict needs raw p <= 0.0167, i.e. >= 60 splits. "
+                         "4 per arm gives only C(8,4)/2 = 35 (min raw p 0.029 -> 0.086 "
+                         "after Holm) and can never reach alpha = 0.05; 5 gives 126 "
+                         "splits (0.008 -> 0.024) and can.")
     ap.add_argument("--axes", nargs="*", default=[a[0] for a in AXES])
+    ap.add_argument("--alpha", type=float, default=0.05)
     ap.add_argument("--out")
     args = ap.parse_args()
 
     _init_world()
+    seeds = list(range(args.seeds_per_arm))
+    report = {"preset": args.preset, "steps": args.steps, "seeds_per_arm": args.seeds_per_arm,
+              "alpha": args.alpha, "method": "two-sample permutation test, Holm-Bonferroni"}
 
-    report = {"preset": args.preset, "steps": args.steps}
-    report["noise"] = noise_band(args.preset, args.steps, args.seeds)
-    band = Statistics(**report["noise"]["band"])
-    print(f"noise band over seeds {args.seeds}: {report['noise']['band']}")
+    if args.seeds_per_arm < 5:
+        print(f"WARNING: {args.seeds_per_arm} seeds/arm cannot reach alpha={args.alpha}; "
+              "every verdict below will be 'not significant' by construction")
 
     report["twins"] = {}
     for name in args.axes:
         try:
-            result = twin(args.preset, args.steps, name)
+            arms = twin_arms(args.preset, args.steps, name, seeds)
+            result = permutation_test(arms["a"], arms["b"])
+            result["curves"] = arms
         except Exception as exc:  # a missing backend is a result, not a crash
             report["twins"][name] = {"error": f"{type(exc).__name__}: {exc}"}
             print(f"{name}: FAILED TO RUN -- {type(exc).__name__}: {exc}")
             continue
-        result["inside_band"] = Statistics(**result["stats"]).inside(band)
         if name == "recompute":
             result["engaged"] = axis_engaged(args.preset, name)
         report["twins"][name] = result
-        print(f"{name}: {result['stats']} inside_band={result['inside_band']}"
-              + (f" engaged={result['engaged']}" if "engaged" in result else ""))
+        moved = any(v <= args.alpha for v in result["p_value_holm"].values())
+        obs = result["observed"]
+        print(f"{name}: observed max={obs['max_delta']:.4f} mean={obs['mean_delta']:.4f} "
+              f"final={obs['final_delta']:.4f}")
+        print(f"    p(holm) max={result['p_value_holm']['max_delta']:.3f} "
+              f"mean={result['p_value_holm']['mean_delta']:.3f} "
+              f"final={result['p_value_holm']['final_delta']:.3f} "
+              f"[{result['splits']} splits, exact={result['exact']}, "
+              f"min p={result['min_attainable_p']:.3f}]")
+        print(f"    -> {'MOVED THE MODEL' if moved else 'not distinguishable from reseeding'}"
+              + (f"  engaged={result['engaged']}" if "engaged" in result else ""))
 
     if args.out:
         with open(args.out, "w") as handle:
