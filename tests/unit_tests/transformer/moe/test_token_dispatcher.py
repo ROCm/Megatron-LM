@@ -15,7 +15,6 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.transformer.moe.fused_a2a import HYBRIDEP_TOKEN_ALIGNMENT, reset_hybrid_ep_buffer
 from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
-from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 from megatron.core.transformer.moe.moe_utils import get_capacity
 from megatron.core.transformer.moe.token_dispatcher import _HybridEPManager
 from megatron.core.transformer.spec_utils import get_submodules
@@ -623,15 +622,14 @@ def test_hybridep_pad_uneven_dispatch_inputs_metadata(monkeypatch):
 
 
 @pytest.mark.skipif(
-    not is_deep_ep_available() and not is_hybrid_ep_available() and not is_mori_available(),
-    reason="Deep EP, Hybrid EP, and MORI are not available",
+    not is_deep_ep_available() and not is_hybrid_ep_available(),
+    reason="Deep EP and Hybrid EP are not available",
 )
 class TestFlexDispatcher:
     def setup_method(self, method):
         pass
 
     def teardown_method(self, method):
-        reset_mori_op()
         reset_hybrid_ep_buffer()
         Utils.destroy_model_parallel()
 
@@ -643,8 +641,7 @@ class TestFlexDispatcher:
         "moe_flex_dispatcher_backend",
         [
             "deepep",
-            "hybridep", 
-            "mori",
+            "hybridep",
             # NCCL EP aborts in dev CI with a pybind11 GIL dec_ref failure.
             pytest.param("ncclep", marks=pytest.mark.flaky_in_dev),
         ],
@@ -669,15 +666,8 @@ class TestFlexDispatcher:
                 pytest.skip(
                     "moe_permute_fusion_into_hybridep skipped because permute_fusion or hybridep is not set"
                 )
-        if moe_flex_dispatcher_backend == "mori" and not is_mori_available():
-            pytest.skip("MORI is not available")
-        if moe_flex_dispatcher_backend == "mori":
-            require_node_spanning_mori_ep(ep_size)
         if permute_fusion:
             config.ENABLE_EXPERIMENTAL = True
-        mori_kwargs = {}
-        if moe_flex_dispatcher_backend == "mori":
-            mori_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         container = MoEModelTestContainer(
             tp_size=tp_size,
             ep_size=ep_size,
@@ -698,7 +688,6 @@ class TestFlexDispatcher:
                 8.0 if moe_flex_dispatcher_backend == "ncclep" else None
             ),
             test_dtype=torch.bfloat16,
-            **mori_kwargs,
         )
         container.dispatcher_dropless_test()
         # reset experimental flag to False
@@ -744,7 +733,7 @@ class TestFlexDispatcher:
     @pytest.mark.timeout(120)
     @pytest.mark.parametrize("tp_size,ep_size", [(1, 8), (8, 1), (4, 2)])
     @pytest.mark.parametrize("permute_fusion", permute_fusion_params)
-    @pytest.mark.parametrize("moe_flex_dispatcher_backend", ["deepep", "hybridep", "mori"])
+    @pytest.mark.parametrize("moe_flex_dispatcher_backend", ["deepep", "hybridep"])
     @pytest.mark.parametrize("moe_permute_fusion_into_hybridep", [True, False])
     def test_capacity_forward_backward(
         self,
@@ -763,15 +752,8 @@ class TestFlexDispatcher:
                 pytest.skip(
                     "moe_permute_fusion_into_hybridep skipped because permute_fusion or hybridep is not set"
                 )
-        if moe_flex_dispatcher_backend == "mori" and not is_mori_available():
-            pytest.skip("MORI is not available")
-        if moe_flex_dispatcher_backend == "mori":
-            require_node_spanning_mori_ep(ep_size)
         if permute_fusion:
             config.ENABLE_EXPERIMENTAL = True
-        mori_kwargs = {}
-        if moe_flex_dispatcher_backend == "mori":
-            mori_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         container = MoEModelTestContainer(
             tp_size=tp_size,
             ep_size=ep_size,
@@ -788,7 +770,6 @@ class TestFlexDispatcher:
             moe_flex_dispatcher_backend=moe_flex_dispatcher_backend,
             moe_permute_fusion_into_hybridep=moe_permute_fusion_into_hybridep,
             test_dtype=torch.bfloat16,
-            **mori_kwargs,
         )
         container.dispatcher_capacity_test()
         config.ENABLE_EXPERIMENTAL = False
@@ -801,7 +782,7 @@ class TestFlexDispatcher:
     @pytest.mark.timeout(120)
     @pytest.mark.parametrize("tp_size,ep_size", [(1, 8), (8, 1), (4, 2)])
     @pytest.mark.parametrize("permute_fusion", [True])
-    @pytest.mark.parametrize("moe_flex_dispatcher_backend", ["deepep", "hybridep", "mori"])
+    @pytest.mark.parametrize("moe_flex_dispatcher_backend", ["deepep", "hybridep"])
     @pytest.mark.parametrize("moe_permute_fusion_into_hybridep", [True, False])
     def test_router_padding_for_fp8_forward_backward(
         self,
@@ -820,15 +801,8 @@ class TestFlexDispatcher:
                 pytest.skip(
                     "moe_permute_fusion_into_hybridep skipped because permute_fusion or hybridep is not set"
                 )
-        if moe_flex_dispatcher_backend == "mori" and not is_mori_available():
-            pytest.skip("MORI is not available")
-        if moe_flex_dispatcher_backend == "mori":
-            require_node_spanning_mori_ep(ep_size)
         if permute_fusion:
             config.ENABLE_EXPERIMENTAL = True
-        mori_kwargs = {}
-        if moe_flex_dispatcher_backend == "mori":
-            mori_kwargs["moe_mori_max_tokens_per_rank"] = 4096
         container = MoEModelTestContainer(
             tp_size=tp_size,
             ep_size=ep_size,
@@ -843,44 +817,6 @@ class TestFlexDispatcher:
             moe_flex_dispatcher_backend=moe_flex_dispatcher_backend,
             moe_permute_fusion_into_hybridep=moe_permute_fusion_into_hybridep,
             test_dtype=torch.bfloat16,
-            **mori_kwargs,
         )
         container.dispatcher_router_padding_for_fp8_test()
         config.ENABLE_EXPERIMENTAL = False
-
-
-@pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
-class TestMoriSharedOp:
-    """MORI-only tests for process-wide EpDispatchCombineOp reuse."""
-
-    def setup_method(self, method):
-        pass
-
-    def teardown_method(self, method):
-        reset_mori_op()
-        Utils.destroy_model_parallel()
-
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    @pytest.mark.internal
-    @pytest.mark.parametrize("tp_size,ep_size", [(1, 8), (8, 1), (4, 2)])
-    @pytest.mark.parametrize("num_layers,num_iters", [(3, 4), (2, 8)])
-    def test_multi_layer_multi_iter_forward_backward(
-        self, tp_size, ep_size, num_layers, num_iters
-    ):
-        require_node_spanning_mori_ep(ep_size)
-        container = MoEModelTestContainer(
-            tp_size=tp_size,
-            ep_size=ep_size,
-            pp_size=1,
-            num_moe_experts=8,
-            moe_router_topk=2,
-            moe_router_load_balancing_type="aux_loss",
-            moe_token_dispatcher_type="flex",
-            moe_flex_dispatcher_backend="mori",
-            moe_mori_max_tokens_per_rank=4096,
-            hidden_size=1024,
-            test_dtype=torch.bfloat16,
-        )
-        container.dispatcher_dropless_multi_layer_multi_iter_test(
-            num_layers=num_layers, num_iters=num_iters
-        )

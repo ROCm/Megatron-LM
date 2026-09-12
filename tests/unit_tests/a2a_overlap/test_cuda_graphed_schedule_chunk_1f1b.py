@@ -63,13 +63,6 @@ class TestPartialCudaGraphedA2AOverlap:
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-        # Drop any cached EpDispatchCombineOp so it cannot leak into later tests. Do
-        # not finalize shmem here: MORI shmem is process-scoped and cannot be
-        # reinitialized, so finalize is owned solely by the session-scoped conftest
-        # fixture (finalize once at session end). Safe no-op when MORI is not installed.
-        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
-
-        reset_mori_op()
         Utils.destroy_model_parallel()
         destroy_global_vars()
         destroy_num_microbatches_calculator()

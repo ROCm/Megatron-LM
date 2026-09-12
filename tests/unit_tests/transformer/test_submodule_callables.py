@@ -192,9 +192,6 @@ class TestTransformerLayerSubmoduleCallables:
         pass
 
     def teardown_method(self, method):
-        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
-
-        reset_mori_op()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
