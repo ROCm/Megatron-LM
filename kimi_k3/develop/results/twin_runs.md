@@ -155,3 +155,53 @@ stronger statement needs more seeds or more steps.
 Tiny preset, 40 steps, fixed batch, fp32. This re-validates the twin axes under
 the corrected activation. It does **not** re-validate the QAT convergence study or
 the flatness probes, which also predate G52.
+
+---
+
+# G57 — the permutation test, and `situ_activation` is not significant
+
+> `python -m kimi_k3.tools.twin_run --preset tiny --steps 40 --seeds-per-arm 5`
+> Raw: `results/raw/twin_run_tiny_permutation.json`. 5 seeds per arm, both arms,
+> 126 exact splits, Holm-Bonferroni over the three statistics, alpha 0.05.
+
+Supersedes the noise band of G34-G55. The band was an ad-hoc rule of mine: a
+max-over-pairs threshold with no confidence level, an estimator that grew with
+sample size, pairwise deltas treated as independent when k seeds give only k runs,
+and a twin measured at a **single** seed.
+
+| axis | max | mean | final | p (Holm) | verdict |
+|---|---|---|---|---|---|
+| `recompute` | 0.0000 | 0.0000 | 0.0000 | 1.000 | not distinguishable (bitwise; 4 checkpoint calls vs 0) |
+| `kda_backend` | 0.0630 | 0.0130 | 0.0123 | 1.000 | not distinguishable |
+| `per_head_muon` | 0.2725 | 0.1432 | 0.0594 | **0.024 / 0.024 / 0.040** | **moved the model** |
+| `situ_activation` | 0.1561 | 0.0669 | 0.0529 | 0.119 / 0.127 / 0.127 | not distinguishable |
+
+`kda_backend` and `recompute` agree with the band-era verdicts, which is
+reassuring: the old method was badly founded, not uniformly wrong.
+
+## The control did not hold, and that is the useful part
+
+`situ_activation` was added in G55 as a control -- if wiring the correct activation
+could not be told from reseeding, the tool would not be measuring anything. Under
+the band it read "outside". Under the permutation test it is **p = 0.12, not
+significant**.
+
+The right reading is not that the fix is unimportant. It is verified exactly
+against released weights (G54, rel-L2 0.0), so its correctness does not rest on
+this at all. What this says is that **tiny / 40 steps cannot resolve it** -- the
+same limit already stated for every twin verdict, now with a number on it.
+
+Sensitivity is instead evidenced by `per_head_muon`, which is significant on all
+three statistics. So the test can detect a change of that size; it cannot detect
+one of SiTU's size at this geometry.
+
+## What a "not significant" verdict does and does not mean
+
+It means: no evidence this change moves the loss more than reseeding does, at this
+preset, these steps, this alpha. It is **not** evidence of equivalence. With 126
+splits the smallest attainable raw p is 0.008 and Holm needs 0.0167, so the test
+has resolution but this geometry has little power -- reseeding alone moves the late
+loss by roughly 17% of its value.
+
+Anything wanting a real equivalence claim needs production geometry and far more
+steps, which is the multi-node tier.
