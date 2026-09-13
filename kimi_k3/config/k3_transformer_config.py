@@ -150,6 +150,12 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     k3_situ_beta: float = 4.0
     k3_situ_linear_beta: float = 25.0
+    k3_grouped_linear_single_param: bool = False
+    """Store grouped expert weights as one parameter instead of one per expert.
+    Collapses DDP's per-expert grad accumulation (672 launches, 22.4 ms) into a
+    few contiguous adds. EXPERIMENTAL in TE and it changes the parameter layout
+    the QAT wiring reads, so it is off until both are verified (G63)."""
+
     k3_kda_fused_elementwise: bool = True
     """Use the fused Triton KDA kernels (`attention/kda_triton`): gated RMSNorm
     and the causal short conv. Measured 2.53x and 1.89x on forward+backward at

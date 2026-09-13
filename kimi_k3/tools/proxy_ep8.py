@@ -85,6 +85,8 @@ def build(args, rank: int, world: int):
             overrides["moe_mori_max_tokens_per_rank"] = args.seq
             # MORI EP dispatches fp32 probs only; core warns and then aborts.
             overrides["moe_router_dtype"] = "fp32"
+    if args.single_grouped_weight:
+        overrides["k3_grouped_linear_single_param"] = True
     if args.triton_attn_res:
         overrides["k3_attn_res_triton"] = True
     if args.fused_attn_res:
@@ -227,6 +229,8 @@ def main() -> None:
                          "with the number of experts local to a rank")
     ap.add_argument("--flex-backend", default=None,
                     help="deepep | mori | hybridep, only with --dispatcher flex")
+    ap.add_argument("--single-grouped-weight", action="store_true",
+                    help="store grouped expert weights as one parameter (TE experimental)")
     ap.add_argument("--triton-attn-res", action="store_true",
                     help="the real fused AttnRes kernel (G58/G59). 6.8x the eager "
                          "forward+backward at production shape, 96x less peak memory.")
@@ -334,6 +338,8 @@ def main() -> None:
                 parts.append(args.flex_backend)
             if args.triton_attn_res:
                 parts.append("tritonar")
+            if args.single_grouped_weight:
+                parts.append("sgw")
             if args.fused_attn_res:
                 parts.append("chunkar")
             if args.record_shapes:

@@ -97,6 +97,71 @@ def _contract_router_bias_dispatch():
     )
 
 
+_ORIGINAL_EXTRA_TE_KWARGS = None
+
+
+def install_grouped_linear_single_param() -> None:
+    """Ask TE to store grouped expert weights as ONE parameter, not 112.
+
+    TE's `GroupedLinear` keeps `weight0 .. weight{n-1}` as separate parameters, so
+    DDP registers a backward hook per expert. The trace shows what that costs:
+    **672 launches and 22.4 ms** of `main_grad (fp32) += grad (bf16)`, 336 per
+    matrix over 112 experts x 3 MoE layers, each a small add where one contiguous
+    add would do.
+
+    TE supports `single_grouped_weight`, but **core never passes it**, and the
+    `NVTE_GROUPED_LINEAR_SINGLE_PARAM` env var only *gates* an explicitly
+    requested True -- setting the env var alone does nothing. So the argument has
+    to be injected where core builds its TE kwargs.
+
+    EXPERIMENTAL upstream, and it changes the parameter layout, which the QAT
+    wiring reads directly (`_get_weight_tensors` does `getattr(self, f"weight{i}")`).
+    Off unless asked for.
+    """
+    global _ORIGINAL_EXTRA_TE_KWARGS
+    import functools
+    import os
+
+    import transformer_engine.pytorch as te
+
+    if _ORIGINAL_EXTRA_TE_KWARGS is not None:
+        return
+    # Patch TE's GroupedLinear.__init__, not core's `_get_extra_te_kwargs`: that
+    # helper is shared by *every* TE module, so injecting the argument there makes
+    # `RMSNorm.__init__() got an unexpected keyword argument` -- only GroupedLinear
+    # takes it.
+    _ORIGINAL_EXTRA_TE_KWARGS = te.GroupedLinear.__init__
+
+    @functools.wraps(_ORIGINAL_EXTRA_TE_KWARGS)
+    def _init(self, *args, **kwargs):
+        os.environ["NVTE_GROUPED_LINEAR_SINGLE_PARAM"] = "1"
+        kwargs.setdefault("single_grouped_weight", True)
+        return _ORIGINAL_EXTRA_TE_KWARGS(self, *args, **kwargs)
+
+    te.GroupedLinear.__init__ = _init
+
+
+def _contract_grouped_linear_single_param():
+    """TE must still accept the argument, and core must still build its kwargs here."""
+    import inspect
+
+    from megatron.core.extensions import transformer_engine as te_ext
+
+    assert hasattr(te_ext, "_get_extra_te_kwargs"), (
+        "core no longer builds TE kwargs through _get_extra_te_kwargs; the "
+        "single-grouped-weight injection would silently do nothing."
+    )
+    try:
+        import transformer_engine.pytorch as te
+
+        sig = inspect.signature(te.GroupedLinear.__init__)
+        assert "single_grouped_weight" in sig.parameters, (
+            "TE's GroupedLinear no longer takes single_grouped_weight."
+        )
+    except ImportError:  # pragma: no cover
+        pass
+
+
 def _contract_gpt_model_block():
     """GPTModel must still resolve TransformerBlock at module scope and build it."""
     import megatron.core.models.gpt.gpt_model as gm
@@ -227,6 +292,7 @@ PIN_CONTRACTS = (
     ("core_transformer_config_from_args substitution", _contract_config_substitution),
     ("MLA passes k_channels to core_attention", _contract_mla_core_attention_kwargs),
     ("router expert-bias update dispatches to the module", _contract_router_bias_dispatch),
+    ("TE GroupedLinear accepts single_grouped_weight", _contract_grouped_linear_single_param),
 )
 
 

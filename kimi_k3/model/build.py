@@ -52,6 +52,10 @@ def build_k3_model(
         from ..moe.k3_moe_layer import set_moe_gemm_backend
 
         set_moe_gemm_backend(getattr(config, "k3_moe_ck_grouped_gemm", True))
+    if getattr(config, "k3_grouped_linear_single_param", False):
+        from .core_patch import install_grouped_linear_single_param
+
+        install_grouped_linear_single_param()
     if getattr(config, "moe_router_enable_expert_bias", False):
         # Without this, core's finalize_model_grads overwrites the router's
         # quantile-balanced bias with its own sign-step every iteration.
