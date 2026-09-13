@@ -36,11 +36,12 @@ class K3TransformerBlock(TransformerBlock):
         eps = cfg.layernorm_epsilon
         fp32 = getattr(cfg, "k3_attn_res_fp32", True)
         chunked = getattr(cfg, "k3_attn_res_chunked", False)
+        triton = getattr(cfg, "k3_attn_res_triton", False)
         chunk = getattr(cfg, "k3_attn_res_chunk", 4096)
         # Per-layer mixes belong to K3TransformerLayer; only the model-level mix
         # is the block's, and it lives on the last stage.
         self.output_attn_res = (
-            AttnResMixer(hidden, eps, fp32, chunked, chunk) if self.post_process else None
+            AttnResMixer(hidden, eps, fp32, chunked, chunk, triton) if self.post_process else None
         )
         self._detach_slots_for_test = False
 

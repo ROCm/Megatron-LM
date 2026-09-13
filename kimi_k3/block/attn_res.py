@@ -85,6 +85,7 @@ class AttnResMixer(torch.nn.Module):
         fp32: bool = True,
         chunked: bool = False,
         chunk: int = 4096,
+        triton: bool = False,
     ):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(hidden_size))
@@ -96,12 +97,20 @@ class AttnResMixer(torch.nn.Module):
         #: (G44/G45). Named `fused` until 2026-09-12, which was simply wrong.
         self.chunked = chunked
         self.chunk = chunk
+        #: `--k3-attn-res-triton`. The real fused kernel; wins over `chunked`.
+        self.triton = triton
 
     def forward(
         self, prefix_sum: torch.Tensor, block_residual: Optional[torch.Tensor]
     ) -> torch.Tensor:
         if block_residual is None:
             return prefix_sum
+        if self.triton and self.fp32:
+            from .attn_res_triton import fused_attn_res_mix
+
+            return fused_attn_res_mix(
+                prefix_sum, block_residual, self.weight, self.proj, self.eps
+            )
         if self.chunked and self.fp32:
             return attn_res_mix_chunked(
                 prefix_sum, block_residual, self.weight, self.proj, self.eps, self.chunk

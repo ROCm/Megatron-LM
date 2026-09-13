@@ -60,6 +60,10 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     group.add_argument("--k3-attn-res-block-size", type=int, default=12,
                        help="release: 12, giving 8 residual slots over 93 layers")
     group.add_argument("--k3-attn-res-fp32", action=argparse.BooleanOptionalAction, default=True)
+    group.add_argument("--k3-attn-res-triton", action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help="the fused Triton AttnRes kernel. Wins over --k3-attn-res-chunked. "
+                            "Forward only: the backward recomputes through the eager oracle.")
     group.add_argument("--k3-attn-res-chunked", "--k3-attn-res-fused",
                        dest="k3_attn_res_chunked",
                        action=argparse.BooleanOptionalAction, default=False,

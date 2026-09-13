@@ -119,6 +119,13 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     see `block/attn_res.attn_res_mix_chunked`. Trades more kernel launches for a
     smaller peak fp32 temporary, which only pays at production geometry."""
 
+    k3_attn_res_triton: bool = False
+    """Use the fused Triton mixer (`block/attn_res_triton`). Takes precedence over
+    `k3_attn_res_chunked`. Unlike that one this *is* a kernel: 10.6x the eager
+    forward at production shape, 87% of copy bandwidth. Gradients are the eager
+    ones exactly -- the backward recomputes through the oracle, so it is not
+    accelerated and the peak-memory win is forward-only (G58)."""
+
     k3_attn_res_fused: Optional[bool] = None
     """Deprecated spelling of `k3_attn_res_chunked`, kept so old configs load."""
     """Chunked mixer (P11). Off by default: the eager path is the oracle, and this
