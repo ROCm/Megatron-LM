@@ -150,6 +150,12 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     k3_situ_beta: float = 4.0
     k3_situ_linear_beta: float = 25.0
+    k3_kda_fused_elementwise: bool = True
+    """Use the fused Triton KDA kernels (`attention/kda_triton`): gated RMSNorm
+    and the causal short conv. Measured 2.53x and 1.89x on forward+backward at
+    production shape (G62), in 69 of 93 layers. Off falls back to the eager
+    expressions, which stay the oracles."""
+
     k3_situ_fused: bool = True
     """Use the fused Triton SiTU kernel (`moe/situ_triton`). Measured 5.8x on
     forward+backward and 15.7x less peak memory than the eager expression, which

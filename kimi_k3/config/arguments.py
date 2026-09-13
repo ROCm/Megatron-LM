@@ -75,6 +75,10 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     group.add_argument("--k3-latent-moe-use-norm", action=argparse.BooleanOptionalAction,
                        default=True, help="RMSNorm on the combined expert output before up-proj")
     group.add_argument("--k3-first-k-dense-replace", type=int, default=1)
+    group.add_argument("--k3-kda-fused-elementwise", action=argparse.BooleanOptionalAction,
+                       default=True,
+                       help="fused Triton KDA gated-RMSNorm and causal short conv (2.53x "
+                            "and 1.89x fwd+bwd). --no-... falls back to the eager oracles.")
     group.add_argument("--k3-situ-fused", action=argparse.BooleanOptionalAction,
                        default=True,
                        help="fused Triton SiTU kernel; --no-k3-situ-fused falls back to "

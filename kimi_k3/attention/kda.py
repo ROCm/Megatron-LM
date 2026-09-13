@@ -29,13 +29,22 @@ import torch.nn.functional as F
 from .kda_backends import EAGER, kda_forward
 
 
-def causal_short_conv(x: torch.Tensor, weight: torch.Tensor, activation: str = "silu") -> torch.Tensor:
+def causal_short_conv(x: torch.Tensor, weight: torch.Tensor, activation: str = "silu",
+                      fused: bool = False) -> torch.Tensor:
     """Depthwise causal convolution over time, then SiLU.
+
+    `fused=True` uses the Triton kernel (`kda_triton`), which folds the left pad,
+    both transposes, the depthwise conv and the SiLU into one pass. This eager
+    form stays the oracle.
 
     ``x`` is ``[B, T, D]`` and ``weight`` is ``[D, 1, W]`` -- the checkpoint's
     layout (`[12288, 1, 4]`). Left-padding by ``W - 1`` is what makes it causal:
     token *t* sees only *t-W+1 .. t*.
     """
+    if fused:
+        from .kda_triton import fused_causal_short_conv
+
+        return fused_causal_short_conv(x, weight, activation)
     b, t, d = x.shape
     w = weight.shape[-1]
     y = F.conv1d(
@@ -50,8 +59,17 @@ def causal_short_conv(x: torch.Tensor, weight: torch.Tensor, activation: str = "
     return y
 
 
-def gated_rms_norm(x: torch.Tensor, weight: torch.Tensor, gate: torch.Tensor, eps: float) -> torch.Tensor:
-    """`FusedRMSNormGated(head_dim, activation='sigmoid')`: normalise, then gate."""
+def gated_rms_norm(x: torch.Tensor, weight: torch.Tensor, gate: torch.Tensor, eps: float,
+                   fused: bool = False) -> torch.Tensor:
+    """`FusedRMSNormGated(head_dim, activation='sigmoid')`: normalise, then gate.
+
+    The release ships this *fused* -- the name says so -- and this transcription
+    is eight aten ops. `fused=True` uses the Triton kernel; this stays the oracle.
+    """
+    if fused:
+        from .kda_triton import fused_gated_rms_norm
+
+        return fused_gated_rms_norm(x, weight, gate, eps)
     hi = torch.promote_types(x.dtype, torch.float32)
     xf = x.to(hi)
     normed = xf * torch.rsqrt(xf.pow(2).mean(-1, keepdim=True) + eps)
@@ -69,6 +87,7 @@ class KimiDeltaAttention(torch.nn.Module):
         self.num_heads = config.k3_kda_num_heads
         self.head_dim = config.k3_kda_head_dim
         self.conv_size = config.k3_kda_conv_size
+        self.fused_elementwise = getattr(config, "k3_kda_fused_elementwise", True)
         self.eps = config.layernorm_epsilon
         self.backend = config.k3_kda_backend
         self.lower_bound = config.k3_kda_gate_lower_bound
@@ -137,9 +156,10 @@ class KimiDeltaAttention(torch.nn.Module):
         backend: Optional[str] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """``hidden_states`` is ``[B, T, hidden]``; returns ``(out, final_state)``."""
-        q = causal_short_conv(self.q_proj(hidden_states), self.q_conv1d_weight)
-        k = causal_short_conv(self.k_proj(hidden_states), self.k_conv1d_weight)
-        v = causal_short_conv(self.v_proj(hidden_states), self.v_conv1d_weight)
+        fused = self.fused_elementwise
+        q = causal_short_conv(self.q_proj(hidden_states), self.q_conv1d_weight, fused=fused)
+        k = causal_short_conv(self.k_proj(hidden_states), self.k_conv1d_weight, fused=fused)
+        v = causal_short_conv(self.v_proj(hidden_states), self.v_conv1d_weight, fused=fused)
 
         g = self._heads(self.decay_gate_input(hidden_states))
         beta = self.b_proj(hidden_states).float()
@@ -153,7 +173,8 @@ class KimiDeltaAttention(torch.nn.Module):
             output_final_state=output_final_state,
         )
 
-        o = gated_rms_norm(o, self.o_norm_weight, self._heads(self.output_gate(hidden_states)), self.eps)
+        o = gated_rms_norm(o, self.o_norm_weight, self._heads(self.output_gate(hidden_states)),
+                           self.eps, fused=self.fused_elementwise)
         return self.o_proj(o.flatten(-2)), state
 
     # --- checkpointing -------------------------------------------------------
