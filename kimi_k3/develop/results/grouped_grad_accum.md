@@ -66,3 +66,63 @@ If it is wanted before TE fixes this, the other route is to make QAT quantise th
 fused buffer as one tensor instead of parametrizing per expert -- which may be
 *simpler* than the current wiring, not harder. That does nothing about the GPU
 fault, so TE has to work first.
+
+---
+
+## G64 — confirmed: `single_grouped_weight` silently drops the weight gradient
+
+Reproduced with **no K3 code involved**, on our pin
+`transformer_engine 2.18.0.dev0+8f377e4`:
+
+```python
+gl = te.GroupedLinear(4, 256, 384, bias=False, params_dtype=torch.bfloat16,
+                      single_grouped_weight=True).cuda()
+gl(x, [PER]*4).sum().backward()
+# single_grouped_weight=False -> grads {weight0..3: (384, 256)}
+# single_grouped_weight=True  -> grads {weight: None}
+```
+
+`backward()` raises nothing, `x.grad` is finite, `weight.requires_grad` is True.
+The experts simply never receive a gradient.
+
+### Root cause
+
+`GroupedLinear._get_weight_tensors()` (`grouped_linear.py:2089`) returns, for the
+grouped layout, `grouped_weight.split_into_quantized_tensors()` -- and those
+splits are **detached**:
+
+```
+leaf param 'weight':     requires_grad=True   is_leaf=True   type=GroupedTensor
+_get_weight_tensors():   requires_grad=False  is_leaf=True   grad_fn=None   (x4)
+```
+
+Those detached tensors are what reach `_GroupedLinear.apply` as the weight inputs.
+`_GroupedLinear.backward` duly returns `*wgrad_list`, but there is no autograd
+edge from them back to the leaf parameter, so nothing accumulates. The per-expert
+path is unaffected because `weight{i}` *are* the leaves (`:2098`).
+
+This is upstream's to fix: the split has to preserve the graph (a differentiable
+view or a custom autograd node that scatters wgrads back into the grouped tensor).
+
+### Severity
+
+Worse than the EP=8 memory fault reported above, because it is **silent**. A crash
+stops the run; this trains a model whose 896 routed experts never update, while
+the loss still falls because every other parameter still learns. Nothing in
+Megatron would flag it -- DDP would reduce a gradient buffer that is never written.
+
+### Status
+
+`k3_grouped_linear_single_param` stays default off. The patch and the pin contract
+stay so the next TE bump re-tests in minutes. **Do not enable it** until
+`_get_weight_tensors` preserves the autograd path, and verify by asserting
+`weight.grad is not None` rather than by whether the run completes.
+
+### A local artefact worth knowing about
+
+While confirming this, TE reported version `2.12.0.dev0+40434cf6` from a script run
+in `/tmp` -- because the earlier TE-2.12 extraction left
+`/tmp/transformer_engine-2.12.0.dev0+40434cf6.dist-info` behind, which poisons
+`importlib.metadata` for any process with `/tmp` on `sys.path`. The imported
+*module* was 2.18 throughout; only the version string was wrong. Anything that
+gates on `is_te_min_version` and runs from `/tmp` would read the wrong version.
