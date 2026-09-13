@@ -58,3 +58,64 @@ not.
 Standalone microbenchmarks at production tensor shape, not yet re-traced in-model.
 At the proxy geometry these two sites totalled 1.86 ms of a 1842 ms iteration, so
 the in-model effect will be small; the case is full depth and full sequence.
+
+---
+
+## In-model, all four fused kernels enabled
+
+> `torchrun --standalone --nproc_per_node=8 -m kimi_k3.tools.proxy_ep8 --preset 4L \`
+> `  --ep 8 --seq 512 --triton-attn-res --record-shapes --with-stack`
+> Raw: `results/raw/allfused_run.jsonl`. Trace:
+> `traces/proxy_ep8_4L_rank0_alltoall_tritonar_shapes_stack.{json,stacks}`.
+
+SiTU (G61), AttnRes forward and backward (G58/G59), KDA gated RMSNorm and causal
+short conv (G62), all active.
+
+**The binary check passes: `miopen_depthwise_convolution` and
+`aten::convolution_backward` are absent from the trace.** A named kernel either
+runs or it does not, so this needs no tolerance judgement -- the eager conv path
+is gone.
+
+All nine Triton kernels dispatch:
+
+| kernel | ms | calls |
+|---|---|---|
+| `_dw_reduce_kernel` | 1.423 | 8 |
+| `_conv_bwd` | 0.862 | 9 |
+| `_situ_fwd` | 0.656 | 14 |
+| `_situ_bwd` | 0.345 | 7 |
+| `_conv_fwd` | 0.329 | 18 |
+| `_grn_fwd` / `_grn_bwd` | 0.356 | 9 |
+| `_attn_res_kernel` / `_bwd` | 0.351 | 23 |
+
+| region | baseline | all fused |
+|---|---|---|
+| steady iteration | 1858.2 ms | **1836.4 ms** |
+| `k3.layer` | 87.24 ms | **72.27 ms** (-17%) |
+| `k3.kda` | 14.65 ms | **10.38 ms** (-29%) |
+| `k3.attn_res` | 7.65 ms | **0.85 ms** (-9x) |
+| kernel launches | 59,943 | **58,354** |
+
+### What this does and does not establish
+
+The **total iteration moved 1.2%**. The iteration is 81% Muon, and all of this
+work is in the other 19%. Each kernel is a genuine 1.9x-6.8x at production shape;
+at seq 512 with K <= 1 there is an order of magnitude less to collect, which was
+the stated expectation going in and is what happened.
+
+So this trace establishes that the kernels are **correct and dispatching in a real
+step** -- not that they pay off yet. Their case is full depth and full sequence,
+which no single node can run.
+
+One thing the trace surfaces: **`_dw_reduce_kernel` is now the largest fused
+kernel at 1.423 ms**, and at `K <= 1` it is doing almost no useful work, so that is
+nearly all fixed overhead. At production `K = 8` it amortises; if AttnRes ever
+matters at small `K`, that reduction is the thing to revisit.
+
+### A process note
+
+Two attempts at this run failed on `DistNetworkError ... code: -98` before I
+looked properly. The cause was mine: picking a "free" port by `bind()`-then-
+`close()` leaves it in `TIME_WAIT`, so **the probe poisoned the port it had just
+reported as free**. `torchrun --standalone` picks and holds its own port and
+removes the race.
