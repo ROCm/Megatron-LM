@@ -71,6 +71,7 @@ and built the numerics contract the kernels must match
 |---|---|---|
 | ROCm/Megatron-LM | NVIDIA Megatron-LM license (BSD-3-style, per-file NVIDIA copyright) | We add files under `kimi_k3/` and modify nothing in `megatron/**`; our additions carry their own headers. Compatible. |
 | ROCm/TransformerEngine | Apache-2.0 (upstream) / MIT for the AMD fork's added files | Runtime dependency only; no code vendored. Compatible. |
+| amd_mori | **1.2.2** | MoRI EP. NOT `mori` on PyPI. 1.2.3 fails to import (`libhipfile.so.0`, absent in ROCm 7.2.1); 1.1.1 imports then corrupts the heap. Needs `libgrpc++1.51t64`. Measured a regression at single-node EP=8 (G60) |
 | AITER | MIT (© Advanced Micro Devices) | Runtime dependency only; no code vendored. Compatible. |
 | fla (flash-linear-attention) | MIT (© 2023-2026 Songlin Yang, Yu Zhang, Zhiyuan Li) | Runtime dependency. If any eager reference is *ported*, the file carries a provenance header naming this license (rule R7.2). Compatible. |
 | HF moonshotai/Kimi-K3 | "Kimi K3 License" — MIT-style grant covering weights, config, inference **and training** code, with attribution conditions | We read config/modeling sources to derive an independent implementation and we convert weights. Permitted. Any file transcribing released code carries a provenance header naming this license. |

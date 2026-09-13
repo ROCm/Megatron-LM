@@ -55,40 +55,43 @@ if HAVE_TRITON:
         BJ: tl.constexpr, BH: tl.constexpr,
     ):
         t = tl.program_id(0).to(tl.int64)
-        H64 = H.to(tl.int64)
-        K64 = K.to(tl.int64)
+        # NB: do *not* call .to() on H/K. Triton specializes integer kernel args
+        # equal to 1 into constexpr ints, which have no .to() -- and K == 1 is the
+        # normal case early in a block (attn_res_block_size 12 means K grows from
+        # 0). Starting the offset arithmetic from the int64 program id is enough
+        # to keep the products 64-bit.
         j = tl.arange(0, BJ).to(tl.int64)
-        jm = j <= K64                       # K+1 candidates: K slots plus the prefix
-        is_prefix = j == K64
+        jm = j <= K                       # K+1 candidates: K slots plus the prefix
+        is_prefix = j == K
 
         s2 = tl.zeros((BJ,), dtype=tl.float32)
         dot = tl.zeros((BJ,), dtype=tl.float32)
 
         for h0 in range(0, H, BH):
             h = h0 + tl.arange(0, BH).to(tl.int64)
-            hm = h < H64
+            hm = h < H
             w = tl.load(W + h, mask=hm, other=0.0).to(tl.float32)
-            br = tl.load(BLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
-                         mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
-            ps = tl.load(PREFIX + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            br = tl.load(BLOCK_RES + t * K * H + j[:, None] * H + h[None, :],
+                         mask=(j[:, None] < K) & hm[None, :], other=0.0).to(tl.float32)
+            ps = tl.load(PREFIX + t * H + h, mask=hm, other=0.0).to(tl.float32)
             v = tl.where(is_prefix[:, None], ps[None, :], br)
             s2 += tl.sum(v * v, axis=1)
             dot += tl.sum(v * w[None, :], axis=1)
 
-        scale = 1.0 / tl.sqrt(s2 / H.to(tl.float32) + EPS)
+        scale = 1.0 / tl.sqrt(s2 / (1.0 * H) + EPS)
         score = tl.where(jm, dot * scale, float("-inf"))
         p = tl.exp(score - tl.max(score, axis=0))
         p = p / tl.sum(p, axis=0)
 
         for h0 in range(0, H, BH):
             h = h0 + tl.arange(0, BH).to(tl.int64)
-            hm = h < H64
-            br = tl.load(BLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
-                         mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
-            ps = tl.load(PREFIX + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            hm = h < H
+            br = tl.load(BLOCK_RES + t * K * H + j[:, None] * H + h[None, :],
+                         mask=(j[:, None] < K) & hm[None, :], other=0.0).to(tl.float32)
+            ps = tl.load(PREFIX + t * H + h, mask=hm, other=0.0).to(tl.float32)
             v = tl.where(is_prefix[:, None], ps[None, :], br)
             out = tl.sum(v * p[:, None], axis=0)
-            tl.store(OUT + t * H64 + h, out.to(OUT.dtype.element_ty), mask=hm)
+            tl.store(OUT + t * H + h, out.to(OUT.dtype.element_ty), mask=hm)
 
 
     @triton.jit
@@ -125,11 +128,14 @@ if HAVE_TRITON:
         atomics anywhere; `dprefix` and `dblock_res` are per-token already.
         """
         t = tl.program_id(0).to(tl.int64)
-        H64 = H.to(tl.int64)
-        K64 = K.to(tl.int64)
+        # NB: do *not* call .to() on H/K. Triton specializes integer kernel args
+        # equal to 1 into constexpr ints, which have no .to() -- and K == 1 is the
+        # normal case early in a block (attn_res_block_size 12 means K grows from
+        # 0). Starting the offset arithmetic from the int64 program id is enough
+        # to keep the products 64-bit.
         j = tl.arange(0, BJ).to(tl.int64)
-        jm = j <= K64
-        is_prefix = j == K64
+        jm = j <= K
+        is_prefix = j == K
 
         s2 = tl.zeros((BJ,), dtype=tl.float32)
         dot = tl.zeros((BJ,), dtype=tl.float32)
@@ -137,18 +143,18 @@ if HAVE_TRITON:
 
         for h0 in range(0, H, BH):
             h = h0 + tl.arange(0, BH).to(tl.int64)
-            hm = h < H64
+            hm = h < H
             w = tl.load(W + h, mask=hm, other=0.0).to(tl.float32)
-            g = tl.load(GOUT + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
-            br = tl.load(BLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
-                         mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
-            ps = tl.load(PREFIX + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            g = tl.load(GOUT + t * H + h, mask=hm, other=0.0).to(tl.float32)
+            br = tl.load(BLOCK_RES + t * K * H + j[:, None] * H + h[None, :],
+                         mask=(j[:, None] < K) & hm[None, :], other=0.0).to(tl.float32)
+            ps = tl.load(PREFIX + t * H + h, mask=hm, other=0.0).to(tl.float32)
             v = tl.where(is_prefix[:, None], ps[None, :], br)
             s2 += tl.sum(v * v, axis=1)
             dot += tl.sum(v * w[None, :], axis=1)
             gp += tl.sum(v * g[None, :], axis=1)
 
-        Hf = H.to(tl.float32)
+        Hf = 1.0 * H
         r = 1.0 / tl.sqrt(s2 / Hf + EPS)
         score = tl.where(jm, dot * r, float("-inf"))
         p = tl.exp(score - tl.max(score, axis=0))
@@ -160,20 +166,20 @@ if HAVE_TRITON:
 
         for h0 in range(0, H, BH):
             h = h0 + tl.arange(0, BH).to(tl.int64)
-            hm = h < H64
+            hm = h < H
             w = tl.load(W + h, mask=hm, other=0.0).to(tl.float32)
-            g = tl.load(GOUT + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
-            br = tl.load(BLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
-                         mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
-            ps = tl.load(PREFIX + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            g = tl.load(GOUT + t * H + h, mask=hm, other=0.0).to(tl.float32)
+            br = tl.load(BLOCK_RES + t * K * H + j[:, None] * H + h[None, :],
+                         mask=(j[:, None] < K) & hm[None, :], other=0.0).to(tl.float32)
+            ps = tl.load(PREFIX + t * H + h, mask=hm, other=0.0).to(tl.float32)
             v = tl.where(is_prefix[:, None], ps[None, :], br)
 
             dv = p[:, None] * g[None, :] + dd[:, None] * w[None, :] + 2.0 * ds2[:, None] * v
-            tl.store(DBLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
+            tl.store(DBLOCK_RES + t * K * H + j[:, None] * H + h[None, :],
                      dv.to(DBLOCK_RES.dtype.element_ty),
-                     mask=(j[:, None] < K64) & hm[None, :])
+                     mask=(j[:, None] < K) & hm[None, :])
             dprefix = tl.sum(tl.where(is_prefix[:, None], dv, 0.0), axis=0)
-            tl.store(DPREFIX + t * H64 + h, dprefix.to(DPREFIX.dtype.element_ty), mask=hm)
+            tl.store(DPREFIX + t * H + h, dprefix.to(DPREFIX.dtype.element_ty), mask=hm)
         tl.store(DD + t * BJ + j, dd, mask=jm)
 
 
@@ -196,24 +202,27 @@ if HAVE_TRITON:
         """
         hb = tl.program_id(0).to(tl.int64)
         tb = tl.program_id(1).to(tl.int64)
-        H64 = H.to(tl.int64)
-        K64 = K.to(tl.int64)
+        # NB: do *not* call .to() on H/K. Triton specializes integer kernel args
+        # equal to 1 into constexpr ints, which have no .to() -- and K == 1 is the
+        # normal case early in a block (attn_res_block_size 12 means K grows from
+        # 0). Starting the offset arithmetic from the int64 program id is enough
+        # to keep the products 64-bit.
         h = hb * BH + tl.arange(0, BH).to(tl.int64)
-        hm = h < H64
+        hm = h < H
         j = tl.arange(0, BJ).to(tl.int64)
         acc = tl.zeros((BH,), dtype=tl.float32)
         for i in range(TB):
             t = tb * TB + i
             if t < T:
                 t64 = t.to(tl.int64)
-                dd = tl.load(DD + t64 * BJ + j, mask=j <= K64, other=0.0)
+                dd = tl.load(DD + t64 * BJ + j, mask=j <= K, other=0.0)
                 br = tl.load(
-                    BLOCK_RES + t64 * K64 * H64 + j[:, None] * H64 + h[None, :],
-                    mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
-                ps = tl.load(PREFIX + t64 * H64 + h, mask=hm, other=0.0).to(tl.float32)
-                v = tl.where((j == K64)[:, None], ps[None, :], br)
+                    BLOCK_RES + t64 * K * H + j[:, None] * H + h[None, :],
+                    mask=(j[:, None] < K) & hm[None, :], other=0.0).to(tl.float32)
+                ps = tl.load(PREFIX + t64 * H + h, mask=hm, other=0.0).to(tl.float32)
+                v = tl.where((j == K)[:, None], ps[None, :], br)
                 acc += tl.sum(dd[:, None] * v, axis=0)
-        tl.store(DWPART + tb * H64 + h, acc, mask=hm)
+        tl.store(DWPART + tb * H + h, acc, mask=hm)
 
 
 def attn_res_mix_triton(

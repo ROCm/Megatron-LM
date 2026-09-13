@@ -25,7 +25,7 @@ def operands(T, K, H, dtype=torch.float32, seed=0):
     )
 
 
-@pytest.mark.parametrize("T,K,H", [(64, 2, 512), (129, 4, 7168), (512, 8, 7168)])
+@pytest.mark.parametrize("T,K,H", [(64, 1, 512), (64, 2, 512), (129, 4, 7168), (512, 8, 7168)])
 def test_forward_matches_the_oracle(T, K, H):
     """Tolerance, not equality -- and tight enough to catch a real error.
 
@@ -33,6 +33,10 @@ def test_forward_matches_the_oracle(T, K, H):
     still failing anything that has the arithmetic wrong. T=129 is deliberately
     not a multiple of any block size.
     """
+    # K == 1 is in the list deliberately: Triton specializes integer kernel args
+    # equal to 1 into constexpr, and the first version of this kernel called
+    # `.to(tl.int64)` on K. It passed at K=2/4/8 and failed in the model, where
+    # K grows from 0 and spends the first block at 1.
     p, s, nw, pw = operands(T, K, H)
     want = attn_res_mix(p, s, nw, pw, 1e-6)
     got = fused_attn_res_mix(p, s, nw, pw, 1e-6)

@@ -78,6 +78,15 @@ def build(args, rank: int, world: int):
         overrides["moe_token_dispatcher_type"] = args.dispatcher
     if args.flex_backend:
         overrides["moe_flex_dispatcher_backend"] = args.flex_backend
+        if args.flex_backend == "mori":
+            # Core refuses to construct without it: it sizes the MORI symmetric
+            # memory buffers, and only the training entry point auto-derives it
+            # (transformer_config.py:1272). seq * mbs, mbs = 1 here.
+            overrides["moe_mori_max_tokens_per_rank"] = args.seq
+            # MORI EP dispatches fp32 probs only; core warns and then aborts.
+            overrides["moe_router_dtype"] = "fp32"
+    if args.triton_attn_res:
+        overrides["k3_attn_res_triton"] = True
     if args.fused_attn_res:
         overrides.update(k3_attn_res_chunked=True, k3_attn_res_chunk=args.attn_res_chunk)
     if args.layers:
@@ -218,6 +227,9 @@ def main() -> None:
                          "with the number of experts local to a rank")
     ap.add_argument("--flex-backend", default=None,
                     help="deepep | mori | hybridep, only with --dispatcher flex")
+    ap.add_argument("--triton-attn-res", action="store_true",
+                    help="the real fused AttnRes kernel (G58/G59). 6.8x the eager "
+                         "forward+backward at production shape, 96x less peak memory.")
     ap.add_argument("--chunked-attn-res", "--fused-attn-res", dest="fused_attn_res",
                     action="store_true",
                     help="run with the chunked AttnRes mixer (G44/G45)")
@@ -251,6 +263,7 @@ def main() -> None:
 
     row = {"preset": args.preset, "ep": args.ep, "seq": args.seq, "world": world,
            "rank": rank, "layers": args.layers, "fused_attn_res": args.fused_attn_res,
+           "triton_attn_res": args.triton_attn_res,
            "arm": args.dispatcher or "default", "experts": args.experts,
            "kda_backend": args.kda_backend, "ck_grouped_gemm": args.ck_grouped_gemm,
            "optimizer": args.optimizer, "cpu_offload": args.cpu_offload,
@@ -312,7 +325,22 @@ def main() -> None:
         row["trace"] = summarise(prof, traced_ms)
         if args.trace_dir and rank == 0:
             os.makedirs(args.trace_dir, exist_ok=True)
-            suffix = ("_shapes" if args.record_shapes else "") + ("_stack" if args.with_stack else "")
+            # Key the name on the configuration, not just the profiler flags. The
+            # first version keyed only on --record-shapes/--with-stack, so a MoRI +
+            # fused-AttnRes run silently overwrote the alltoall + eager baseline and
+            # the side-by-side diff was gone.
+            parts = [args.dispatcher or "alltoall"]
+            if args.flex_backend:
+                parts.append(args.flex_backend)
+            if args.triton_attn_res:
+                parts.append("tritonar")
+            if args.fused_attn_res:
+                parts.append("chunkar")
+            if args.record_shapes:
+                parts.append("shapes")
+            if args.with_stack:
+                parts.append("stack")
+            suffix = "_" + "_".join(parts)
             path = os.path.join(
                 args.trace_dir, f"proxy_ep{args.ep}_{args.preset}_rank0{suffix}.json")
             prof.export_chrome_trace(path)
@@ -320,7 +348,8 @@ def main() -> None:
             if args.with_stack:
                 # Flat text of the same data, since a stack-annotated chrome trace is
                 # awkward to read for "who called this".
-                stacks = os.path.join(args.trace_dir, f"proxy_ep{args.ep}_{args.preset}_rank0.stacks")
+                stacks = os.path.join(
+                    args.trace_dir, f"proxy_ep{args.ep}_{args.preset}_rank0{suffix}.stacks")
                 try:
                     prof.export_stacks(stacks, "self_cuda_time_total")
                     row["stacks"] = stacks

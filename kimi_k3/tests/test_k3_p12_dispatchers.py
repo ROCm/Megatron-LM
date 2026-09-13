@@ -43,8 +43,26 @@ def test_which_runtimes_are_installed(backend):
         installed = True
     except ImportError:
         installed = False
-    # None are installed at the pin. When one is, this fails and the table gets fixed.
-    assert not installed, f"{module} is now installed -- update plan-0/07-dispatcher-ab.md"
+
+    # Updated 2026-09-13 (G60), which is what this tripwire existed to force.
+    #   mori     -- installed, `pip install amd_mori==1.2.2`. NOT `mori`, and the
+    #               version matters: 1.2.3 fails to import (libhipfile.so.0, absent
+    #               in ROCm 7.2.1) and 1.1.1 imports then corrupts the heap.
+    #   deepep   -- needs NVSHMEM; not available on ROCm.
+    #   hybridep -- still absent.
+    expected = {"mori": True, "deepep": False, "hybridep": False}[backend]
+    assert installed is expected, (
+        f"{module} installed={installed}, expected {expected} -- if this flipped, "
+        "re-run the arms and update results/dispatcher_ab.md"
+    )
+    if backend == "mori":
+        import importlib.metadata as md
+
+        version = md.version("amd_mori")
+        assert version == "1.2.2", (
+            f"amd_mori {version}: 1.2.2 is the version that both imports and runs "
+            "on ROCm 7.2.1 here (G60). Re-verify before moving the pin."
+        )
 
 
 def test_mori_refuses_without_its_buffer_size():

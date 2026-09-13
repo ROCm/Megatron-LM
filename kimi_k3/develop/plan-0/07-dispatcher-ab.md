@@ -76,3 +76,14 @@ trusting the flags it passed in. Register: finding **A17**.
 All of it needs a node that is not shared. The P11 baseline could not place an
 EP=8 run because another tenant held ~232 GB, and every arm above is an EP=8
 measurement by definition.
+
+
+---
+
+**Updated 2026-09-13 (G60).** Arm C is no longer blocked: MoRI is installed
+(`pip install amd_mori==1.2.2` -- not `mori`, and 1.2.3/1.1.1 both fail on this
+ROCm). Measured at single-node EP=8 it is a **regression**: 1881.2 ms against
+alltoall's 1858.2, with `k3.moe` going 55.62 -> 141.79 ms, because its dispatch
+does not replace the torch permute/unpermute but adds `_indices_to_multihot` on
+top of it. DeepEP (arm D) remains unavailable -- it needs NVSHMEM. Full numbers
+and the trace evidence: [`../results/dispatcher_ab.md`](../results/dispatcher_ab.md).
