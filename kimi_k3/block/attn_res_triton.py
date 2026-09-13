@@ -91,6 +91,131 @@ if HAVE_TRITON:
             tl.store(OUT + t * H64 + h, out.to(OUT.dtype.element_ty), mask=hm)
 
 
+    @triton.jit
+    def _attn_res_bwd_kernel(
+        PREFIX, BLOCK_RES, W, GOUT, DPREFIX, DBLOCK_RES, DD,
+        T, K, H, EPS,
+        BJ: tl.constexpr, BH: tl.constexpr,
+    ):
+        """Gradients of the fused mix.
+
+        With `p = softmax(d * r)`, `r = rsqrt(s2/H + eps)`, `d = <v, w>` and
+        `s2 = <v, v>`, everything collapses to three per-candidate scalars and one
+        elementwise expression:
+
+            gp[j]  = <g, v[j]>
+            ds[j]  = p[j] * (gp[j] - sum_i p[i] gp[i])        # softmax
+            dd[j]  = ds[j] * r[j]                             # through d
+            ds2[j] = ds[j] * d[j] * (-0.5 * r[j]^3 / H)       # through the rsqrt
+            dv[j,h] = p[j]*g[h] + dd[j]*w[h] + 2*ds2[j]*v[j,h]
+            dw[h]   = sum_t sum_j dd[j] * v[j,h]
+
+        So the backward is the same two passes as the forward, not a bigger
+        computation: pass 1 recomputes `s2`, `d` and adds `gp`; pass 2 writes `dv`
+        and accumulates `dw`. Nothing of size [T, K+1, H] is materialised here
+        either, which is what the eager-recompute wrapper could not avoid.
+
+        `dw` is the one *cross-token* reduction. An earlier version did it with
+        `atomic_add` into an fp32 [H] buffer and that dominated the kernel: 8192
+        programs x 7 chunks x 1024 lanes is ~58M atomics contending on 7168
+        addresses, and the backward ran at ~640 GB/s, an eighth of what its
+        traffic justifies. Instead the kernel stores the per-candidate scalar
+        `dd` ([T, BJ], a few hundred KB) and the host reduces
+        `dw = sum_t sum_j dd[t,j] * v[t,j,h]` with two ordinary reductions. No
+        atomics anywhere; `dprefix` and `dblock_res` are per-token already.
+        """
+        t = tl.program_id(0).to(tl.int64)
+        H64 = H.to(tl.int64)
+        K64 = K.to(tl.int64)
+        j = tl.arange(0, BJ).to(tl.int64)
+        jm = j <= K64
+        is_prefix = j == K64
+
+        s2 = tl.zeros((BJ,), dtype=tl.float32)
+        dot = tl.zeros((BJ,), dtype=tl.float32)
+        gp = tl.zeros((BJ,), dtype=tl.float32)
+
+        for h0 in range(0, H, BH):
+            h = h0 + tl.arange(0, BH).to(tl.int64)
+            hm = h < H64
+            w = tl.load(W + h, mask=hm, other=0.0).to(tl.float32)
+            g = tl.load(GOUT + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            br = tl.load(BLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
+                         mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
+            ps = tl.load(PREFIX + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            v = tl.where(is_prefix[:, None], ps[None, :], br)
+            s2 += tl.sum(v * v, axis=1)
+            dot += tl.sum(v * w[None, :], axis=1)
+            gp += tl.sum(v * g[None, :], axis=1)
+
+        Hf = H.to(tl.float32)
+        r = 1.0 / tl.sqrt(s2 / Hf + EPS)
+        score = tl.where(jm, dot * r, float("-inf"))
+        p = tl.exp(score - tl.max(score, axis=0))
+        p = p / tl.sum(p, axis=0)
+
+        ds = p * (gp - tl.sum(p * gp, axis=0))
+        dd = tl.where(jm, ds * r, 0.0)
+        ds2 = tl.where(jm, ds * dot * (-0.5 * r * r * r / Hf), 0.0)
+
+        for h0 in range(0, H, BH):
+            h = h0 + tl.arange(0, BH).to(tl.int64)
+            hm = h < H64
+            w = tl.load(W + h, mask=hm, other=0.0).to(tl.float32)
+            g = tl.load(GOUT + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            br = tl.load(BLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
+                         mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
+            ps = tl.load(PREFIX + t * H64 + h, mask=hm, other=0.0).to(tl.float32)
+            v = tl.where(is_prefix[:, None], ps[None, :], br)
+
+            dv = p[:, None] * g[None, :] + dd[:, None] * w[None, :] + 2.0 * ds2[:, None] * v
+            tl.store(DBLOCK_RES + t * K64 * H64 + j[:, None] * H64 + h[None, :],
+                     dv.to(DBLOCK_RES.dtype.element_ty),
+                     mask=(j[:, None] < K64) & hm[None, :])
+            dprefix = tl.sum(tl.where(is_prefix[:, None], dv, 0.0), axis=0)
+            tl.store(DPREFIX + t * H64 + h, dprefix.to(DPREFIX.dtype.element_ty), mask=hm)
+        tl.store(DD + t * BJ + j, dd, mask=jm)
+
+
+    @triton.jit
+    def _dw_reduce_kernel(
+        PREFIX, BLOCK_RES, DD, DWPART,
+        T, K, H, TB: tl.constexpr, BJ: tl.constexpr, BH: tl.constexpr,
+    ):
+        """`dw[h] = sum_t sum_j dd[t,j] * v[t,j,h]`, in fp32, without upcasting v.
+
+        The cross-token reduction, as its own kernel. Two earlier attempts were
+        worse for opposite reasons: `atomic_add` from the main backward kernel
+        (58M atomics on 7168 addresses, ~640 GB/s), and a single bf16 GEMV, which
+        rounds the fp32 `dd` before summing and cost 3.05e-03 relative error on
+        the norm/proj *parameter* gradients. Here `dd` stays fp32 and only `v` is
+        read in its native dtype, so neither problem arises.
+
+        Grid is (H blocks, T blocks): each program owns a column strip and a slice
+        of tokens, writing one partial row. The partials are summed by the caller.
+        """
+        hb = tl.program_id(0).to(tl.int64)
+        tb = tl.program_id(1).to(tl.int64)
+        H64 = H.to(tl.int64)
+        K64 = K.to(tl.int64)
+        h = hb * BH + tl.arange(0, BH).to(tl.int64)
+        hm = h < H64
+        j = tl.arange(0, BJ).to(tl.int64)
+        acc = tl.zeros((BH,), dtype=tl.float32)
+        for i in range(TB):
+            t = tb * TB + i
+            if t < T:
+                t64 = t.to(tl.int64)
+                dd = tl.load(DD + t64 * BJ + j, mask=j <= K64, other=0.0)
+                br = tl.load(
+                    BLOCK_RES + t64 * K64 * H64 + j[:, None] * H64 + h[None, :],
+                    mask=(j[:, None] < K64) & hm[None, :], other=0.0).to(tl.float32)
+                ps = tl.load(PREFIX + t64 * H64 + h, mask=hm, other=0.0).to(tl.float32)
+                v = tl.where((j == K64)[:, None], ps[None, :], br)
+                acc += tl.sum(dd[:, None] * v, axis=0)
+        tl.store(DWPART + tb * H64 + h, acc, mask=hm)
+
+
 def attn_res_mix_triton(
     prefix_sum: torch.Tensor,
     block_residual: torch.Tensor,
@@ -125,51 +250,88 @@ def attn_res_mix_triton(
     return out
 
 
+def attn_res_mix_triton_bwd(
+    grad_out: torch.Tensor,
+    prefix_sum: torch.Tensor,
+    block_residual: torch.Tensor,
+    norm_weight: torch.Tensor,
+    proj_weight: torch.Tensor,
+    eps: float,
+    block_h: int = 2048,
+):
+    """Returns (d_prefix_sum, d_block_residual, d_norm_weight, d_proj_weight)."""
+    from .attn_res import score_vector
+
+    T, K, H = block_residual.shape[0], block_residual.shape[1], prefix_sum.shape[-1]
+    w = score_vector(norm_weight, proj_weight).reshape(H).float().contiguous()
+    grad_out = grad_out.contiguous()
+    prefix_sum = prefix_sum.contiguous()
+    block_residual = block_residual.contiguous()
+
+    d_prefix = torch.empty_like(prefix_sum)
+    d_block = torch.empty_like(block_residual)
+    bj = max(16, triton.next_power_of_2(K + 1))
+    bh = min(block_h, triton.next_power_of_2(H))
+    d_d = torch.zeros(T, bj, device=prefix_sum.device, dtype=torch.float32)
+
+    _attn_res_bwd_kernel[(T,)](
+        prefix_sum, block_residual, w, grad_out, d_prefix, d_block, d_d,
+        T, K, H, eps, BJ=bj, BH=bh, num_warps=2, num_stages=1,
+    )
+    # dw = sum_t sum_j dd[t,j] * v[t,j,h]; slots for j < K, prefix for j == K.
+    # As a GEMV against the original bf16 tensors, not an einsum over an upcast
+    # copy: `block_residual.float()` is [T, K, H] fp32, 1.88 GiB at production
+    # shape, which cost more peak memory than the whole kernel saves.
+    tb_size = 64
+    n_tb = (T + tb_size - 1) // tb_size
+    bh_red = min(512, triton.next_power_of_2(H))
+    d_w_part = torch.empty(n_tb, H, device=prefix_sum.device, dtype=torch.float32)
+    _dw_reduce_kernel[((H + bh_red - 1) // bh_red, n_tb)](
+        prefix_sum, block_residual, d_d, d_w_part,
+        T, K, H, TB=tb_size, BJ=bj, BH=bh_red, num_warps=4, num_stages=1,
+    )
+    d_w = d_w_part.sum(0)
+    # w = norm_weight * proj_weight, elementwise, so the two factors split it.
+    d_norm = (d_w * proj_weight.reshape(H).float()).to(norm_weight.dtype)
+    d_proj = (d_w * norm_weight.reshape(H).float()).to(proj_weight.dtype).reshape(
+        proj_weight.shape
+    )
+    return d_prefix, d_block, d_norm, d_proj
+
+
 class _FusedAttnResMix(torch.autograd.Function):
-    """Fast fused forward, eager recompute for the backward.
+    """Fused forward and fused backward.
 
     A raw Triton kernel returns a tensor with no `grad_fn`, so calling
     `attn_res_mix_triton` directly inside a training step silently produces no
     gradients -- the loss still falls, because every *other* path still trains.
     That is the failure mode this wrapper exists to prevent.
 
-    The backward recomputes the mix through the eager oracle under
-    `enable_grad` and differentiates that. Consequences, stated rather than
-    discovered later:
-
-    * gradients are the **eager** gradients, exactly, so every existing AttnRes
-      backward gate still applies unchanged;
-    * the backward is *not* accelerated, and it re-materialises the
-      `[T, K+1, H]` fp32 temporaries the forward avoids -- so the peak-memory
-      win is much smaller than the forward-only figure suggests.
-
-    A real backward kernel is the remaining work. It is tractable -- the
-    gradient of a softmax over a scalar-scaled dot product is closed-form -- but
-    it is a second kernel, not a tweak to this one.
+    The backward is now its own kernel (G59) rather than an eager recompute, so
+    it avoids the `[T, K+1, H]` fp32 temporaries too and the memory win is no
+    longer forward-only. Gradients are therefore no longer bit-identical to the
+    eager path -- they reduce over `H` in tiles -- and are gated on a measured
+    tolerance like the forward.
     """
 
     @staticmethod
     def forward(ctx, prefix_sum, block_residual, norm_weight, proj_weight, eps, block_h):
         ctx.save_for_backward(prefix_sum, block_residual, norm_weight, proj_weight)
-        ctx.eps = eps
+        ctx.eps, ctx.block_h = eps, block_h
         return attn_res_mix_triton(
             prefix_sum, block_residual, norm_weight, proj_weight, eps, block_h
         )
 
     @staticmethod
     def backward(ctx, grad_out):
-        from .attn_res import attn_res_mix
-
-        saved = ctx.saved_tensors
-        leaves = [t.detach().requires_grad_(t.requires_grad) for t in saved]
-        with torch.enable_grad():
-            out = attn_res_mix(leaves[0], leaves[1], leaves[2], leaves[3], ctx.eps)
-        wanted = [t for t in leaves if t.requires_grad]
-        grads = (
-            torch.autograd.grad(out, wanted, grad_out, allow_unused=True) if wanted else ()
+        prefix_sum, block_residual, norm_weight, proj_weight = ctx.saved_tensors
+        dp, db, dn, dq = attn_res_mix_triton_bwd(
+            grad_out, prefix_sum, block_residual, norm_weight, proj_weight,
+            ctx.eps, ctx.block_h,
         )
-        it = iter(grads)
-        return (*(next(it) if t.requires_grad else None for t in leaves), None, None)
+        need = (prefix_sum, block_residual, norm_weight, proj_weight)
+        got = (dp, db, dn, dq)
+        return (*(g if t.requires_grad else None for t, g in zip(need, got)), None, None)
 
 
 def fused_attn_res_mix(

@@ -40,17 +40,57 @@ def test_forward_matches_the_oracle(T, K, H):
     assert rel < 1e-4, f"rel-L2 {rel:.3e}"
 
 
-def test_backward_is_exactly_the_eager_gradient():
-    """The wrapper differentiates the oracle, so anything but 0.0 is a bug."""
+@pytest.mark.parametrize("dtype,bound", [(torch.float32, 1e-4), (torch.bfloat16, 2e-3)])
+def test_backward_matches_the_eager_gradient(dtype, bound):
+    """Tolerance, not equality: the backward is its own kernel now (G59).
+
+    It was an eager recompute at first, which made gradients bit-identical but
+    re-materialised the [T, K+1, H] temporaries the forward avoids -- the memory
+    win was forward-only. With a real backward kernel the reduction order over H
+    differs, so equality is gone and a bound takes its place.
+
+    Measured fp32 ~9e-06 and bf16 ~3e-04; the bounds leave an order of headroom.
+    The norm/proj entries are the sensitive ones -- they are cross-token
+    reductions and an earlier bf16 GEMV version of that reduction sat at 3.05e-03,
+    which this bound would have caught.
+    """
     ref, fused = {}, {}
     for store, fn in ((ref, attn_res_mix), (fused, fused_attn_res_mix)):
-        p, s, nw, pw = operands(64, 4, 7168, seed=1)
+        p, s, nw, pw = operands(129, 4, 7168, dtype=dtype, seed=1)
         for t in (p, s, nw, pw):
             t.requires_grad_(True)
         fn(p, s, nw, pw, 1e-6).sum().backward()
         store.update(prefix=p.grad, slots=s.grad, norm=nw.grad, proj=pw.grad)
     for name in ref:
-        assert torch.equal(fused[name], ref[name]), f"{name} gradient differs"
+        a, b = ref[name].float(), fused[name].float()
+        rel = ((b - a).norm() / a.norm().clamp_min(1e-12)).item()
+        assert rel < bound, f"{name} gradient rel-L2 {rel:.3e} ({dtype})"
+
+
+def test_backward_allocates_no_big_temporary():
+    """The point of the backward kernel: no [T, K+1, H] fp32 stack.
+
+    The eager recompute it replaced was correct but peaked at the eager figure,
+    so the forward's memory win never survived a training step.
+    """
+    T, K, H = 2048, 8, 7168
+    peaks = {}
+    for label, fn in (("eager", attn_res_mix), ("fused", fused_attn_res_mix)):
+        p, s, nw, pw = operands(T, K, H, dtype=torch.bfloat16, seed=2)
+        for t in (p, s, nw, pw):
+            t.requires_grad_(True)
+        fn(p, s, nw, pw, 1e-6).sum().backward()      # warm allocator
+        for t in (p, s, nw, pw):
+            t.grad = None
+        torch.cuda.synchronize(); torch.cuda.empty_cache()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        fn(p, s, nw, pw, 1e-6).sum().backward()
+        torch.cuda.synchronize()
+        peaks[label] = (torch.cuda.max_memory_allocated() - base) / 2**30
+        del p, s, nw, pw
+        torch.cuda.empty_cache()
+    assert peaks["fused"] < peaks["eager"] / 8, peaks
 
 
 def test_it_is_differentiable_at_all():

@@ -237,3 +237,82 @@ Single-GPU microbenchmark at production tensor shape. Not yet measured inside a
 model step, where AttnRes was 0.09% of device time at the proxy geometry (seq 512,
 K<=1) -- the shape where this kernel is worth least. Its case rests on production
 geometry, which no single node can run.
+
+
+---
+
+# G59 — the backward kernel
+
+> `kimi_k3/block/attn_res_triton.py`, `tests/test_k3_p11_triton_attn_res.py`.
+> Measured on one MI355X, bf16 tensors, fp32 math, T 8192 / K 8 / H 7168.
+
+G58 shipped a fused forward with an **eager recompute** for the backward:
+gradients were bit-identical, but the backward re-materialised the
+`[T, K+1, H]` fp32 temporaries the forward avoids, so the memory win was
+forward-only. This is the backward as its own kernel.
+
+## The gradients collapse to three scalars
+
+With `p = softmax(d*r)`, `r = rsqrt(s2/H + eps)`, `d = <v,w>`, `s2 = <v,v>`:
+
+    gp[j]   = <g, v[j]>
+    ds[j]   = p[j] * (gp[j] - sum_i p[i] gp[i])       # softmax
+    dd[j]   = ds[j] * r[j]                            # through d
+    ds2[j]  = ds[j] * d[j] * (-0.5 * r[j]^3 / H)      # through the rsqrt
+    dv[j,h] = p[j]*g[h] + dd[j]*w[h] + 2*ds2[j]*v[j,h]
+    dw[h]   = sum_t sum_j dd[j] * v[j,h]
+
+So the backward is the same two passes as the forward, not a larger computation.
+
+## Full forward + backward
+
+| | eager | chunked | **triton** |
+|---|---|---|---|
+| T 4096 | 8.376 ms / 5.414 GiB | 8.371 / 5.414 | **1.363 ms / 0.057 GiB** |
+| **T 8192** | 16.665 ms / 10.828 GiB | 17.779 / 6.891 | **2.456 ms / 0.113 GiB** |
+
+**6.8x faster, 96x less peak memory.** Gradient accuracy against the eager
+oracle: fp32 ~9e-06, bf16 ~3e-04 on all four inputs.
+
+## Three versions of one reduction
+
+`dw` is the only cross-token reduction and it took three attempts. Recorded
+because each failed for a different reason and the first two looked fine:
+
+| approach | fwd+bwd | peak | norm/proj grad error |
+|---|---|---|---|
+| `atomic_add` from the main kernel | 6.63 ms | 0.11 GiB | ok |
+| bf16 GEMV | **1.82 ms** | **0.11 GiB** | **3.05e-03** |
+| fp32 einsum over token chunks | 3.61 ms | 0.55 GiB | 2.3e-04 |
+| **separate fp32 reduction kernel** | **2.46 ms** | **0.11 GiB** | **2.3e-04** |
+
+* **Atomics**: 8192 programs x 7 chunks x 1024 lanes is ~58M atomic adds onto
+  7168 addresses. The kernel ran at ~640 GB/s, an eighth of what its traffic
+  justifies -- it was not bandwidth-bound, it was contending.
+* **bf16 GEMV**: fastest, and wrong in a way only one of four gradients showed.
+  It rounds the fp32 `dd` *before* summing, giving 3.05e-03 on the norm/proj
+  gradients against 1.9e-04 on the others. Those two are **parameter** gradients
+  and the AttnRes path is specified fp32 (R7.3), so this was not acceptable even
+  though the error sits at bf16 epsilon.
+* **fp32 einsum over chunks**: correct, but upcasts `v` a chunk at a time --
+  5x the peak memory and 1.5x the time.
+* **Separate kernel**: `dd` stays fp32, `v` is read in its native dtype, grid is
+  (H blocks, T blocks) writing partials that the caller sums. Both properties at
+  once.
+
+A bug worth recording from that sequence: the chunk size was written
+`1 << 20 // max(1, K*H//256)`, which parses as `1 << (20 // ...)` = `1 << 0` = 1.
+It ran 8192 single-token einsums and took **235 ms**, 14x *slower* than eager, and
+the only symptom was the timing.
+
+## Status
+
+Not bit-identical and cannot be -- reductions over `H` run in tiles. Gated on
+measured tolerances at both precisions, plus a test that the backward allocates
+under an eighth of eager's peak, so the memory property cannot silently regress
+the way it did between G58 and this.
+
+Still a single-GPU microbenchmark at production tensor shape. At the proxy
+geometry (seq 512, K <= 1) AttnRes was 0.09% of device time, so the in-model win
+there will be negligible; the case rests on production geometry, which no single
+node can run.
