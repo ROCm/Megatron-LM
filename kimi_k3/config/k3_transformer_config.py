@@ -150,6 +150,12 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     k3_situ_beta: float = 4.0
     k3_situ_linear_beta: float = 25.0
+    k3_situ_fused: bool = True
+    """Use the fused Triton SiTU kernel (`moe/situ_triton`). Measured 5.8x on
+    forward+backward and 15.7x less peak memory than the eager expression, which
+    the trace showed costing 5.05 ms of a 8.97 ms k3.moe region across 350 launches
+    (G61). Off falls back to `situ_glu`, which stays the oracle."""
+
     k3_situ_activation: bool = True
     """Use the released SiTU-GLU on every gated MLP (routed experts, shared
     experts and the leading dense FFN).

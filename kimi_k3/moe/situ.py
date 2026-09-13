@@ -48,10 +48,15 @@ class SituGLU(torch.nn.Module):
 
     def __init__(self, config=None):
         super().__init__()
+        self.fused = getattr(config, "k3_situ_fused", True) if config else True
         self.beta = getattr(config, "k3_situ_beta", SITU_BETA) if config else SITU_BETA
         self.linear_beta = (
             getattr(config, "k3_situ_linear_beta", SITU_LINEAR_BETA) if config else SITU_LINEAR_BETA
         )
 
     def forward(self, gate_up: torch.Tensor) -> torch.Tensor:
+        if self.fused:
+            from .situ_triton import fused_situ_glu
+
+            return fused_situ_glu(gate_up, beta=self.beta, linear_beta=self.linear_beta)
         return situ_glu(gate_up, beta=self.beta, linear_beta=self.linear_beta)
