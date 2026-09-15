@@ -1,0 +1,182 @@
+{
+  "muon": {
+    "(12288, 7168)|self_attention.kda.q_proj.weight": [
+      3,
+      264241152
+    ],
+    "(12288, 7168)|self_attention.kda.k_proj.weight": [
+      3,
+      264241152
+    ],
+    "(12288, 7168)|self_attention.kda.v_proj.weight": [
+      3,
+      264241152
+    ],
+    "(7168, 12288)|self_attention.kda.o_proj.weight": [
+      3,
+      264241152
+    ],
+    "(128, 7168)|self_attention.kda.f_a_proj.weight": [
+      3,
+      2752512
+    ],
+    "(12288, 128)|self_attention.kda.f_b_proj.weight": [
+      3,
+      4718592
+    ],
+    "(12288, 7168)|self_attention.kda.g_proj.weight": [
+      3,
+      264241152
+    ],
+    "(96, 7168)|self_attention.kda.b_proj.weight": [
+      3,
+      2064384
+    ],
+    "(67584, 7168)|mlp.linear_fc.weight": [
+      1,
+      484442112
+    ],
+    "(7168, 33792)|mlp.linear_fc.weight": [
+      1,
+      242221056
+    ],
+    "(1, 7168)|attn_res_attn.proj": [
+      4,
+      28672
+    ],
+    "(1, 7168)|attn_res_mlp.proj": [
+      4,
+      28672
+    ],
+    "(896, 7168)|mlp.router.weight": [
+      3,
+      19267584
+    ],
+    "(3584, 7168)|mlp.fc_latent_proj.weight": [
+      3,
+      77070336
+    ],
+    "(7168, 3584)|mlp.fc_latent_proj.weight": [
+      3,
+      77070336
+    ],
+    "(6144, 3584)|mlp.experts.linear_fc.weight": [
+      336,
+      7398752256
+    ],
+    "(3584, 3072)|mlp.experts.linear_fc.weight": [
+      336,
+      3699376128
+    ],
+    "(12288, 7168)|mlp.shared_experts.linear_fc.weight": [
+      3,
+      264241152
+    ],
+    "(7168, 6144)|mlp.shared_experts.linear_fc.weight": [
+      3,
+      132120576
+    ],
+    "(1536, 7168)|self_attention.mla.q_a_proj.weight": [
+      1,
+      11010048
+    ],
+    "(18432, 1536)|self_attention.mla.q_b_proj.weight": [
+      1,
+      28311552
+    ],
+    "(576, 7168)|self_attention.mla.kv_a_proj_with_mqa.weight": [
+      1,
+      4128768
+    ],
+    "(24576, 512)|self_attention.mla.kv_b_proj.weight": [
+      1,
+      12582912
+    ],
+    "(7168, 12288)|self_attention.mla.o_proj.weight": [
+      1,
+      88080384
+    ],
+    "(12288, 7168)|self_attention.mla.g_proj.weight": [
+      1,
+      88080384
+    ],
+    "(1, 7168)|decoder.output_attn_res.proj": [
+      1,
+      7168
+    ]
+  },
+  "other": {
+    "(163840, 7168)|embedding.word_embeddings.weight": [
+      1,
+      1174405120
+    ],
+    "(7168,)|input_layernorm.weight": [
+      4,
+      28672
+    ],
+    "(12288, 1, 4)|self_attention.kda.q_convd_weight": [
+      3,
+      147456
+    ],
+    "(12288, 1, 4)|self_attention.kda.k_convd_weight": [
+      3,
+      147456
+    ],
+    "(12288, 1, 4)|self_attention.kda.v_convd_weight": [
+      3,
+      147456
+    ],
+    "(96,)|self_attention.kda.A_log": [
+      3,
+      288
+    ],
+    "(12288,)|self_attention.kda.dt_bias": [
+      3,
+      36864
+    ],
+    "(128,)|self_attention.kda.o_norm_weight": [
+      3,
+      384
+    ],
+    "(7168,)|mlp.linear_fc.layer_norm_weight": [
+      1,
+      7168
+    ],
+    "(7168,)|attn_res_attn.weight": [
+      4,
+      28672
+    ],
+    "(7168,)|attn_res_mlp.weight": [
+      4,
+      28672
+    ],
+    "(7168,)|pre_mlp_layernorm.weight": [
+      3,
+      21504
+    ],
+    "(3584,)|mlp.routed_expert_norm": [
+      3,
+      10752
+    ],
+    "(1536,)|self_attention.mla.q_a_layernorm": [
+      1,
+      1536
+    ],
+    "(512,)|self_attention.mla.kv_a_layernorm": [
+      1,
+      512
+    ],
+    "(7168,)|decoder.final_layernorm.weight": [
+      1,
+      7168
+    ],
+    "(7168,)|decoder.output_attn_res.weight": [
+      1,
+      7168
+    ],
+    "(163840, 7168)|output_layer.weight": [
+      1,
+      1174405120
+    ]
+  }
+}

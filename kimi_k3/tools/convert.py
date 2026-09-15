@@ -38,6 +38,21 @@ def _split_marker(target: str) -> Tuple[str, Optional[str]]:
     return target, None
 
 
+def squeeze_pseudo_query(tensor: torch.Tensor, key: str = "proj") -> torch.Tensor:
+    """The released `[1, H]` AttnRes projection, as the `[H]` vector it is.
+
+    The report defines it as `q_l = w_l in R^d` (S2.2); the checkpoint just
+    stores that vector with a leading singleton. Keeping the singleton made the
+    parameter 2-D and therefore a Muon matrix parameter, which S2.5 reserves for
+    matrices (G65).
+    """
+    if tensor.dim() == 1:
+        return tensor.contiguous()
+    if tensor.dim() == 2 and tensor.shape[0] == 1:
+        return tensor.squeeze(0).contiguous()
+    raise ConversionError(f"{key}: expected [H] or [1, H], got {list(tensor.shape)}")
+
+
 def trim_a_log(tensor: torch.Tensor, key: str = "A_log") -> torch.Tensor:
     """`[128]` -> `[96]`, asserting the padding is zero first."""
     if tensor.numel() == A_LOG_REAL:
@@ -120,6 +135,9 @@ def hf_to_mcore(
             plain_halves[base][slot] = tensor
         elif base.endswith("A_log"):
             out[base] = trim_a_log(tensor, key)
+        elif base.endswith("attn_res.proj") or base.endswith("_res_attn.proj") \
+                or base.endswith("_res_mlp.proj"):
+            out[base] = squeeze_pseudo_query(tensor, key)
         else:
             out[base] = tensor
 
@@ -189,7 +207,16 @@ def mcore_to_hf(
         released = reverse.get(key)
         if released is None:
             raise ConversionError(f"no reverse mapping for {key}")
-        out[released] = pad_a_log(tensor) if key.endswith("A_log") else tensor
+        if key.endswith("A_log"):
+            out[released] = pad_a_log(tensor)
+        elif key.endswith(("attn_res.proj", "_res_attn.proj", "_res_mlp.proj")):
+            # Restore the checkpoint's leading singleton. Symmetric to
+            # `squeeze_pseudo_query` on the way in, the same way `pad_a_log`
+            # mirrors `trim_a_log` -- without it the round trip loses the shape
+            # while keeping every value, which is what the round-trip gate caught.
+            out[released] = tensor.reshape(1, -1) if tensor.dim() == 1 else tensor
+        else:
+            out[released] = tensor
     return out
 
 

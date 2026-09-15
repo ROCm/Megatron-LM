@@ -89,7 +89,17 @@ class AttnResMixer(torch.nn.Module):
     ):
         super().__init__()
         self.weight = torch.nn.Parameter(torch.ones(hidden_size))
-        self.proj = torch.nn.Parameter(torch.zeros(1, hidden_size))
+        # The report defines the AttnRes pseudo-query as a **vector**:
+        # "a layer-specific learnable pseudo-query q_l = w_l in R^d" (arXiv
+        # 2607.24653 S2.2). The released checkpoint stores it as a [1, H] tensor,
+        # and holding it that way here made it 2-D -- which put it in Muon's
+        # matrix group (`muon.py:295-300` tests `len(param.shape) == 2`), while
+        # S2.5 says Muon is "the optimizer for its matrix parameters". Newton-
+        # Schulz on a rank-1 tensor is just row normalisation: measured, the
+        # output norm is 0.9783 for inputs of norm 0.85, 84.6 and 8430.5 alike.
+        # Stored as [H] so it lands in the nonlinear group; the converter
+        # squeezes the checkpoint's [1, H] (G65).
+        self.proj = torch.nn.Parameter(torch.zeros(hidden_size))
         self.eps = eps
         self.fp32 = fp32
         #: `--k3-attn-res-chunked`. Off by default: the eager path is the oracle,
