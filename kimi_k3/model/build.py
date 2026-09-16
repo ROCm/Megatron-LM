@@ -52,6 +52,17 @@ def build_k3_model(
         from ..moe.k3_moe_layer import set_moe_gemm_backend
 
         set_moe_gemm_backend(getattr(config, "k3_moe_ck_grouped_gemm", True))
+    if getattr(config, "k3_muon_syrk", False):
+        from .core_patch import install_muon_syrk
+
+        install_muon_syrk()
+    if getattr(config, "k3_muon_batch_ns", 0):
+        from .core_patch import install_muon_batched_ns
+
+        install_muon_batched_ns(
+            batch_size=config.k3_muon_batch_ns,
+            use_quack_syrk=getattr(config, "k3_muon_batch_syrk", False),
+        )
     if getattr(config, "k3_grouped_linear_single_param", False):
         from .core_patch import install_grouped_linear_single_param
 

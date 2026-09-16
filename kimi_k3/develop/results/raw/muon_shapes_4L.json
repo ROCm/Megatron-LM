@@ -40,14 +40,6 @@
       1,
       242221056
     ],
-    "(1, 7168)|attn_res_attn.proj": [
-      4,
-      28672
-    ],
-    "(1, 7168)|attn_res_mlp.proj": [
-      4,
-      28672
-    ],
     "(896, 7168)|mlp.router.weight": [
       3,
       19267584
@@ -99,10 +91,6 @@
     "(12288, 7168)|self_attention.mla.g_proj.weight": [
       1,
       88080384
-    ],
-    "(1, 7168)|decoder.output_attn_res.proj": [
-      1,
-      7168
     ]
   },
   "other": {
@@ -146,7 +134,15 @@
       4,
       28672
     ],
+    "(7168,)|attn_res_attn.proj": [
+      4,
+      28672
+    ],
     "(7168,)|attn_res_mlp.weight": [
+      4,
+      28672
+    ],
+    "(7168,)|attn_res_mlp.proj": [
       4,
       28672
     ],
@@ -171,6 +167,10 @@
       7168
     ],
     "(7168,)|decoder.output_attn_res.weight": [
+      1,
+      7168
+    ],
+    "(7168,)|decoder.output_attn_res.proj": [
       1,
       7168
     ],

@@ -85,6 +85,11 @@ def build(args, rank: int, world: int):
             overrides["moe_mori_max_tokens_per_rank"] = args.seq
             # MORI EP dispatches fp32 probs only; core warns and then aborts.
             overrides["moe_router_dtype"] = "fp32"
+    if args.muon_syrk:
+        overrides["k3_muon_syrk"] = True
+    if args.muon_batch_ns:
+        overrides["k3_muon_batch_ns"] = args.muon_batch_ns
+        overrides["k3_muon_batch_syrk"] = args.muon_batch_syrk
     if args.single_grouped_weight:
         overrides["k3_grouped_linear_single_param"] = True
     if args.triton_attn_res:
@@ -229,6 +234,12 @@ def main() -> None:
                          "with the number of experts local to a rank")
     ap.add_argument("--flex-backend", default=None,
                     help="deepep | mori | hybridep, only with --dispatcher flex")
+    ap.add_argument("--muon-batch-ns", type=int, default=0,
+                    help="batch N same-shaped Muon params into one Newton-Schulz call (0=off)")
+    ap.add_argument("--muon-batch-syrk", action="store_true",
+                    help="use quack-flydsl batched_tsyrk_ex inside the batched NS step")
+    ap.add_argument("--muon-syrk", action="store_true",
+                    help="use the Triton SYRK kernel in Newton-Schulz (G66)")
     ap.add_argument("--single-grouped-weight", action="store_true",
                     help="store grouped expert weights as one parameter (TE experimental)")
     ap.add_argument("--triton-attn-res", action="store_true",

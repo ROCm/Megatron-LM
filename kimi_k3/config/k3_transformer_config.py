@@ -150,6 +150,22 @@ class KimiK3TransformerConfig(MLATransformerConfig):
 
     k3_situ_beta: float = 4.0
     k3_situ_linear_beta: float = 25.0
+    k3_muon_syrk: bool = False
+    """Use the Triton SYRK kernel inside Newton-Schulz. `A = X @ X.mT` is
+    symmetric, so SYRK does one triangle instead of a full GEMM. The precision
+    gate is already open (the step runs at `medium`, operands are bf16); the only
+    reason it is off is that Megatron never passes `use_syrk` (G66)."""
+
+    k3_muon_batch_ns: int = 0
+    """Batch this many same-shaped Muon parameters into one Newton-Schulz call.
+    0 disables. K3 has 672 expert matrices per rank in two shapes, each currently
+    orthogonalized alone; `newton_schulz` already handles 3-D input (G67)."""
+
+    k3_muon_batch_syrk: bool = False
+    """Route the two symmetric matmuls of the batched Newton-Schulz step through
+    quack-flydsl's triangular `batched_tsyrk_ex`. Requires k3_muon_batch_ns > 0
+    and quack + FlyDSL 0.2.4 on PYTHONPATH."""
+
     k3_grouped_linear_single_param: bool = False
     """Store grouped expert weights as one parameter instead of one per expert.
     Collapses DDP's per-expert grad accumulation (672 launches, 22.4 ms) into a

@@ -75,6 +75,18 @@ def add_kimi_k3_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser
     group.add_argument("--k3-latent-moe-use-norm", action=argparse.BooleanOptionalAction,
                        default=True, help="RMSNorm on the combined expert output before up-proj")
     group.add_argument("--k3-first-k-dense-replace", type=int, default=1)
+    group.add_argument("--k3-muon-syrk", action=argparse.BooleanOptionalAction, default=False,
+                       help="Triton SYRK kernel inside Newton-Schulz: one triangle instead "
+                            "of a full GEMM for the symmetric X @ X.mT (G66).")
+    group.add_argument("--k3-muon-batch-ns", type=int, default=0,
+                       help="batch this many same-shaped Muon params into one Newton-Schulz "
+                            "call; 0 disables. 93%% of K3's Muon matrices are expert weights "
+                            "in two shapes, each currently orthogonalised alone (G67).")
+    group.add_argument("--k3-muon-batch-syrk", action=argparse.BooleanOptionalAction,
+                       default=False,
+                       help="route the symmetric matmuls of the batched Newton-Schulz step "
+                            "through quack-flydsl batched_tsyrk_ex. Needs --k3-muon-batch-ns "
+                            "and quack + FlyDSL 0.2.4 on PYTHONPATH (G67).")
     group.add_argument("--k3-grouped-linear-single-param",
                        action=argparse.BooleanOptionalAction, default=False,
                        help="store grouped expert weights as one TE parameter. EXPERIMENTAL "
