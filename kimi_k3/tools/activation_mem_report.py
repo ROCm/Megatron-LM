@@ -8,7 +8,7 @@ directly on top of the parameter oracle (G13) rather than a reimplementation.
 
 v2 (PR #162): nothing measured is a model INPUT. State bytes come from the
 analytic dist_muon formula OPTIMIZER_BYTES_PER_PARAM["dist_muon"](dp) = 2+4+8/dp;
-the measured 7.87 bytes/param, G6's 7.1/12.2 GB mixer, and G28's 82 GiB headroom
+the measured 7.87 bytes/param, G6's 7.1/12.2 GB AttnRes internal, and G28's 82 GiB headroom
 appear only as independent cross-checks (section 0).
 
 Run in the training container (needs torch, via the config builder)::
@@ -30,7 +30,7 @@ from kimi_k3.tools.activation_mem_model import (
     stage_activation_gib,
     state_bytes_per_param,
     crosscheck_state_bytes,
-    crosscheck_mixer,
+    crosscheck_attn_res_internal,
     crosscheck_headroom,
     k_slots,
 )
@@ -51,11 +51,10 @@ def fmt_parts(parts):
     order = [
         "checkpoints",
         "transient_recompute",
-        "attn_res_mixer",
-        "attn_res_payload",
+        "attn_res_internal",
+        "attn_res_io",
         "head_logits",
         "nccl_pp_p2p",
-        "frag_allocator",
         "TOTAL",
     ]
     for name in order:
@@ -71,13 +70,13 @@ def main():
     a_state, gap_state = crosscheck_state_bytes(dp=dp, measured=MEASURED_STATE_BYTES)
     print(f"  state bytes/param  : analytic OPTIMIZER_BYTES_PER_PARAM['dist_muon']({dp})"
           f" = {a_state:.2f}  vs G5 measured {MEASURED_STATE_BYTES}  (gap {gap_state:+.2f})")
-    mx = crosscheck_mixer()
-    print(f"  AttnRes mixer fwd  : analytic {mx['fwd_analytic_gb']:.2f} GB  "
+    mx = crosscheck_attn_res_internal()
+    print(f"  AttnRes internal fwd: analytic {mx['fwd_analytic_gb']:.2f} GB  "
           f"vs G6 measured {mx['fwd_measured_gb']:.1f} GB  (gap x{mx['fwd_gap_x']:.2f})")
-    print(f"  AttnRes mixer bwd  : analytic {mx['bwd_analytic_gb']:.2f} GB  "
+    print(f"  AttnRes internal bwd: analytic {mx['bwd_analytic_gb']:.2f} GB  "
           f"vs G6 measured {mx['bwd_measured_gb']:.1f} GB  (gap x{mx['bwd_gap_x']:.2f})")
     print("    ^ open item: gap => uncounted live fp32 temporaries in the CK")
-    print("      AttnRes mixer; flagged for a source read (not tuned away).")
+    print("      AttnRes block; flagged for a source read (not tuned away).")
     modelled_act, meas_transient, gap_act = crosscheck_headroom(anchor_seq=4096,
                                                                  measured_transient_gib=9.70)
     print(f"  4 L activation     : analytic {modelled_act:.1f} GiB  vs MEASURED fla "
@@ -155,9 +154,9 @@ def main():
 
     # -- 3. seq / mbs / CP / recompute sensitivity --------------------------
     banner("3. sensitivity of one 93L stage (12 layers, 3 MLA, K=4)")
-    print("  MLA flash-style (linear in mem); MoE/payload linear. qk_clip off.")
+    print("  MLA flash-style (linear in mem); MoE / AttnRes I/O linear. qk_clip off.")
     print()
-    header = ("seq", "mbs", "cp", "recompute", "act_GiB", "transient", "mixer", "logits")
+    header = ("seq", "mbs", "cp", "recompute", "act_GiB", "transient", "internal", "logits")
     print("    " + "".join(f"{h:>11s}" for h in header))
     base = dict(
         layers_on_stage=12, mla_layers_on_stage=3, last_layer_0idx=47,
@@ -171,7 +170,7 @@ def main():
                                                recompute=rc, **base)
                     p = stage_activation_gib(spec)
                     row = (f"{seq}", f"{mbs}", f"{cp}", rc, f"{p['TOTAL']:.1f}",
-                           f"{p['transient_recompute']:.1f}", f"{p['attn_res_mixer']:.1f}",
+                           f"{p['transient_recompute']:.1f}", f"{p['attn_res_internal']:.1f}",
                            f"{p['head_logits']:.1f}")
                     print("    " + "".join(f"{c:>11s}" for c in row))
             print()

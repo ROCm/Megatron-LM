@@ -15,7 +15,7 @@ Sweeping seq/mbs and regressing each measured bucket against S*B separates:
 Run (8 GPUs, EP8) inside the megatron container::
 
     PYTHONPATH=<my-branch-worktree> torchrun --nproc_per_node=8 \
-        -m kimi_k3.tools.mem_probe --preset 4L --ep 8 \
+        -m kimi_k3.tests.mem_probe --preset 4L --ep 8 \
         --seq 8192 --mbs 1 --recompute full \
         --out-dir develop/profile/mem_snap_4L
 

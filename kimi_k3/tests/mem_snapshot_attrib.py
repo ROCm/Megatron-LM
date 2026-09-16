@@ -17,8 +17,8 @@ Sweeping seq/mbs and regressing each bucket vs S*B tokens separates FIXED bytes
 
 Usage::
 
-    python -m kimi_k3.tools.mem_snapshot_attrib mem_snap_4L
-    python -m kimi_k3.tools.mem_snapshot_attrib <dir> --dump-unattributed 25
+    python -m kimi_k3.tests.mem_snapshot_attrib mem_snap_4L
+    python -m kimi_k3.tests.mem_snapshot_attrib <dir> --dump-unattributed 25
 """
 
 import argparse
