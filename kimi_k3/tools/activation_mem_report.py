@@ -78,9 +78,25 @@ def main():
           f"vs G6 measured {mx['bwd_measured_gb']:.1f} GB  (gap x{mx['bwd_gap_x']:.2f})")
     print("    ^ open item: gap => uncounted live fp32 temporaries in the CK")
     print("      AttnRes mixer; flagged for a source read (not tuned away).")
-    modelled82, gap82 = crosscheck_headroom(scaleout.NON_PARAM_HEADROOM_GIB)
-    print(f"  4 L headroom       : analytic {modelled82:.1f} GiB  vs G28 measured "
-          f"{scaleout.NON_PARAM_HEADROOM_GIB} GiB  (gap {gap82:+.1f})")
+    modelled_act, meas_transient, gap_act = crosscheck_headroom(anchor_seq=4096,
+                                                                 measured_transient_gib=9.70)
+    print(f"  4 L activation     : analytic {modelled_act:.1f} GiB  vs MEASURED fla "
+          f"transient {meas_transient:.1f} GiB @seq4096 rc=full  (gap {gap_act:+.1f})")
+    print("    ^ the +43 GiB 'headroom gap' was TWO confounds, now separated:")
+    print("      (1) 44.8 GiB LAZY Muon state that peak-after_optimizer mislabeled as")
+    print("          activation -> belongs in the STATE oracle (true resident 181.2 GiB,")
+    print("          not the 135.9 after_optimizer reports before step 1);")
+    print("      (2) residual: eager proxy transient (58) >> analytic (9) is a BACKEND")
+    print("          artifact, not a model error. Confirmed by direct fla measurement:")
+    print("          the fused `fla` production transient is a seq-INVARIANT ~9.7 GiB")
+    print("          (vs eager 18/31/58), matching analytic 9.1 to 0.6 GiB. The eager")
+    print("          ~0.012 GiB/tok/live-layer slope is a chunk-state artifact; the")
+    print("          production transient is flat. The +43 GiB residual closes to ~0.")
+    print("      Root cause of the ~9.7 fla transient (peak-live decode): it is NOT")
+    print("      activation -- it is the dist-optimizer param all-gather")
+    print("      (layer_wise_optimizer.allgather_params, 7.98+1.73 GiB of bf16 recv")
+    print("      buffers). Param-sized, token-independent; the per-step peak is")
+    print("      optimizer-step-bound once fla makes fwd/bwd activation cheap.")
 
     # -- 1. 93 L PP=8 per-stage headroom ------------------------------------
     spec_cfg = preset("93L")

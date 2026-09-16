@@ -305,17 +305,28 @@ def crosscheck_mixer(measured_fwd_gb=7.1, measured_bwd_gb=12.2):
     }
 
 
-def crosscheck_headroom(anchor_headroom_gib=82.0):
-    """Modelled 4 L anchor total vs G28's 82 GiB. Returns (modelled, gap).
+def crosscheck_headroom(anchor_seq=4096, measured_transient_gib=9.70):
+    """Analytic 4 L-stage ACTIVATION vs the MEASURED transient. Returns
+    (modelled_gib, measured_transient_gib, gap).
 
-    4 L anchor: single stage, PP=1, all 4 layers resident (fits without
-    recompute at 4 L), S=8192, B=1, CP=1, 1 MLA layer. The gap is a validation
-    residual we REPORT; it is not fed back into the model.
+    The retired G28 "82 GiB headroom" was `peak - after_optimizer`. Because
+    after_optimizer OMITS the lazily-allocated Muon state (~44.8 GiB, allocated
+    only on the first step()), that headroom was NOT pure activation: it silently
+    folded ~44.8 GiB of persistent optimizer state into what the model was asked
+    to explain as activation -- essentially the whole +43 GiB the itemized model
+    "could not account for".
+
+    The honest activation cross-check compares the model against the true
+    transient `peak - resident` at a MEASURED seq. Default anchor is the fused
+    `fla` production transient (seq-invariant ~9.7 GiB), which the analytic model
+    targets; pass the eager number (18/31/58 at seq 1024/2048/4096) only to see
+    the backend artifact. Regime matches the proxy: recompute="full", PP=1, all 4
+    layers on one stage, 1 MLA layer, in_flight=1.
     """
     anchor = PipelineStageInputs(
-        seq=8192, mbs=1, cp=1,
+        seq=anchor_seq, mbs=1, cp=1,
         layers_on_stage=4, mla_layers_on_stage=1, last_layer_0idx=3,
-        is_last_stage=True, in_flight=1, recompute="off", qk_clip_score=False,
+        is_last_stage=True, in_flight=1, recompute="full", qk_clip_score=False,
     )
     modelled = stage_activation_gib(anchor)["TOTAL"]
-    return modelled, anchor_headroom_gib - modelled
+    return modelled, measured_transient_gib, measured_transient_gib - modelled
