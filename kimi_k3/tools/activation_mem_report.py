@@ -75,8 +75,9 @@ def main():
           f"vs G6 measured {mx['fwd_measured_gb']:.1f} GB  (gap x{mx['fwd_gap_x']:.2f})")
     print(f"  AttnRes internal bwd: analytic {mx['bwd_analytic_gb']:.2f} GB  "
           f"vs G6 measured {mx['bwd_measured_gb']:.1f} GB  (gap x{mx['bwd_gap_x']:.2f})")
-    print("    ^ open item: gap => uncounted live fp32 temporaries in the CK")
-    print("      AttnRes block; flagged for a source read (not tuned away).")
+    print("    ^ open item: gap => the eager torch mix materialises [T,K+1,H] in")
+    print("      fp32 3x (cat + upcast + normalised copy), not 2x; AttnRes is")
+    print("      pure-torch/Triton, NOT CK. Left explicit, not tuned away.")
     modelled_act, meas_transient, gap_act = crosscheck_headroom(anchor_seq=4096,
                                                                  measured_transient_gib=9.70)
     print(f"  4 L activation     : analytic {modelled_act:.1f} GiB  vs MEASURED fla "

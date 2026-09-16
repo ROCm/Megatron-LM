@@ -114,12 +114,21 @@ def attn_res_internal_bytes(s_local, mbs, k, with_backward,
       - `accum_temps` fp32 scratch tensors: accum_temps x S x B x H x 4
     Backward keeps the saved inputs plus the incoming grad, ~2x the forward set.
 
+    AttnRes does NOT call CK -- the block is a pure-torch fp32 eager oracle
+    (block/attn_res.py, transcribed from HF KimiLinearModel._apply_attn_res) with
+    a fused Triton fast path (block/attn_res_triton.py). CK/AITER is the MLA
+    attention path, not this mix.
+
     NOTE (open item from PR #162): at the G6 geometry (K+1=9, S=8192, B=1) this
     yields ((9)+2) x 8192 x 7168 x 4 = 2.58 GB forward, whereas G6 MEASURED
-    7.1 GB. The ~2.75x gap implies the CK AttnRes block holds more live fp32
-    temporaries than the 2 modeled here; it is flagged for a source read of the
-    mix kernel (see crosscheck_attn_res_internal). We do NOT tune `accum_temps`
-    to close the gap -- that would re-introduce the fitting this refactor removed.
+    7.1 GB. The ~2.75x gap has a NAMED source: the eager mix materialises the
+    [T, K+1, H] stack in fp32 THREE times, not twice -- the `cat`, the fp32
+    upcast, and the RMS-normalised copy (see block/attn_res_triton.py docstring;
+    109.6 GiB/fwd at production shape, results/attn_res.md) -- plus the score and
+    output temporaries. `accum_temps=2` here undercounts that. We do NOT tune
+    `accum_temps` to close the gap -- that would re-introduce the fitting this
+    refactor removed; the gap is left explicit until the Triton fused path (which
+    avoids the 3x materialisation) is the measured baseline.
     """
     slots_fp32 = (1 + k) + accum_temps
     fwd = slots_fp32 * s_local * mbs * DIMS.hidden * FP32
