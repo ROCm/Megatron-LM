@@ -684,7 +684,6 @@ except ImportError:
 # Process-wide MORI ops keyed by layout so FP8 dispatch and BF16 combine can coexist.
 _mori_ops = {}
 _mori_shmem_initialized = False
-_pending_dispatch_meta = None
 # Process-wide CUDA stream dedicated to MORI dispatch/combine kernel launches.
 # Mirrors DeepEP's `allocate_on_comm_stream` pattern so that op.dispatch() and
 # op.combine() can run concurrently with non-dependent work on the default
@@ -948,6 +947,7 @@ class MoriDispatch(torch.autograd.Function):
             mori_scale_type_size,
             quantize_hidden_for_dispatch,
             view_payload_for_mori,
+            wrap_rowwise,
         )
 
         hidden_dim = x.shape[1]
@@ -1056,17 +1056,21 @@ class MoriDispatch(torch.autograd.Function):
         ctx.async_finish = async_finish
         ctx.allocate_on_comm_stream = allocate_on_comm_stream
         ctx.routing_handle = routing_handle
-        global _pending_dispatch_meta
-        _pending_dispatch_meta = dispatch_meta
         ctx.save_for_backward(token_indices)
 
         raw_dispatch_weights = dispatch_weights.detach().clone()
-        if recv_scales is None:
-            recv_scales = torch.empty(0, device=device)
-        elif recv_scales.numel() > 0:
+        # Wrap inside this autograd Function. The returned tensor presents as
+        # BF16, so the expert gradient is not cast to unscaled FP8 on the way
+        # back — that cast flushed typical grads (~1e-5) to zero.
+        if (
+            dispatch_meta is not None
+            and recv_scales is not None
+            and recv_scales.numel() > 0
+        ):
             recv_scales = recv_scales.detach().clone()
+            dispatch_out = wrap_rowwise(dispatch_out, recv_scales, dispatch_meta)
         ctx.mark_non_differentiable(
-            recv_token_indices, tokens_per_expert, raw_dispatch_weights, recv_scales
+            recv_token_indices, tokens_per_expert, raw_dispatch_weights
         )
 
         return (
@@ -1076,7 +1080,6 @@ class MoriDispatch(torch.autograd.Function):
             tokens_per_expert,
             raw_dispatch_weights,
             routing_handle,
-            recv_scales,
         )
 
     @staticmethod
@@ -1088,7 +1091,6 @@ class MoriDispatch(torch.autograd.Function):
         grad_tpe,
         grad_weights_global,
         grad_routing_handle,
-        grad_scales,
     ):
         """Backward pass: combine gradients back using MORI (always BF16)."""
         (token_indices,) = ctx.saved_tensors
@@ -1352,44 +1354,19 @@ if HAVE_MORI:
             that the matching :func:`mori_combine` must pass back so combine/backward dispatch
             reads the same layout this dispatch produced.
         """
-        from megatron.core.transformer.moe.quantized_dispatch import wrap_dispatched_quantized
-
-        try:
-            (
-                recv_x,
-                recv_indices,
-                recv_probs,
-                tokens_per_expert,
-                dispatch_weights,
-                routing_handle,
-                recv_scales,
-            ) = MoriDispatch.apply(
-                x.contiguous(),
-                token_indices,
-                token_probs,
-                num_experts,
-                group,
-                num_local_experts,
-                router_topk,
-                max_num_tokens_per_rank,
-                fp8_dispatch,
-                async_finish,
-                allocate_on_comm_stream,
-                kernel_type,
-            )
-            global _pending_dispatch_meta
-            meta = _pending_dispatch_meta
-            if meta is not None and recv_scales is not None and recv_scales.numel() > 0:
-                recv_x = wrap_dispatched_quantized(recv_x, recv_scales, meta)
-        finally:
-            _pending_dispatch_meta = None
-        return (
-            recv_x,
-            recv_indices,
-            recv_probs,
-            tokens_per_expert,
-            dispatch_weights,
-            routing_handle,
+        return MoriDispatch.apply(
+            x.contiguous(),
+            token_indices,
+            token_probs,
+            num_experts,
+            group,
+            num_local_experts,
+            router_topk,
+            max_num_tokens_per_rank,
+            fp8_dispatch,
+            async_finish,
+            allocate_on_comm_stream,
+            kernel_type,
         )
 
     def mori_combine(

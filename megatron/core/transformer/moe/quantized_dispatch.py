@@ -413,20 +413,3 @@ def quantize_hidden_for_dispatch(
     meta.quantizer = quantizer
     meta.fake_dtype = hidden.dtype
     return data, scales, meta
-
-
-def wrap_dispatched_quantized(recv_data, recv_scales, meta: DispatchQuantMeta):
-    """Autograd-safe wrap of MORI recv payload into a TE QuantizedTensor."""
-
-    class _WrapDispatchedQuantized(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, data, scales):
-            return wrap_rowwise(data, scales, meta)
-
-        @staticmethod
-        def backward(ctx, grad_output):
-            if grad_output is None:
-                return None, None
-            return grad_output.contiguous(), None
-
-    return _WrapDispatchedQuantized.apply(recv_data, recv_scales)

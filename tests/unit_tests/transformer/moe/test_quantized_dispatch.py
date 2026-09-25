@@ -121,6 +121,7 @@ class TestQuantizeWrapRoundtrip:
         assert scales.shape[1] == mori_scale_dim(recipe, 256)
         wrapped = wrap_rowwise(mori_payload, scales, meta)
         assert is_quantized_tensor(wrapped)
+        assert wrapped.dtype == torch.bfloat16
         recon = wrapped.dequantize().to(torch.bfloat16)
         q2 = make_dispatch_quantizer(recipe, x.device)(x)
         ref = q2.dequantize().to(torch.bfloat16)
@@ -134,6 +135,34 @@ class TestQuantizeWrapRoundtrip:
         assert scales.shape == (4, 1)
         wrapped = wrap_rowwise(data, scales, meta)
         assert is_quantized_tensor(wrapped)
+
+    def test_autograd_wrap_keeps_bf16_gradient(self):
+        """Returning the TE tensor from an autograd Function must not cast grads to FP8."""
+        te_recipe = _te_recipes()
+        recipe = te_recipe.Float8BlockScaling()
+        x = torch.randn(8, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        seen = {}
+
+        class _Dispatch(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, hidden):
+                data, scales, meta = quantize_hidden_for_dispatch(hidden, recipe)
+                return wrap_rowwise(data, scales, meta)
+
+            @staticmethod
+            def backward(ctx, grad_output):
+                seen["dtype"] = grad_output.dtype
+                seen["abs"] = grad_output.detach().abs().sum().item()
+                return grad_output
+
+        y = _Dispatch.apply(x)
+        assert y.dtype == torch.bfloat16
+        y.dequantize().sum().backward()
+        assert seen["dtype"] == torch.bfloat16
+        # A typical 1e-4 grad is below unscaled FP8 and would flush to 0.
+        assert seen["abs"] > 0
+        assert x.grad is not None
+        assert x.grad.dtype == torch.bfloat16
 
     def test_delayed_quantize_wrap(self):
         te_recipe = _te_recipes()
@@ -208,9 +237,13 @@ class TestBf16CombineContract:
 
         from megatron.core.transformer.moe.fused_a2a import MoriCombine, MoriDispatch
 
+        fwd_src = inspect.getsource(MoriDispatch.forward)
         bwd_src = inspect.getsource(MoriDispatch.backward)
         comb_src = inspect.getsource(MoriCombine.forward)
         comb_bwd_src = inspect.getsource(MoriCombine.backward)
+        # Wrap inside the autograd Function so the returned tensor presents as
+        # BF16 and expert grads are not cast to unscaled FP8.
+        assert "wrap_rowwise" in fwd_src
         assert "scale_dim=0" in bwd_src
         assert "fp8_dispatch=False" in bwd_src
         assert "scale_dim=0" in comb_src
