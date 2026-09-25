@@ -170,8 +170,11 @@ def get_fp8_align_size(fp8_recipe: Fp8Recipe) -> int:
     if fp8_recipe == Fp8Recipe.mxfp8:
         # HipblasLT requires 128 aligned Tensors for MXFP8.
         return 128
-    else:
-        return 16
+    if fp8_recipe == Fp8Recipe.blockwise:
+        # Columnwise 1x128 blocks run along the token axis; per-expert splits must
+        # end on a block boundary so the columnwise rebuild never spans experts.
+        return 128
+    return 16
 
 
 def is_column_parallel_linear(module):

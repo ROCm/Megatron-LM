@@ -674,7 +674,6 @@ class TEGroupedMLP(MegatronModule):
                         "moe_apply_probs_on_input is not supported when expert inputs are "
                         "already quantized from MORI dispatch."
                     )
-                permuted_probs = permuted_probs.unsqueeze(-1)
             else:
                 applied_quant_padding = True
                 unpadded_tokens_per_expert = tokens_per_expert
