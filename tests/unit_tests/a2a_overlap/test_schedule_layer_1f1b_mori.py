@@ -4,9 +4,10 @@
 Extracted from ``test_schedule_layer_1f1b.py`` so MORI runs in its own fresh
 ``torchrun`` process, never interleaved with the sub-node (EP=4) alltoall/DeepEP/
 ncclep cases. MORI's ``EpDispatchCombineHandle`` needs a node-spanning expert
-communicator, and its symmetric memory is process-scoped (init once, finalize once
-at session end via ``conftest.py``); mixing it with the sub-node parametrized cases
-corrupts the shared process-group state and desyncs collectives.
+communicator, and its lifecycle is owned by ``conftest.py`` (shmem init once, op
+released after every test, finalize once at session end); mixing it with the
+sub-node parametrized cases corrupts the shared process-group state and desyncs
+collectives.
 """
 from contextlib import nullcontext
 
@@ -45,12 +46,7 @@ class TestA2AOverlapLayerMori:
     """Run process-scoped MORI layer/MTP coverage in a fresh torchrun invocation."""
 
     def teardown_method(self, method):
-        # Drop the per-case op; keep shmem alive. MORI shmem is process-scoped and
-        # cannot be finalized then reinitialized, so finalize is owned solely by the
-        # session-scoped conftest fixture (finalize once at session end).
-        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
-
-        reset_mori_op()
+        # The MORI op and shmem lifecycle is owned by conftest.py.
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")

@@ -3,10 +3,10 @@
 
 Extracted from ``test_token_dispatcher.py`` so MORI runs in its own fresh ``torchrun``
 process, never parametrized alongside the DeepEP/HybridEP cases. MORI's
-``EpDispatchCombineHandle`` needs a node-spanning expert communicator and its symmetric
-memory is process-scoped (init once, finalize once at session end via the shared
-``conftest.py``); interleaving it with the other flex backends in one process risks
-corrupting the shared process-group / shmem state.
+``EpDispatchCombineHandle`` needs a node-spanning expert communicator and its lifecycle
+is owned by ``conftest.py`` (shmem init once, op released after every test, finalize
+once at session end); interleaving it with the other flex backends in one process
+risks corrupting the shared process-group / shmem state.
 
 MORI only runs when the expert-parallel group spans the whole node
 (``require_node_spanning_mori_ep``); the non-spanning ``(tp, ep)`` parametrizations skip,
@@ -16,7 +16,6 @@ import pytest
 import torch
 
 from megatron.core import config
-from megatron.core.transformer.moe.fused_a2a import reset_mori_op
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.test_utilities import Utils
 from tests.unit_tests.transformer.moe.test_token_dispatcher import (
@@ -35,10 +34,7 @@ class TestMoriFlexDispatcher:
         pass
 
     def teardown_method(self, method):
-        # Drop the per-test op; keep shmem alive. Finalize is owned solely by the
-        # session-scoped conftest fixture (MORI shmem is process-scoped and cannot be
-        # finalized then reinitialized).
-        reset_mori_op()
+        # The MORI op and shmem lifecycle is owned by conftest.py.
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
@@ -135,7 +131,6 @@ class TestMoriSharedOp:
         pass
 
     def teardown_method(self, method):
-        reset_mori_op()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
