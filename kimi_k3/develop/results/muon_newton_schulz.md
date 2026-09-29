@@ -1,8 +1,17 @@
 # G66/G67 — three attempts at making Muon's Newton-Schulz cheaper
 
-Muon is ~81 % of the proxy iteration and is third-party code
+Muon dominates the proxy iteration and is third-party code
 (`emerging_optimizers` 0.3.0 + `megatron/core/optimizer/muon.py`), so every lever
-here is an injection at the boundary rather than an edit. G65 established what it
+here is an injection at the boundary rather than an edit. **Its share is quoted
+from kernel attribution, not from the region annotation**: the profiler reports
+`Optimizer.step#TensorParallelMuon.step` as 3006.0 ms against a 1843.3 ms
+iteration, which is impossible -- the ROCTracer duplicate-flow artifact that
+`summarise()` was patched for is only partly neutralised, and any "Muon is N % of
+the iteration" figure taken from that row (including the ~81 % quoted in earlier
+gate notes) is unsupported. What is measurable is that **GEMM is 949.2 ms of the
+1843.3 ms baseline iteration (51 %), and effectively all of it is Newton-Schulz**:
+`aten::mm` + `aten::addmm` is 10,293 calls against the 10,785 that G65 predicts
+from 719 matrices x 5 steps x 3 GEMMs. G65 established what it
 is spending that time on: **719 matrices per rank, 93 % of them expert weights**,
 each orthogonalised alone in a 5-step Newton-Schulz of three GEMMs.
 
@@ -137,6 +146,129 @@ forward/backward, not in the optimizer step, so the `(B, M, N)` staging buffer i
 free. This was worth checking: peak memory is what sizes the 93 L cluster
 (`results/scaleout_93l.md`), and a lever that traded 1 % of time for GiB would not
 be worth taking.
+
+### Batch size: the kernel is flat, the iteration is not
+
+B=16 was carried over from the microbenchmark grid, not chosen. Sweeping it
+(each point measured 2-3x, reproducing to within 3 ms):
+
+| B | steady | vs base | worst-rank peak | peak cost |
+|---|---:|---:|---:|---:|
+| 2 | 2800.0 ms | **1.52x slower** | 199.42 GiB | -- |
+| 4 | 2310.2 | 1.26x slower | 199.42 | -- |
+| 8 | 1951.1 | 1.06x slower | 199.42 | -- |
+| 16 | 1741.9 | 1.055x | 199.42 | free |
+| 24 | 1681.9 | 1.093x | 199.56 | +0.14 GiB |
+| 32 | 1700.0 | 1.081x | 202.84 | +3.4 |
+| 48 | 1640.2 | 1.121x | 209.41 | +10.0 |
+| 56 | 1706.3 | 1.078x | 212.69 | +13.3 |
+| 112 | 1696.2 | 1.084x | 235.66 | +36.2 |
+| 168 | 1567.2 | **1.173x** | 258.62 | +59.2 |
+| 336 | **OOM** | -- | 263.97 | -- |
+
+Two things here are worth more than the numbers.
+
+**Small B is a trap.** Below 16 batching is *worse than not batching*: B=2 costs
+1.52x. The control says this is not the staging copies (their volume is constant
+in B, ~19 ms of bandwidth total) -- B=2 with plain `baddbmm` and no quack is
+**2924.5 ms**, worse still. It is `bmm` falling off a kernel-selection cliff at
+small batch, which `emerging_optimizers` flags in its own docstring
+(`muon_utils.py:332`). Anyone picking a conservative small batch size would land
+1.5x slower than leaving the feature off.
+
+**The curve is reproducibly non-monotone and it is not the kernel.** B=48 beats
+B=56 and B=112 while using less memory than either, in three independent runs.
+Timed alone (`scratchpad/bsyrk_curve.py`), `batched_tsyrk_ex` is *flat*: the total
+Gram cost for all 336 matrices is 28.3-30.2 ms (fc1) and 14.0-15.5 ms (fc2) at
+every B from 16 to 168, with no inversion. The kernel saturates by B=16 and then
+scales linearly. So every bit of the 1742 -> 1567 ms gain from B=16 to B=168
+comes from *outside* the symmetric GEMM, and batching the full bucket of 336
+would buy nothing from the kernel even if it fit -- it OOMs on a 13.78 GiB
+allocation with 6.83 GiB free.
+
+**Recommended default: B=24** -- 1.093x for +0.14 GiB, the largest gain that costs
+no peak memory at all. Peak is set by forward/backward up to ~B=24 and by the
+optimizer above it, so that is the crossover, not a round number. B=48 is
+defensible at +10 GiB; B=168 is not at +59, since peak memory is what sizes the
+93 L cluster (`results/scaleout_93l.md`).
+
+### Exactly which GEMM the batched syrk replaced
+
+Three arms traced at the same geometry, differing only in the lever. Rank 0, one
+traced iteration. `b48` -> `b48syrk` changes *only* the kernel behind the two
+symmetric matmuls, so the diff is the attribution:
+
+| kernel | b48 | b48syrk | delta |
+|---|---:|---:|---:|
+| `Cijk_Alik_Bljk_...MT256x256x64` | 280.5 ms / 64 | **0.0 / 0** | -280.5 |
+| `Cijk_Ailk_Bljk_...MT256x256x64` | 421.1 / 125 | 257.6 / 69 | -163.5 |
+| `Cijk_Ailk_Bljk_...MT256x240x64` | 85.3 / 28 | 86.7 / 28 | +1.4 |
+| `Cijk_Ailk_Bjlk_...MT256x256x64` | 69.0 / 21 | 68.8 / 21 | -0.2 |
+| `nt_pp_bf16_256x256x64` (quack) | 0.0 / 0 | **372.2 / 156** | +372.2 |
+| **GEMM total** | **855.9** | **785.3** | **-70.6** |
+
+**`batched_tsyrk_ex` took over 442.8 ms of Tensile GEMM and does it in 372.2 ms --
+1.19x on the work it actually replaced.** The two replaced GEMMs separate by
+operand layout: `Alik_Bljk` (transposed A) is the Gram `X @ X.mT` and vanishes
+entirely; `Ailk_Bljk` serves both `A @ A` and `B @ X`, so syrk takes the `A @ A`
+half and the 257.6 ms / 69 calls left behind is the non-symmetric third GEMM,
+which no symmetric kernel can help. 64 + 56 = 120 replaced calls against 156
+quack calls.
+
+### Batching and the kernel are different mechanisms
+
+`base` -> `b48` (batching, no quack) is not mainly a GEMM-efficiency win:
+
+| | base | b48 | b48syrk |
+|---|---:|---:|---:|
+| iteration | 1843.3 ms | 1741.4 | 1641.3 |
+| GEMM device time | 949.2 | 855.9 | 785.3 |
+| **kernel launches** | **59,050** | **19,142** | 19,179 |
+| Memcpy DtoD | 61.8 ms / 6,227 | -- | 61.1 / 896 |
+
+Batching cuts launches **3.1x** and improves Tensile's tile choice: the serial
+path scatters across four suboptimal tiles (`MT192x192`, `192x224`, `256x192`,
+`256x224`) over 6,461 calls, while the batched shapes get `MT256x256` uniformly.
+Quack then wins on the symmetric math. The two are additive, which is what
+1839.6 -> 1740.7 -> 1640.4 shows.
+
+### What the B curve is actually selecting
+
+Tracing B=48 against B=56 (the reproducible 66 ms inversion) locates it, and it is
+not a GEMM effect -- consistent with the kernel being flat in B:
+
+| delta ms | B=48 | B=56 | kernel |
+|---:|---:|---:|---|
+| **+60.0** | 106.0 / 26 | 166.0 / 41 | `reduce_kernel` / `aten::linalg_vector_norm` |
+| **+55.3** | 0.0 / 0 | 55.3 / 51 | `elementwise_kernel_manual_unroll<128,8>` |
+| +23.1 | 86.5 | 109.6 | Tensile `MT256x240x64` |
+| -16.8 | 256.6 | 239.8 | Tensile `MT256x256x64` |
+| -68.8 | 68.8 / 21 | 0.0 / 0 | Tensile `Bjlk_...MT256x256x64` |
+
+The cause is `F.normalize(x, p=2, dim=(-2,-1))` at the top of `newton_schulz` --
+the spectral-norm rescale, not any matmul. At B=56 its reduction splits across 41
+kernels instead of 26 and costs 60 ms more, and a second elementwise kernel
+appears that does not exist at B=48. The GEMM changes are a near-wash. **B selects
+reduction kernels, not GEMM kernels**, which is why the curve is jagged and why the
+isolated GEMM benchmark showed nothing.
+
+### What is left, counted rather than estimated
+
+From the `b48syrk` trace, the largest non-GEMM device time in the iteration:
+
+| item | ms | calls |
+|---|---:|---|
+| NCCL (`record_param_comms` + `allreduce_coalesced`) | 220.6 | 73 |
+| `linalg_vector_norm` / `reduce_kernel` (the `normalize`) | 106.1 | 26 |
+| `elementwise_kernel_manual_unroll<128,4>` | 88.2 | 676 |
+| Memcpy DtoD | 61.1 | 896 |
+
+Two levers are visible and neither needs a third-party kernel: the `normalize` at
+106 ms is a fusable reduce-then-divide *and* the thing making the B curve jagged,
+and the momentum/staging traffic across ~1,600 launches is what
+`torch._foreach_*` exists for. An earlier version of this section estimated the
+non-GEMM block at 700-850 ms from FLOP ratios; that was too high, and these
+counted figures replace it.
 
 ### Numerics
 

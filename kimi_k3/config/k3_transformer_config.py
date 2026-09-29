@@ -159,7 +159,15 @@ class KimiK3TransformerConfig(MLATransformerConfig):
     k3_muon_batch_ns: int = 0
     """Batch this many same-shaped Muon parameters into one Newton-Schulz call.
     0 disables. K3 has 672 expert matrices per rank in two shapes, each currently
-    orthogonalized alone; `newton_schulz` already handles 3-D input (G67)."""
+    orthogonalised alone; `newton_schulz` already handles 3-D input (G67).
+
+    **Use 24 or leave it off.** The B curve is measured in
+    `results/muon_newton_schulz.md` and is not monotone: 24 gives 1.093x for
+    +0.14 GiB of peak (free -- forward/backward still sets the peak there), 48
+    gives 1.121x for +10 GiB, 168 gives 1.173x for +59 GiB, and 336 OOMs. Below
+    16 batching is **slower than not batching** (B=2 costs 1.52x) because `bmm`
+    picks a bad kernel at small batch, so this is not a knob to set
+    conservatively."""
 
     k3_muon_batch_syrk: bool = False
     """Route the two symmetric matmuls of the batched Newton-Schulz step through

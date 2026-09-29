@@ -351,6 +351,14 @@ def main() -> None:
                 parts.append("tritonar")
             if args.single_grouped_weight:
                 parts.append("sgw")
+            if args.muon_batch_ns:
+                # Same bug as the MoRI one above, hit again: the B=56 trace
+                # overwrote B=48 and only the in-JSON summaries survived.
+                parts.append(f"bns{args.muon_batch_ns}")
+                if args.muon_batch_syrk:
+                    parts.append("qsyrk")
+            if args.muon_syrk:
+                parts.append("tsyrk")
             if args.fused_attn_res:
                 parts.append("chunkar")
             if args.record_shapes:
