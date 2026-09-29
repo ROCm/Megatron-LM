@@ -9,6 +9,7 @@ expert GEMMs skip a second input quantize.
 
 from __future__ import annotations
 
+import functools
 from dataclasses import dataclass
 from typing import Any, Optional, Tuple
 
@@ -142,19 +143,26 @@ def mori_wire_dtype() -> torch.dtype:
     those bytes. MORI dispatch is a pure token routing/all-to-all that never
     does arithmetic on the payload, so any 1-byte dtype in MORI's kernel table
     transports the bytes verbatim. MORI only registers E4M3 (OCP/FNUZ) and FP4,
-    so we present every FP8 payload -- including E5M2 dgrad -- as ``e4m3fnuz``
-    on the wire and reinterpret it back to the true FP8 dtype on recv. This
-    keeps E5M2 dgrad numerics intact without needing a MORI E5M2 kernel.
+    so we present every FP8 payload -- including E5M2 dgrad -- as E4M3 on the
+    wire and reinterpret it back to the true FP8 dtype on recv. This keeps E5M2
+    dgrad numerics intact without needing a MORI E5M2 kernel.
+
+    MORI only compiles the E4M3 kernel matching the device's native FP8 flavor:
+    FNUZ on gfx94x (MI300), OCP on gfx95x (MI350) and CUDA.
     """
-    if hasattr(torch, "float8_e4m3fnuz"):
-        try:
-            _ = torch.empty(0, dtype=torch.float8_e4m3fnuz)
-            return torch.float8_e4m3fnuz
-        except Exception:  # pylint: disable=broad-except
-            pass
+    if _device_uses_fp8_fnuz() and hasattr(torch, "float8_e4m3fnuz"):
+        return torch.float8_e4m3fnuz
     if hasattr(torch, "float8_e4m3fn"):
         return torch.float8_e4m3fn
     return torch.uint8
+
+
+@functools.lru_cache(maxsize=None)
+def _device_uses_fp8_fnuz() -> bool:
+    if torch.version.hip is None or not torch.cuda.is_available():
+        return False
+    arch = getattr(torch.cuda.get_device_properties(torch.cuda.current_device()), "gcnArchName", "")
+    return arch.startswith("gfx94")
 
 
 def dispatch_block_size(recipe) -> int:
