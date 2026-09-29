@@ -699,8 +699,8 @@ def init_mori_shmem(group: torch.distributed.ProcessGroup):
     bootstrap (to broadcast the shmem UID); after that the registration is
     unused, so later calls with a rebuilt but equivalent EP group are no-ops.
 
-    Current MORI releases do not support finalizing and reinitializing shmem in
-    the same process. Call :func:`finalize_mori_shmem` only during process teardown.
+    Initialize once per process and call :func:`finalize_mori_shmem` once at process
+    teardown, after every op has been released.
     """
     global _mori_shmem_initialized
     if _mori_shmem_initialized:
@@ -735,9 +735,10 @@ def reset_mori_op():
 
     Drains the comm stream and synchronizes the device, then calls
     :meth:`~mori.ops.EpDispatchCombineOp.reset` when present and drops the
-    reference and comm stream cache. Use between pytest parametrized cases with
-    the same node-spanning EP layout so the next :func:`get_mori_op` builds a fresh op.
-    Does not finalize symmetric memory or clear shmem staging buffers; call
+    reference and comm stream cache. Dropping the last reference frees the op's
+    symmetric buffers (the MORI handle destructor does this), so call it at the same
+    point on every rank. Use between pytest parametrized cases so the next
+    :func:`get_mori_op` builds a fresh op. Does not finalize shmem; call
     :func:`finalize_mori_shmem` at session teardown.
 
     Do not call between dispatch and combine in the same forward pass.
@@ -756,7 +757,6 @@ def finalize_mori_shmem():
     Inverse of :func:`init_mori_shmem`. Resets the cached op first, then calls
     ``mori.shmem.shmem_finalize()`` and unregisters
     :data:`MORI_EP_PROCESS_GROUP_NAME`. Safe when shmem was never initialized.
-    Reinitialization after this call is unsupported by current MORI releases.
     """
     reset_mori_op()
     global _mori_shmem_initialized
