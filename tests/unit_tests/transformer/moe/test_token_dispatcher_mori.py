@@ -157,3 +157,49 @@ class TestMoriSharedOp:
         container.dispatcher_dropless_multi_layer_multi_iter_test(
             num_layers=num_layers, num_iters=num_iters
         )
+
+
+@pytest.mark.skipif(not is_mori_available(), reason="MORI is not available")
+class TestMoriColdRank:
+    """MORI flex dispatcher with fused permute on a rank that receives 0 tokens."""
+
+    def setup_method(self, method):
+        pass
+
+    def teardown_method(self, method):
+        # Match a2a_overlap: reset cached op, finalize shmem, then destroy MP.
+        # Swallow teardown errors so a failed rank does not hang on a barrier.
+        try:
+            finalize_mori_shmem()
+        except Exception as exc:
+            print(f"MORI teardown warning: {exc}", flush=True)
+        try:
+            Utils.destroy_model_parallel()
+        except Exception as exc:
+            print(f"MP teardown warning: {exc}", flush=True)
+            Utils.inited = False
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.skipif(
+        not is_te_min_version("2.1.0"), reason="TE fused permute is required for permute_fusion"
+    )
+    @pytest.mark.internal
+    @pytest.mark.timeout(600)
+    @pytest.mark.parametrize("tp_size,ep_size", [(1, 8)])
+    def test_cold_rank_fused_permute_sequential_mlp(self, tp_size, ep_size):
+        container = MoEModelTestContainer(
+            tp_size=tp_size,
+            ep_size=ep_size,
+            pp_size=1,
+            num_moe_experts=32,
+            moe_router_topk=2,
+            moe_router_load_balancing_type="aux_loss",
+            moe_token_dispatcher_type="flex",
+            moe_flex_dispatcher_backend="mori",
+            moe_permute_fusion=True,
+            moe_grouped_gemm=False,
+            moe_mori_max_tokens_per_rank=4096,
+            hidden_size=1024,
+            test_dtype=torch.bfloat16,
+        )
+        container.dispatcher_cold_rank_test()
