@@ -78,10 +78,20 @@ lever 3, not a lever itself.
 
 ## Lever 3 — quack-flydsl `batched_tsyrk_ex` (G67): **1.055× end to end**
 
-From `github.com/wenchenvincent/quack-flydsl` @ `wip/amd-flydsl-port`. Needs
-FlyDSL 0.2.x on the path: 0.1.1.dev409 has no `flydsl.expr.math`, 0.3.2 renamed
-`expr.vector` → `expr.Vector`. The global install is pinned by `amd-aiter` (MoRI
-imports it), so 0.2.4 lives in a separate tree reached by `PYTHONPATH`.
+From `github.com/wenchenvincent/quack-flydsl`, **pinned at
+`518597ceb783f4867b4ee00d56cedfe4570ef055`** on `wip/amd-flydsl-port`
+(`PINS.md` §7, `deps/quack-flydsl.pin`, installer
+`tools/install_quack_pin.sh`). A personal repo on a WIP branch, so the SHA is the
+only thing that identifies the kernel -- the branch can be force-pushed. Optional
+and off by default; `--muon-batch-ns` alone needs none of it.
+
+Needs FlyDSL 0.2.x: 0.1.1.dev409 has no `flydsl.expr.math`, 0.3.2 renamed
+`expr.vector` → `expr.Vector`. It goes in its **own tree** reached by
+`PYTHONPATH`, never installed over the global `0.1.1.dev409`, which is
+`Required-by: amd-aiter` and imported by MoRI EP. `pip install quack-kernels`
+would break exactly that: it requires `nvidia-cutlass-dsl==4.6.0` (CUDA, on an
+AMD node) and its `[amd]` extra declares `flydsl` *unpinned*, which resolves to
+0.3.2+ over the global.
 
 Both K3 Gram shapes clear `can_use_batched_tsyrk` (N % 256 == 0, K % 128 == 0).
 

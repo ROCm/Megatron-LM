@@ -1,0 +1,33 @@
+# Kimi K3 optional dependency pin: quack-flydsl (batched SYRK for Muon, G67)
+#
+# Machine-readable companion to PINS.md §7. Consumed by
+# kimi_k3/tools/install_quack_pin.sh and asserted at runtime by
+# kimi_k3.model.core_patch.QUACK_FLYDSL_PIN.
+#
+# This is NOT a pip requirements file and must not be fed to pip -- see WHY_NOT_PIP.
+
+REPO=https://github.com/wenchenvincent/quack-flydsl.git
+BRANCH=wip/amd-flydsl-port
+SHA=518597ceb783f4867b4ee00d56cedfe4570ef055
+SHA_DATE=2026-09-16
+SHA_SUBJECT=[amd] tsyrk_ex: 2D single-matrix SYRK drop-in (Emerging-Optimizers parity)
+LICENSE=Apache-2.0
+MODULE=quack.amd.gemm_gfx950_nt_pingpong
+SYMBOLS=batched_tsyrk_ex,can_use_batched_tsyrk
+
+# FlyDSL must be 0.2.x: 0.1.1.dev409 has no flydsl.expr.math, and 0.3.2 renamed
+# expr.vector -> expr.Vector. It goes in its OWN tree, never over the global one.
+FLYDSL_VERSION=0.2.4
+FLYDSL_GLOBAL_KEEP=0.1.1.dev409
+
+# Personal repo, work-in-progress branch. The branch can be force-pushed or
+# rebased, so BRANCH does not identify code -- only SHA does. Optional and off by
+# default (k3_muon_batch_syrk=False); --muon-batch-ns alone needs none of this.
+UPSTREAM_STATUS=personal-repo-wip-branch
+
+# WHY_NOT_PIP: quack's own metadata makes `pip install` unsafe on this box.
+#   - it requires nvidia-cutlass-dsl==4.6.0, a CUDA package, on an AMD node
+#   - its [amd] extra declares `flydsl` UNPINNED, so pip resolves it to 0.3.2+
+#     and overwrites the global 0.1.1.dev409 that amd-aiter pins and MoRI EP
+#     imports -- breaking the MoRI dispatcher
+# Clone + PYTHONPATH is therefore the install, not a shortcut around packaging.

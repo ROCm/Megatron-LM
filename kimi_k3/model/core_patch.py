@@ -12,6 +12,10 @@ This is the only file in the tree allowed to patch a core namespace.
 
 import contextlib
 import inspect
+import logging
+
+
+logger = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
@@ -215,24 +219,80 @@ def install_muon_syrk() -> None:
 _MUON_BATCH_INSTALLED = False
 
 
+#: `wenchenvincent/quack-flydsl` @ `wip/amd-flydsl-port`, pinned in `PINS.md` §7.
+#: A personal repo on a WIP branch: the branch can be force-pushed, so the SHA is
+#: the only thing that identifies the kernel we measured (G67). Bumping this is its
+#: own commit and re-runs the G67 arms (rule R10.3).
+QUACK_FLYDSL_PIN = "518597ceb783f4867b4ee00d56cedfe4570ef055"
+QUACK_FLYDSL_URL = "https://github.com/wenchenvincent/quack-flydsl.git"
+
+
+def _check_quack_pin(module_file: str) -> None:
+    """Warn loudly if the checkout is not the pinned SHA.
+
+    Only advisory: quack may be installed as a wheel or a copied tree with no git
+    metadata, and refusing to run then would be worse than saying so. But a *git*
+    checkout at the wrong SHA is exactly the failure this pin exists to catch --
+    the branch is WIP and rebasable, so "same branch" does not mean "same kernel".
+    """
+    import pathlib
+    import subprocess
+
+    root = pathlib.Path(module_file).resolve()
+    for parent in root.parents:
+        if (parent / ".git").exists():
+            break
+    else:
+        logger.warning(
+            "quack is not a git checkout, so its version cannot be verified against "
+            "the pin %s (PINS.md SS7). Measurements may not be reproducible.",
+            QUACK_FLYDSL_PIN[:12],
+        )
+        return
+
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(parent), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+    except (subprocess.SubprocessError, OSError) as exc:  # pragma: no cover
+        logger.warning("could not read the quack checkout SHA (%s); pin unverified.", exc)
+        return
+
+    if sha != QUACK_FLYDSL_PIN:
+        logger.warning(
+            "quack checkout is %s but K3 pins %s (PINS.md SS7). The branch "
+            "wip/amd-flydsl-port is WIP and can be force-pushed, so this is very "
+            "likely a different kernel than the one G67 measured. Run: git -C %s "
+            "checkout %s",
+            sha[:12], QUACK_FLYDSL_PIN[:12], parent, QUACK_FLYDSL_PIN,
+        )
+
+
 def _quack_batched_tsyrk():
     """Resolve quack's batched symmetric GEMM, or explain why it is unavailable.
 
-    From `wenchenvincent/quack-flydsl` @ `wip/amd-flydsl-port`. Needs FlyDSL 0.2.x
-    on the path: 0.1.1.dev409 has no `flydsl.expr.math`, 0.3.2 renamed
-    `expr.vector` -> `expr.Vector`. The global install is pinned by `amd-aiter`
-    (MoRI imports it), so 0.2.4 lives in a separate tree reached by PYTHONPATH.
+    Pinned in `PINS.md` §7 -- a personal repo on a WIP branch, deliberately
+    optional and off by default. Needs FlyDSL 0.2.x on the path: 0.1.1.dev409 has
+    no `flydsl.expr.math`, 0.3.2 renamed `expr.vector` -> `expr.Vector`. The
+    global install is `0.1.1.dev409` and is `Required-by: amd-aiter`, which MoRI
+    imports -- so 0.2.4 must live in a separate tree reached by PYTHONPATH rather
+    than being installed over it.
     """
     try:
-        from quack.amd.gemm_gfx950_nt_pingpong import batched_tsyrk_ex, can_use_batched_tsyrk
+        from quack.amd import gemm_gfx950_nt_pingpong as kernel_mod
     except ImportError as exc:  # pragma: no cover - depends on PYTHONPATH
         raise RuntimeError(
-            "quack.amd.gemm_gfx950_nt_pingpong is not importable. Clone "
-            "github.com/wenchenvincent/quack-flydsl @ wip/amd-flydsl-port and put it plus "
-            "FlyDSL 0.2.4 on PYTHONPATH (do NOT upgrade the global flydsl: amd-aiter/MoRI "
-            f"pin it). Underlying error: {exc}"
+            "quack.amd.gemm_gfx950_nt_pingpong is not importable, so "
+            "--muon-batch-syrk cannot run. It is pinned in kimi_k3/PINS.md SS7 "
+            f"(follow the install there): clone {QUACK_FLYDSL_URL} and check out "
+            f"{QUACK_FLYDSL_PIN}, then put it plus FlyDSL 0.2.4 on PYTHONPATH. Do "
+            "NOT upgrade the global flydsl -- amd-aiter pins it and MoRI imports "
+            "it. Note --muon-batch-ns alone needs none of this and still gives "
+            f"1.121x at B=48. Underlying error: {exc}"
         ) from exc
-    return batched_tsyrk_ex, can_use_batched_tsyrk
+    _check_quack_pin(kernel_mod.__file__)
+    return kernel_mod.batched_tsyrk_ex, kernel_mod.can_use_batched_tsyrk
 
 
 def install_muon_batched_ns(batch_size: int = 16, use_quack_syrk: bool = False) -> None:
@@ -371,6 +431,33 @@ def install_muon_batched_ns(batch_size: int = 16, use_quack_syrk: bool = False) 
         return None
 
     TensorParallelMuon.step = _batched_step
+
+
+def _contract_quack_pin():
+    """The runtime pin constant must agree with the checked-in pin file.
+
+    Two places record the SHA -- `deps/quack-flydsl.pin` (read by the installer)
+    and `QUACK_FLYDSL_PIN` (asserted at import). If they drift, one of them is
+    silently wrong, and the one that loses is whichever the reader happens to
+    consult. Does not require quack to be installed: this checks our own files.
+    """
+    import pathlib
+
+    pin_file = pathlib.Path(__file__).resolve().parents[1] / "deps" / "quack-flydsl.pin"
+    assert pin_file.is_file(), f"{pin_file} is missing; PINS.md SS7 refers to it."
+    recorded = dict(
+        line.split("=", 1)
+        for line in pin_file.read_text().splitlines()
+        if "=" in line and not line.startswith("#")
+    )
+    assert recorded["SHA"] == QUACK_FLYDSL_PIN, (
+        f"deps/quack-flydsl.pin records SHA={recorded['SHA']} but core_patch pins "
+        f"{QUACK_FLYDSL_PIN}. A pin bump must update both (rule R10.3)."
+    )
+    assert recorded["FLYDSL_VERSION"].startswith("0.2."), (
+        "the pin file no longer asks for FlyDSL 0.2.x; 0.1.1.dev409 lacks "
+        "flydsl.expr.math and 0.3.2 renamed expr.vector -> expr.Vector."
+    )
 
 
 def _contract_muon_batched_ns():
@@ -563,6 +650,7 @@ PIN_CONTRACTS = (
     ("TE GroupedLinear accepts single_grouped_weight", _contract_grouped_linear_single_param),
     ("Muon Newton-Schulz still exposes use_syrk", _contract_muon_syrk),
     ("Muon step loop the batched rewrite copies", _contract_muon_batched_ns),
+    ("quack-flydsl pin file agrees with the runtime constant", _contract_quack_pin),
 )
 
 

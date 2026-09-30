@@ -4,10 +4,14 @@
 > compatibility conclusion for each (rule R2.2 / R7.2). A pin bump is its own
 > commit and re-runs G1–G3 (rule R10.3).
 >
-> Status: **G1 GREEN** — all five pins resolved, licenses recorded, and the
-> released `chunk_kda` call verified functionally (forward *and* backward) after
-> the triton 3.6.0 → 3.7.1 upgrade. See §2.
-> Last updated: 2026-09-01.
+> Status: **G1 GREEN for the five core pins** — all resolved, licenses recorded,
+> and the released `chunk_kda` call verified functionally (forward *and* backward)
+> after the triton 3.6.0 → 3.7.1 upgrade. See §2.
+>
+> **`quack-flydsl` is a sixth pin and is deliberately not G1-green**: it is a
+> personal repo on a WIP branch, optional, and off by default. §7 records what
+> that means for anyone reproducing G67.
+> Last updated: 2026-09-30.
 
 ## 1. Pins
 
@@ -18,6 +22,8 @@
 | **AITER** | `e9e1278b1` (origin/main, 2026-08-27) | git; the workspace checkout was 5 months stale | **yes** — `kimik3_a8w4_tuned_fmoe.csv`, `ops/opus/moe_stage{1,2}_a8w4.py` and `ActivationType.Situv2` all present |
 | **fla** (flash-linear-attention) | git `5e02dd3` (0.6.0) | git clone; the PyPI wheel ships no `fla/ops` | **forward and backward both verified** on triton 3.7.1 by `tests/test_k3_p0_fla_contract.py` |
 | **HF moonshotai/Kimi-K3** | `a590ce090cb049c93a33dfe8c208ec652aa20503` (lastModified 2026-08-20) | HF model API | yes — config, modeling sources and shard headers read at this revision |
+| **wenchenvincent/quack-flydsl** | `518597ceb783f4867b4ee00d56cedfe4570ef055` (`wip/amd-flydsl-port`, 2026-09-16) | git clone; **personal repo, WIP branch — see §7** | yes — `batched_tsyrk_ex` measured end to end in G67 |
+| **flydsl** (for quack only) | `0.2.4`, installed to a **separate tree**, never globally | PyPI wheel unpacked to its own directory, reached by `PYTHONPATH` | yes — §7 records why the global `0.1.1.dev409` must stay |
 
 ## 2. `fla` — resolved (G1 green)
 
@@ -151,3 +157,67 @@ and in this project a number belongs to the configuration it was taken on:
 The one that would most repay re-running is the **P11 device-time trace**: MLA
 attention was measured before the swap, so its share of the ranking is now stale
 by roughly 60 ms per forward.
+
+## 7. `quack-flydsl` — the batched SYRK kernel for Muon (G67)
+
+**Pin: `518597ceb783f4867b4ee00d56cedfe4570ef055`**, branch `wip/amd-flydsl-port`,
+`https://github.com/wenchenvincent/quack-flydsl.git`
+(commit 2026-09-16, *"[amd] tsyrk_ex: 2D single-matrix SYRK drop-in
+(Emerging-Optimizers parity)"*). License **Apache-2.0** (repo `LICENSE`; the
+kernel file carries `Copyright (c) 2026, AMD.`) — compatible, same as Megatron's.
+
+Used by `--muon-batch-syrk` / `k3_muon_batch_syrk` for
+`quack.amd.gemm_gfx950_nt_pingpong.batched_tsyrk_ex`, which takes over the two
+symmetric matmuls of the batched Newton-Schulz step: 442.8 ms of Tensile GEMM done
+in 372.2 ms, and 1.121x on the whole iteration at B=48
+(`results/muon_newton_schulz.md`).
+
+### This pin is weaker than the other five, on purpose
+
+It is a **personal repository on a work-in-progress branch**, not an upstream or
+ROCm release:
+
+- A WIP branch can be **force-pushed or rebased**, so the branch name alone does
+  not identify code. Always check out the SHA above, never the branch tip, when
+  reproducing a G67 number.
+- There is no tag, release, or wheel. There is no upstream issue tracker to carry
+  a fix.
+- It is therefore **optional and off by default** (`k3_muon_batch_syrk: bool =
+  False`). Nothing in the model, the converter, or any other gate depends on it.
+  `--muon-batch-ns` alone — no quack — still gives 1.121x at B=48 and has no
+  external dependency at all.
+
+### Install (do NOT upgrade the global flydsl)
+
+`flydsl` 0.2.x is required: 0.1.1.dev409 has no `flydsl.expr.math`, and 0.3.2
+renamed `expr.vector` → `expr.Vector`. But the **global `flydsl` is
+`0.1.1.dev409` and is `Required-by: amd-aiter`**, which MoRI EP imports — so
+upgrading it in place breaks the MoRI dispatcher. Keep 0.2.4 in its own tree:
+
+```sh
+git clone https://github.com/wenchenvincent/quack-flydsl.git /opt/quack
+git -C /opt/quack checkout 518597ceb783f4867b4ee00d56cedfe4570ef055
+
+pip download flydsl==0.2.4 --no-deps -d /tmp/fw && \
+  python -m zipfile -e /tmp/fw/flydsl-0.2.4-*.whl /opt/flydsl-0.2.4
+
+export PYTHONPATH=/opt/flydsl-0.2.4:/opt/quack:$PYTHONPATH
+```
+
+Verify the global install is still the pinned one afterwards — from a directory
+that is **not** the flydsl tree, since Python puts the cwd on `sys.path` and will
+otherwise report the unpacked copy:
+
+```sh
+cd / && pip show flydsl | grep -E '^(Version|Required-by)'   # 0.1.1.dev409, amd-aiter
+```
+
+Both trees were under `/tmp` during G67, which is why the measurement was not
+reproducible across a reboot; `/opt` above is the fix.
+
+### Contract
+
+`core_patch._quack_batched_tsyrk()` imports it lazily and asserts the pinned SHA
+when the repo is a git checkout, so a drifted or force-pushed branch fails loudly
+instead of silently measuring different kernels. The import error names this
+section.
