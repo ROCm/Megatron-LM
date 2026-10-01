@@ -105,6 +105,8 @@ class TorchFullyShardedDataParallel(_BaseDataParallel):
                     else:
                         attrs['_transpose_invalid'] = False
                         # `_transpose` itself is dropped via `_SKIP_KEYS` below.
+                # Mark this parameter as an FSDP2 parameter.
+                attrs["is_torch_fsdp2_param"] = True
                 custom_attrs[name] = {k: v for k, v in attrs.items()}
                 for k in _SKIP_KEYS:
                     custom_attrs[name].pop(k, None)
@@ -157,6 +159,17 @@ class TorchFullyShardedDataParallel(_BaseDataParallel):
         fully_shard(self.module, **kwargs)
 
         restore_custom_attrs(self.module, attrs)
+
+    def finish_grad_sync(self, force_all_reduce=False):
+        """
+        Finishes grad sync (all-reduce or reduce-scatter) communication operations
+        for all model gradients.
+
+        When overlap_grad_reduce is set to True, waits for asynchronous communication
+        calls to complete. When overlap_grad_reduce is set to False, calls synchronous
+        communication ops.
+        """
+        super().finish_grad_sync()
 
     def load_state_dict(self, state_dict, strict=True):
         """

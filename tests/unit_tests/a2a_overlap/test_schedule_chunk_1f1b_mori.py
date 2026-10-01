@@ -17,14 +17,8 @@ class TestA2AOverlapMori:
     """Run process-scoped MORI coverage in a fresh torchrun invocation."""
 
     def teardown_method(self, method):
-        # Keep process-scoped MORI symmetric allocations alive while TP changes.
+        # The MORI op and shmem lifecycle is owned by conftest.py.
         Utils.destroy_model_parallel()
-
-    @classmethod
-    def teardown_class(cls):
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
-
-        finalize_mori_shmem()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.skipif(
