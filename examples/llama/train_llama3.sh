@@ -24,6 +24,7 @@ export NCCL_PROTO=${NCCL_PROTO:-Simple}
 export RCCL_MSCCL_ENABLE=${RCCL_MSCCL_ENABLE:-0}
 export TOKENIZERS_PARALLELISM=${TOKENIZERS_PARALLELISM:-false}
 export HSA_NO_SCRATCH_RECLAIM=${HSA_NO_SCRATCH_RECLAIM:-1}
+export UB_SKIPMC="${UB_SKIPMC:-1}"
 
 # parsing input arguments
 for ARGUMENT in "$@"
@@ -71,7 +72,7 @@ MBS="${MBS:-1}"
 BS="${BS:-8}"
 SEQ_LENGTH="${SEQ_LENGTH:-2048}"
 MAX_POSITION_EMBEDDINGS=131072
-TOTAL_ITERS="${TOTAL_ITERS:-12}"
+TOTAL_ITERS="${TOTAL_ITERS:-10}"
 SEQ_PARALLEL="${SEQ_PARALLEL:-1}" 
 CONTI_PARAMS="${CONTI_PARAMS:-0}"
 TE_FP8="${TE_FP8:-0}"  # 0: disable FP8, 1: enable FP8
@@ -82,7 +83,7 @@ FP4_PARAM_GATHER="${FP4_PARAM_GATHER:-0}"
 FP4_SELECTIVE_BF16="${FP4_SELECTIVE_BF16:-1}"  # 1: keep first/last layers in BF16 (NVFP4 paper recipe)
 FP4_BF16_START="${FP4_BF16_START:-2}"    # Number of layers at start in BF16 (paper: 2)
 FP4_BF16_END="${FP4_BF16_END:-8}"        # Number of layers at end in BF16 (paper: 8)
-GEMM_TUNING="${GEMM_TUNING:-1}"
+GEMM_TUNING="${GEMM_TUNING:-0}"
 MCORE="${MCORE:-1}"
 OPTIMIZER="${OPTIMIZER:-adam}"
 FSDP="${FSDP:-0}"
@@ -159,6 +160,12 @@ elif [[ $MODEL_SIZE -eq 70 ]]; then
     FFN_HIDDEN_SIZE=28672 # e.g. llama-13b: 13824
     NUM_LAYERS=80 # e.g. llama-13b: 40
     NUM_HEADS=64 # e.g. llama-13b: 40
+    NUM_KV_HEADS=8 # llama3 70B uses GQA
+elif [[ $MODEL_SIZE -eq 405 ]]; then
+    HIDDEN_SIZE=16384 # e.g. llama-13b: 5120
+    FFN_HIDDEN_SIZE=53248 # e.g. llama-13b: 13824
+    NUM_LAYERS=24 # e.g. llama-13b: 40
+    NUM_HEADS=128 # e.g. llama-13b: 40
     NUM_KV_HEADS=8 # llama3 70B uses GQA
 else
     echo "Model size not supported."
@@ -305,6 +312,10 @@ else
     if [ "$OPTIMIZER" == "adam" ]; then
         EXTRA_ARGS="$EXTRA_ARGS --use-distributed-optimizer --overlap-param-gather"
     fi
+fi
+
+if [ "$TP_COMM_OVERLAP" -eq 1 ]; then
+    EXTRA_ARGS="$EXTRA_ARGS --tp-comm-overlap"
 fi
 
 if [ "$ENABLE_PROFILING" -eq 1 ]; then

@@ -663,6 +663,18 @@ class TransformerConfig(ModelParallelConfig):
     GEMM feature introduced since CUTLASS 2.8 (https://github.com/fanshiqing/grouped_gemm).
     """
 
+    moe_use_kosmos: bool = False
+    """Run the routed part of every MoE layer (dispatch, experts, combine) with the KOSMOS
+    EP=8 single-launch kernels (megatron/core/transformer/moe/kosmos_moe.py)."""
+
+    moe_use_megamoe: bool = False
+    """Run the routed part of every MoE layer (dispatch, experts, combine) with Primus-Turbo's
+    fused MegaMoE op (megatron/core/transformer/moe/megamoe_moe.py)."""
+
+    moe_use_torch_experts: bool = False
+    """PyTorch+RCCL baseline: routed experts as SequentialMLP on Megatron's local (torch matmul)
+    linears instead of TE linears."""
+
     moe_use_legacy_grouped_gemm: bool = False
     """Use legacy GroupedMLP rather than TEGroupedMLP.
     Note: The legacy one will be deprecated soon."""
