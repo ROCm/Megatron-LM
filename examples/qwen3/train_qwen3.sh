@@ -343,6 +343,15 @@ case $MODEL_SIZE in
     ;;
 esac
 
+# MOE_EXPERTS (default: as configured): sequential = SequentialMLP experts (no --moe-grouped-gemm);
+# kosmos / megamoe / torch also pass --moe-use-kosmos / --moe-use-megamoe / --moe-use-torch-experts.
+MOE_EXPERTS=${MOE_EXPERTS:-}
+case "$MOE_EXPERTS" in
+    sequential | kosmos | megamoe | torch) USE_GROUPED_GEMM=false ;;
+esac
+# PRETRAIN_SCRIPT: training entry point (default pretrain_gpt.py).
+PRETRAIN_SCRIPT=${PRETRAIN_SCRIPT:-${MEGATRON_PATH}/pretrain_gpt.py}
+
 # torch FSDP2: see megatron training/arguments.py (not compatible with overlap-param-gather w/o dist optim)
 if [ "$USE_FSDP2" = true ]; then
     export CUDA_DEVICE_MAX_CONNECTIONS=${CUDA_DEVICE_MAX_CONNECTIONS:-32}
@@ -428,6 +437,12 @@ if [ "$IS_MOE" -eq 1 ]; then
         GEMM_TUNING=0
         echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
     fi
+
+    case "$MOE_EXPERTS" in
+        kosmos) moe_options="${moe_options} --moe-use-kosmos" ;;
+        megamoe) moe_options="${moe_options} --moe-use-megamoe" ;;
+        torch) moe_options="${moe_options} --moe-use-torch-experts" ;;
+    esac
 
     if [ "$ENABLE_DEEP_EP" = true ]; then
         moe_options="${moe_options} --moe-token-dispatcher-type flex --moe-enable-deepep"
@@ -701,7 +716,7 @@ fi
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
-run_cmd="torchrun $DISTRIBUTED_ARGS ${MEGATRON_PATH}/pretrain_gpt.py \
+run_cmd="torchrun $DISTRIBUTED_ARGS ${PRETRAIN_SCRIPT} \
     ${megatron_options} ${pr_options} ${load_options} ${activation_checkpoint_options} \
     ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} \
     ${sft_option} ${vp_options} ${profile_options} ${LOGGING_ARGS}"

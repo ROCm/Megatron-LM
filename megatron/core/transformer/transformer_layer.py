@@ -406,12 +406,33 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         # We can change MLP to accept pg_collection but it makes the logic implicit
         # The conditional below is to make the logic explicit
         # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
-        if isinstance(submodules.mlp, ModuleSpec) and submodules.mlp.module in (MLP, TEFusedMLP):
-            submodules.mlp = functools.partial(
-                submodules.mlp.module.as_mlp_submodule,
-                submodules=submodules.mlp.submodules,
-                **submodules.mlp.params,
+        mlp_builder = submodules.mlp
+        # MoE specs are functools.partial(MoELayer, ...) (ModuleSpec in older spec helpers).
+        moe_cls = (
+            mlp_builder.module
+            if isinstance(mlp_builder, ModuleSpec)
+            else getattr(mlp_builder, "func", None)
+        )
+        if moe_cls is MoELayer:
+            if self.config.moe_use_kosmos:
+                from megatron.core.transformer.moe.kosmos_moe import kosmos_moe_spec
+
+                mlp_builder = kosmos_moe_spec(mlp_builder)
+            elif self.config.moe_use_megamoe:
+                from megatron.core.transformer.moe.megamoe_moe import megamoe_spec
+
+                mlp_builder = megamoe_spec(mlp_builder)
+            elif self.config.moe_use_torch_experts:
+                from megatron.core.transformer.moe.kosmos_moe import torch_experts_spec
+
+                mlp_builder = torch_experts_spec(mlp_builder)
+        if isinstance(mlp_builder, ModuleSpec) and mlp_builder.module in (MLP, TEFusedMLP):
+            mlp_builder = functools.partial(
+                mlp_builder.module.as_mlp_submodule,
+                submodules=mlp_builder.submodules,
+                **mlp_builder.params,
             )
+            submodules.mlp = mlp_builder
             log_single_rank(
                 logger,
                 logging.WARNING,
@@ -419,7 +440,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 "Consider migrating the `mlp` submodule spec to a direct call of the "
                 "`as_mlp_submodule` classmethod instead.",
             )
-        self.mlp = submodules.mlp(
+        self.mlp = mlp_builder(
             config=self.config,
             pg_collection=pg_collection,
             is_mtp_layer=self.is_mtp_layer,

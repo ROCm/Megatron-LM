@@ -16,6 +16,11 @@ from .data_parallel_base import _BaseDataParallel
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .param_and_grad_buffer import _ParamAndGradBuffer, group_params_for_buffers, partition_buckets
 
+try:
+    from ..transformer.moe import kosmos_gate
+except ImportError:  # no KOSMOS adapter in this tree
+    kosmos_gate = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -380,6 +385,8 @@ class DistributedDataParallel(_BaseDataParallel):
         if self.use_forward_hook:
             self.enable_forward_pre_hook()
         self.overlap_param_gather_with_optimizer_step = False
+        if kosmos_gate is not None:
+            kosmos_gate.register_ddp(self)
 
     def enable_forward_pre_hook(self):
         """
@@ -463,6 +470,9 @@ class DistributedDataParallel(_BaseDataParallel):
                     assert (
                         param.grad is not None
                     ), 'param.grad being None is not safe when overlap_grad_reduce is True'
+                if kosmos_gate is not None:
+                    # On the AccumulateGrad stream: order this hook's work after KOSMOS kernels.
+                    kosmos_gate.side_stream()
                 if param.grad is not None and (
                     not param.grad_added_to_main_grad or getattr(param, 'zero_out_wgrad', False)
                 ):
@@ -520,6 +530,8 @@ class DistributedDataParallel(_BaseDataParallel):
                 other settings.
             force_dispatch (bool, optional): force dispatch regardless of other settings.
         """
+        if kosmos_gate is not None:
+            kosmos_gate.flush()
         if not force_sync:
             # If overlapping param AG with optimizer step, AG should not be dispatched again
             # in forward_backward_step.
@@ -538,6 +550,8 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
+        if kosmos_gate is not None:
+            kosmos_gate.flush()
         for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
             bucket_group.start_grad_sync()
 
@@ -550,6 +564,9 @@ class DistributedDataParallel(_BaseDataParallel):
         calls to complete. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
+        if kosmos_gate is not None:
+            # Start the syncs the KOSMOS gate still holds, in the order they became ready.
+            kosmos_gate.flush(end_of_backward=True)
         for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
             bucket_group.finish_grad_sync(force_all_reduce=force_all_reduce)
 

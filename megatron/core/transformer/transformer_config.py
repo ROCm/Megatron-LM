@@ -775,6 +775,18 @@ class TransformerConfig(ModelParallelConfig):
     parameter via Transformer Engine's `GroupedTensor`. Requires ``moe_grouped_gemm=True``
     and ``add_bias_linear=True``."""
 
+    moe_use_kosmos: bool = False
+    """Run the routed part of every MoE layer (dispatch, experts, combine) with the KOSMOS
+    EP=8 single-launch kernels (megatron/core/transformer/moe/kosmos_moe.py)."""
+
+    moe_use_megamoe: bool = False
+    """Run the routed part of every MoE layer (dispatch, experts, combine) with Primus-Turbo's
+    fused MegaMoE op (megatron/core/transformer/moe/megamoe_moe.py)."""
+
+    moe_use_torch_experts: bool = False
+    """PyTorch+RCCL baseline: routed experts as SequentialMLP on Megatron's local (torch matmul)
+    linears instead of TE linears."""
+
     moe_aux_loss_coeff: Union[float, List[float]] = 0.0
     """Scaling coefficient for the aux loss. A starting value of 1e-2 is recommended.
     If a list of load balancing types is provided for `moe_router_load_balancing_type`,
