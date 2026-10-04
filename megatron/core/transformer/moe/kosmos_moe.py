@@ -8,24 +8,43 @@ its backward is one launch, which returns the bf16 input gradient and the fp32 p
 Routing: for the softmax (top-k on the logits) and sigmoid (expert bias, group-limited) score
 functions with aux_loss or seq_aux_loss, the fused router runs inside the same two launches, and
 Megatron's router module only holds the router weight and the expert bias. Other router configs,
-and calls with a padding mask, keep Megatron's router. The shared expert stays in Megatron.
+and calls with a padding mask, keep Megatron's router.
+
+Shared expert (KOSMOS_SHARED=1): when the layer's shared expert is one ungated SwiGLU MLP of the
+experts' intermediate size, it runs inside the same two launches (fc1 + SwiGLU + fc2 alongside the
+routed experts, its output added at the combine; its dgrad/wgrad in the backward launch, its dX
+added to the input gradient). Megatron's SharedExpertMLP keeps the parameters; its forward is
+skipped. With gradient-accumulation fusion the shared weight gradients are added into main_grad
+(fp32 or bf16) by the kernel (grad_added_to_main_grad, dummy grads, as TE does); otherwise they
+are returned as bf16 gradients. Unsupported configs, and a token count that is not a multiple of
+512, keep Megatron's shared expert.
 
 Every MoE layer has its own context (its arena and tables); all layers of one shape share one
 workspace (the per-call buffers), so any recompute pattern works. kosmos_gate.py keeps Megatron
 DDP communication out of the KOSMOS kernels.
 
+Capacity: a call that routes more rows to one rank than the arena holds (capacity_rows, per rank,
+experts padded to 256 rows) gets the empty layout and undefined outputs, and sets a status bit on
+the device that stays set until read. At exit every layer's status is read once (one device sync)
+and each rank prints "[KOSMOS] plan status rank R: ..." (OVERFLOW if any call exceeded capacity).
+With MOE_ROUTER_FORCE_SKEW set (moe_utils), the forced routing is drawn by Megatron's router, so
+the fused router is not used.
+
 Environment:
   KOSMOS_PYTHON             directory of the kosmos module (KOSMOS `make python`: build/python);
                             unset: the module is found on PYTHONPATH
   KOSMOS_WGCAP              launch width (workgroups), default 256
-  KOSMOS_CAPACITY_FACTOR    arena rows reserved per layer = factor * T * k, default 1.5
+  KOSMOS_CAPACITY_FACTOR    arena rows reserved per layer and rank = factor * T * k, default 1.5
   KOSMOS_ROUTER             1 (default): the fused router where supported; 0: Megatron's router
   KOSMOS_DDP_GATE           1 (default): the DDP gate (kosmos_gate.py); 0: off
+  KOSMOS_SHARED             1 (default): the shared expert in the KOSMOS launches where supported;
+                            0: in Megatron
 
 This file also holds the PyTorch+RCCL baseline (--moe-use-torch-experts): SequentialMLP experts
 on Megatron's local (torch matmul) linears.
 """
 
+import atexit
 import dataclasses
 import os
 import sys
@@ -38,9 +57,12 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import kosmos_gate
 from megatron.core.transformer.moe.experts import SequentialMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
+from megatron.core.transformer.moe.moe_utils import force_skew_active, record_routing_stats
 from megatron.core.transformer.spec_utils import ModuleSpec
 
 ROUTER = bool(int(os.environ.get("KOSMOS_ROUTER", "1")))
+SHARED = bool(int(os.environ.get("KOSMOS_SHARED", "1")))
+SHARED_T_MULTIPLE = 512
 
 # ---------------------------------------------------------------------------------------------
 # KOSMOS binding: every call into it goes through the helpers below.
@@ -86,7 +108,7 @@ def _host_allgather(ep_group):
     return allgather
 
 
-def _new_workspace(config, ep_group, num_local_experts, T, router):
+def _new_workspace(config, ep_group, num_local_experts, T, router, shared):
     kosmos = _kosmos()
     k = config.moe_router_topk
     capacity_rows = int(float(os.environ.get("KOSMOS_CAPACITY_FACTOR", "1.5")) * T * k)
@@ -106,6 +128,7 @@ def _new_workspace(config, ep_group, num_local_experts, T, router):
         wgcap=int(os.environ.get("KOSMOS_WGCAP", "256")),
         capacity_rows=capacity_rows,
         router=rcfg,
+        shared=shared,
     )
 
 
@@ -156,13 +179,114 @@ def _backward_router(K, dout, G, x, w1, w2, wr, aux_scale):
     return dX, dW1, dW2, dWr
 
 
+# Shared expert: ws1 [2I, H] ([gate; up], Megatron's linear_fc1.weight), ws2 [H, I]; Gs [T, 2I] its
+# stored pre-activations.
+
+
+def _new_gs(x, ws1, need_g):
+    return torch.empty((x.shape[0], ws1.shape[0]), dtype=x.dtype, device=x.device) if need_g else None
+
+
+def _forward_shared(K, x, w1, w2, ws1, ws2, idx, w, need_g):
+    """-> (out, G or None, Gs or None)."""
+    out = torch.empty_like(x)
+    G, Gs = _new_g(K, x, need_g), _new_gs(x, ws1, need_g)
+    K.forward_shared(*map(_ptr, (x, w1, w2, ws1, ws2, idx, w, out, G, Gs)), _stream())
+    return out, G, Gs
+
+
+def _forward_router_shared(K, x, wr, bias, w1, w2, ws1, ws2, seed, need_g):
+    """-> (out, G or None, Gs or None, aux loss, tokens per expert)."""
+    out = torch.empty_like(x)
+    G, Gs = _new_g(K, x, need_g), _new_gs(x, ws1, need_g)
+    aux = torch.empty(1, dtype=torch.float32, device=x.device)
+    tpe = torch.empty(wr.shape[0], dtype=torch.int32, device=x.device)
+    K.forward_router_shared(
+        *map(_ptr, (x, wr, bias, w1, w2, ws1, ws2, out, G, Gs, aux, tpe, seed)), _stream()
+    )
+    return out, G, Gs, aux, tpe
+
+
+_ACC_MODE = {torch.float32: 1, torch.bfloat16: 2}
+
+
+def _main_grad_mode(config, p):
+    """The library's accumulate mode for p.main_grad (1 fp32, 2 bf16) if the kernel may add p's
+    gradient into it (gradient-accumulation fusion), else 0."""
+    mg = getattr(p, "main_grad", None)
+    if (
+        config.gradient_accumulation_fusion
+        and mg is not None
+        and mg.is_contiguous()
+        and mg.shape == p.shape
+        and hasattr(p, "grad_added_to_main_grad")
+    ):
+        return _ACC_MODE.get(mg.dtype, 0)
+    return 0
+
+
+def _shared_dw(config, ws1, ws2):
+    """-> (dWs1, dWs2, acc): the main_grads (acc 1 fp32 / 2 bf16, both the same) or new bf16
+    buffers (acc 0)."""
+    a1, a2 = _main_grad_mode(config, ws1), _main_grad_mode(config, ws2)
+    if a1 and a1 == a2:
+        return ws1.main_grad, ws2.main_grad, a1
+    return torch.empty_like(ws1), torch.empty_like(ws2), 0
+
+
+def _dummy_wgrad(p):
+    """The gradient returned for a weight whose gradient the kernel added into main_grad: a dummy, so
+    the DDP hook runs on the backward thread (Megatron's LinearWithGradAccumulation does the same)."""
+    zero = getattr(p, "zero_out_wgrad", False)
+    try:
+        from transformer_engine.pytorch.module.base import get_dummy_wgrad
+
+        return get_dummy_wgrad(list(p.main_grad.shape), p.dtype, zero=zero)
+    except ImportError:
+        f = torch.zeros if zero else torch.empty
+        return f(p.main_grad.shape, dtype=p.dtype, device=p.device, requires_grad=False)
+
+
+def _shared_grads(ws1, ws2, dWs1, dWs2, acc):
+    if not acc:
+        return dWs1, dWs2
+    ws1.grad_added_to_main_grad = True
+    ws2.grad_added_to_main_grad = True
+    return _dummy_wgrad(ws1), _dummy_wgrad(ws2)
+
+
+def _backward_shared(K, config, dout, G, Gs, x, w1, w2, ws1, ws2):
+    """-> (dX, dprobs, dW1, dW2, dWs1 grad, dWs2 grad)."""
+    dX = torch.empty_like(dout)
+    dprobs = torch.empty(
+        (dout.shape[0], _kosmos().EP * w1.shape[0]), dtype=torch.float32, device=dout.device
+    )
+    dW1, dW2 = torch.empty_like(w1), torch.empty_like(w2)
+    dWs1, dWs2, acc = _shared_dw(config, ws1, ws2)
+    ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, dX, dprobs, dW1, dW2, dWs1, dWs2))
+    K.backward_shared(*ins, acc, _stream())
+    return (dX, dprobs, dW1, dW2) + _shared_grads(ws1, ws2, dWs1, dWs2, acc)
+
+
+def _backward_router_shared(K, config, dout, G, Gs, x, w1, w2, ws1, ws2, wr, aux_scale):
+    """-> (dX, dW1, dW2, dWr, dWs1 grad, dWs2 grad)."""
+    dX = torch.empty_like(dout)
+    dW1, dW2, dWr = torch.empty_like(w1), torch.empty_like(w2), torch.empty_like(wr)
+    dWs1, dWs2, acc = _shared_dw(config, ws1, ws2)
+    ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, wr))
+    outs = map(_ptr, (dX, dW1, dW2, dWr, dWs1, dWs2))
+    K.backward_router_shared(*ins, aux_scale, *outs, acc, _stream())
+    return (dX, dW1, dW2, dWr) + _shared_grads(ws1, ws2, dWs1, dWs2, acc)
+
+
 # ---------------------------------------------------------------------------------------------
 
 _WS = {}
 
 
-def _workspace(config, ep_group, num_local_experts, T, router=None):
-    """The workspace shared by every MoE layer of one shape (and fused-router config)."""
+def _workspace(config, ep_group, num_local_experts, T, router=None, shared=False):
+    """The workspace shared by every MoE layer of one shape (and fused-router and shared-expert
+    config)."""
     key = (
         config.hidden_size,
         config.moe_ffn_hidden_size,
@@ -171,9 +295,10 @@ def _workspace(config, ep_group, num_local_experts, T, router=None):
         T,
         tuple(dist.get_process_group_ranks(ep_group)),
         router,
+        shared,
     )
     if key not in _WS:
-        _WS[key] = _new_workspace(config, ep_group, num_local_experts, T, router)
+        _WS[key] = _new_workspace(config, ep_group, num_local_experts, T, router, shared)
     return _WS[key]
 
 
@@ -188,21 +313,60 @@ def w1_to_kosmos(w1):
     return w1[:, w1_kosmos_perm(w1.shape[1] // 2, w1.device), :].contiguous()
 
 
+_CONTEXTS = []
+
+
+def _report_status():
+    """At exit: each layer's device status (the OR over all its calls), one line per rank."""
+    rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0"))
+    flagged, n = [], 0
+    try:
+        for kc in _CONTEXTS:
+            st = kc.ctx.plan_status()
+            n += 1
+            if st:
+                flagged.append(f"layer {kc.layer_number} status {st}")
+        rows = max(kc.ctx.info()["arena_rows"] for kc in _CONTEXTS)
+    except Exception as e:  # pylint: disable=broad-except
+        print(f"[KOSMOS] plan status rank {rank}: QUERY FAILED: {e}", flush=True)
+        return
+    cf = os.environ.get("KOSMOS_CAPACITY_FACTOR", "1.5")
+    if flagged:
+        print(
+            f"[KOSMOS] plan status rank {rank}: OVERFLOW or bad routing in {len(flagged)} of {n} "
+            f"layers ({', '.join(flagged)}; 4 = over capacity, 1 = bad expert id, 2 = duplicate); "
+            f"arena {rows} rows (KOSMOS_CAPACITY_FACTOR {cf}): those calls' outputs are undefined",
+            flush=True,
+        )
+    else:
+        print(
+            f"[KOSMOS] plan status rank {rank}: ok, {n} layers, arena {rows} rows "
+            f"(KOSMOS_CAPACITY_FACTOR {cf})",
+            flush=True,
+        )
+
+
 class KosmosContext:
     """One MoE layer's KOSMOS context (its arena and tables), created at first use on the shared
     workspace; router: the fused router's config (KosmosMoELayer._router_cfg) or None."""
 
-    def __init__(self, config, ep_group, num_local_experts):
+    def __init__(self, config, ep_group, num_local_experts, shared=False):
         self.config = config
         self.ep_group = ep_group
         self.E_loc = num_local_experts
+        self.shared = shared
+        self.layer_number = None
         self.ctx = None
         self.T = None
 
     def get(self, T, router=None):
         if self.ctx is None:
-            self.ctx = _new_context(_workspace(self.config, self.ep_group, self.E_loc, T, router))
+            ws = _workspace(self.config, self.ep_group, self.E_loc, T, router, self.shared)
+            self.ctx = _new_context(ws)
             self.T = T
+            if not _CONTEXTS:
+                atexit.register(_report_status)
+            _CONTEXTS.append(self)
         assert T == self.T, f"KOSMOS context built for T={self.T}, got T={T}"
         return self.ctx
 
@@ -211,7 +375,7 @@ class KosmosMoEFunction(torch.autograd.Function):
     """out = sum_j w_j * Expert_{idx_j}(x) over the EP group; grads for x, probs, W1, W2."""
 
     @staticmethod
-    def forward(ctx, hidden, probs, routing_map, w1, w2, kctx, need_g):
+    def forward(ctx, hidden, probs, routing_map, w1, w2, kctx, need_g, ws1=None, ws2=None):
         T, _ = hidden.shape
         k = kctx.config.moe_router_topk
         assert (
@@ -221,25 +385,41 @@ class KosmosMoEFunction(torch.autograd.Function):
         w = probs.gather(1, idx).to(torch.float32)
         K = kctx.get(T)
         idx32 = idx.to(torch.int32).contiguous()
+        ctx.shared = ws1 is not None
+        hidden = hidden.contiguous()
         kosmos_gate.before_kernel()
-        out, G = _forward(K, hidden.contiguous(), w1, w2, idx32, w.contiguous(), need_g)
+        if ctx.shared:
+            out, G, Gs = _forward_shared(K, hidden, w1, w2, ws1, ws2, idx32, w.contiguous(), need_g)
+        else:
+            out, G = _forward(K, hidden, w1, w2, idx32, w.contiguous(), need_g)
+            Gs = None
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
-        ctx.save_for_backward(w1, w2)
-        ctx.G = G
+        if ctx.shared:
+            ctx.save_for_backward(w1, w2, hidden, ws1, ws2)
+        else:
+            ctx.save_for_backward(w1, w2)
+        ctx.G, ctx.Gs = G, Gs
         ctx.kctx = kctx
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        w1, w2 = ctx.saved_tensors
         assert ctx.G is not None, "KOSMOS backward without G (forward ran with grad disabled)"
         K = ctx.kctx.ctx
         dout = dout.contiguous()
         kosmos_gate.before_kernel()
-        dX, dprobs, dW1, dW2 = _backward(K, dout, ctx.G, w1, w2)
+        if ctx.shared:
+            w1, w2, hidden, ws1, ws2 = ctx.saved_tensors
+            dX, dprobs, dW1, dW2, dWs1, dWs2 = _backward_shared(
+                K, ctx.kctx.config, dout, ctx.G, ctx.Gs, hidden, w1, w2, ws1, ws2
+            )
+        else:
+            w1, w2 = ctx.saved_tensors
+            dX, dprobs, dW1, dW2 = _backward(K, dout, ctx.G, w1, w2)
+            dWs1 = dWs2 = None
         kosmos_gate.after_kernel(backward=True)
-        ctx.G = None
-        return dX, dprobs, None, dW1, dW2, None, None
+        ctx.G = ctx.Gs = None
+        return dX, dprobs, None, dW1, dW2, None, None, dWs1, dWs2
 
 
 _AUX_SCALE = None
@@ -262,31 +442,47 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
     gradient is applied inside the backward launch."""
 
     @staticmethod
-    def forward(ctx, hidden, wr, bias, w1, w2, kctx, need_g, seed, router_cfg):
+    def forward(ctx, hidden, wr, bias, w1, w2, kctx, need_g, seed, router_cfg, ws1=None, ws2=None):
         T, _ = hidden.shape
         K = kctx.get(T, router_cfg)
+        ctx.shared = ws1 is not None
+        hidden = hidden.contiguous()
         kosmos_gate.before_kernel()
-        out, G, aux, tpe = _forward_router(
-            K, hidden.contiguous(), wr.contiguous(), bias, w1, w2, seed, need_g
-        )
+        if ctx.shared:
+            out, G, Gs, aux, tpe = _forward_router_shared(
+                K, hidden, wr.contiguous(), bias, w1, w2, ws1, ws2, seed, need_g
+            )
+        else:
+            out, G, aux, tpe = _forward_router(K, hidden, wr.contiguous(), bias, w1, w2, seed, need_g)
+            Gs = None
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
-        ctx.save_for_backward(hidden, wr, w1, w2)
-        ctx.G = G
+        if ctx.shared:
+            ctx.save_for_backward(hidden, wr, w1, w2, ws1, ws2)
+        else:
+            ctx.save_for_backward(hidden, wr, w1, w2)
+        ctx.G, ctx.Gs = G, Gs
         ctx.kctx = kctx
         ctx.mark_non_differentiable(aux, tpe)
         return out, aux, tpe
 
     @staticmethod
     def backward(ctx, dout, daux, dtpe):
-        hidden, wr, w1, w2 = ctx.saved_tensors
         assert ctx.G is not None, "KOSMOS backward without G (forward ran with grad disabled)"
         K = ctx.kctx.ctx
         dout = dout.contiguous()
         kosmos_gate.before_kernel()
-        dX, dW1, dW2, dWr = _backward_router(K, dout, ctx.G, hidden, w1, w2, wr, _aux_scale())
+        if ctx.shared:
+            hidden, wr, w1, w2, ws1, ws2 = ctx.saved_tensors
+            dX, dW1, dW2, dWr, dWs1, dWs2 = _backward_router_shared(
+                K, ctx.kctx.config, dout, ctx.G, ctx.Gs, hidden, w1, w2, ws1, ws2, wr, _aux_scale()
+            )
+        else:
+            hidden, wr, w1, w2 = ctx.saved_tensors
+            dX, dW1, dW2, dWr = _backward_router(K, dout, ctx.G, hidden, w1, w2, wr, _aux_scale())
+            dWs1 = dWs2 = None
         kosmos_gate.after_kernel(backward=True)
-        ctx.G = None
-        return dX, dWr, None, dW1, dW2, None, None, None, None
+        ctx.G = ctx.Gs = None
+        return dX, dWr, None, dW1, dW2, None, None, None, None, dWs1, dWs2
 
 
 class KosmosExperts(MegatronModule):
@@ -333,13 +529,67 @@ class KosmosMoELayer(MoELayer):
         assert self.ep_group.size() == 8, "KOSMOS MoE is EP=8"
         assert config.moe_router_topk in (6, 8, 10)
         assert config.moe_latent_size is None and not config.moe_shared_expert_overlap
-        self.kctx = KosmosContext(config, self.ep_group, self.num_local_experts)
+        self._fused_shared = SHARED and self._shared_supported()
+        if self._fused_shared:
+            print("[KOSMOS] shared expert fused into the KOSMOS launches", flush=True)
+        self._sh_active = False
+        self.kctx = KosmosContext(config, self.ep_group, self.num_local_experts, self._fused_shared)
+        self.kctx.layer_number = layer_number
         self._fused_router = ROUTER and self._router_supported()
+
+    def set_layer_number(self, layer_number):
+        super().set_layer_number(layer_number)
+        self.kctx.layer_number = layer_number
+
+    def _shared_supported(self):
+        """The shared expert fits the KOSMOS launches: one ungated SwiGLU MLP of the experts' intermediate
+        size, bf16 linears without bias or fused norm, and a library with the shared entry points."""
+        c, sh = self.config, getattr(self, "shared_experts", None)
+        if not getattr(self, "use_shared_expert", False) or sh is None:
+            return False
+        fc1, fc2 = getattr(sh, "linear_fc1", None), getattr(sh, "linear_fc2", None)
+        w1, w2 = getattr(fc1, "weight", None), getattr(fc2, "weight", None)
+        H, I = c.hidden_size, c.moe_ffn_hidden_size
+        why = None
+        if c.moe_shared_expert_gate or getattr(sh, "use_shared_expert_gate", False):
+            why = "shared expert gate"
+        elif not c.gated_linear_unit or c.activation_func is not torch.nn.functional.silu:
+            why = "not SwiGLU"
+        elif c.add_bias_linear or any(getattr(m, "bias", None) is not None and m.bias.numel() for m in (fc1, fc2)):
+            why = "bias"
+        elif w1 is None or w2 is None or tuple(w1.shape) != (2 * I, H) or tuple(w2.shape) != (H, I):
+            why = "shared intermediate size != moe_ffn_hidden_size"
+        elif w1.dtype != torch.bfloat16 or w2.dtype != torch.bfloat16:
+            why = "not bf16"
+        elif hasattr(fc1, "layer_norm_weight") or c.fp8 or getattr(c, "fp4", None):
+            why = "fused norm or low precision"
+        elif not hasattr(_kosmos().MoeContext, "forward_router_shared"):
+            why = "kosmos module without the shared entry points"
+        if why is not None:
+            if self.layer_number in (None, 1):
+                print(f"[KOSMOS] shared expert stays in Megatron: {why}", flush=True)
+            return False
+        return True
+
+    def shared_experts_compute(self, hidden_states):
+        # Fused: the shared expert runs in the KOSMOS launches (routed_experts_compute); no output here.
+        T = hidden_states.numel() // hidden_states.shape[-1]
+        self._sh_active = self._fused_shared and T % SHARED_T_MULTIPLE == 0
+        if self._sh_active:
+            return None
+        return super().shared_experts_compute(hidden_states)
+
+    def _shared_weights(self):
+        if not self._sh_active:
+            return None, None
+        sh = self.shared_experts
+        return sh.linear_fc1.weight, sh.linear_fc2.weight
 
     def _router_supported(self):
         c, r = self.config, self.router
         return (
-            c.moe_router_score_function in ("sigmoid", "softmax")
+            not force_skew_active()
+            and c.moe_router_score_function in ("sigmoid", "softmax")
             and not (c.moe_router_score_function == "softmax" and c.moe_router_pre_softmax)
             and not r.get_aux_loss_coeff("global_aux_loss")
             and not c.moe_z_loss_coeff
@@ -393,7 +643,9 @@ class KosmosMoELayer(MoELayer):
             torch.is_grad_enabled(),
             seed,
             cfg,
+            *self._shared_weights(),
         )
+        record_routing_stats(r.layer_number, tpe)
         if r.enable_expert_bias and torch.is_grad_enabled():
             with torch.no_grad():
                 r.local_tokens_per_expert += tpe.to(r.local_tokens_per_expert.dtype)
@@ -431,6 +683,7 @@ class KosmosMoELayer(MoELayer):
             self.experts.weight2,
             self.kctx,
             torch.is_grad_enabled(),
+            *self._shared_weights(),
         )
         return out, None
 

@@ -1,7 +1,9 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import atexit
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -1201,6 +1203,65 @@ def maybe_move_tensor_to_cpu(
     return tensor
 
 
+# Benchmark routing controls, read once from the environment. They act in Megatron's router, so
+# every MoE backend that takes Megatron's routing sees the same routing.
+#   MOE_ROUTER_FORCE_SKEW=s (s > 1, with --moe-router-force-load-balancing): the random logits are
+#       Gumbel(0, 1) draws instead of N(0, 1), and the experts of EP rank 0 (the first
+#       num_experts / EP) get + log(s). Top-k of Gumbel logits is a draw without replacement in
+#       which each of those experts is s times as likely as any other: the skewed routing of the
+#       KOSMOS microbenchmarks at s = 3 (dist 1, bench/common/moe_shapes.h).
+#   MOE_ROUTING_STATS=DIR: each router call's tokens per expert (this rank's tokens) stays on the
+#       device and is written at exit to DIR/rank<R>.txt, one line per call: the layer number,
+#       then the counts.
+_FORCE_SKEW = (
+    float(os.environ["MOE_ROUTER_FORCE_SKEW"]) if os.environ.get("MOE_ROUTER_FORCE_SKEW") else None
+)
+assert _FORCE_SKEW is None or _FORCE_SKEW > 1.0, "MOE_ROUTER_FORCE_SKEW must be > 1"
+
+
+def force_skew_active() -> bool:
+    """True if MOE_ROUTER_FORCE_SKEW is set (the forced routing must then be drawn here)."""
+    return _FORCE_SKEW is not None
+
+
+class _RoutingStats:
+    """MOE_ROUTING_STATS: per-call tokens per expert, written once at exit."""
+
+    def __init__(self, path):
+        self.path = path
+        self.calls = []
+        atexit.register(self.dump)
+
+    def record(self, layer_number, tokens_per_expert):
+        self.calls.append((layer_number, tokens_per_expert.detach().to(torch.int64)))
+
+    def dump(self):
+        if not self.calls:
+            return
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = int(os.environ.get("RANK", "0"))
+        rows = [c.cpu().tolist() for _, c in self.calls]
+        os.makedirs(self.path, exist_ok=True)
+        with open(os.path.join(self.path, f"rank{rank}.txt"), "w") as f:
+            for (layer, _), row in zip(self.calls, rows):
+                f.write(f"{layer} {' '.join(map(str, row))}\n")
+
+
+_ROUTING_STATS = (
+    _RoutingStats(os.environ["MOE_ROUTING_STATS"]) if os.environ.get("MOE_ROUTING_STATS") else None
+)
+
+
+def record_routing_stats(layer_number, routing: torch.Tensor):
+    """MOE_ROUTING_STATS: keep this call's tokens per expert (this rank's tokens). routing: the
+    routing map [num_tokens, num_experts] or the tokens per expert [num_experts]. No work when
+    the variable is unset."""
+    if _ROUTING_STATS is not None:
+        _ROUTING_STATS.record(layer_number, routing.sum(dim=0) if routing.dim() == 2 else routing)
+
+
 @internal_api
 class RandomSTE(torch.autograd.Function):
     """
@@ -1222,7 +1283,14 @@ class RandomSTE(torch.autograd.Function):
             torch.Tensor: The random logits.
         """
         with get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name()):
-            random_logits = logits.clone().normal_()
+            if _FORCE_SKEW is None:
+                random_logits = logits.clone().normal_()
+            else:
+                u = torch.rand_like(logits, dtype=torch.float32).clamp_(1e-7, 1.0 - 1e-7)
+                random_logits = (-torch.log(-torch.log(u))).to(logits.dtype)
+        if _FORCE_SKEW is not None:
+            hot = logits.shape[-1] // parallel_state.get_expert_model_parallel_world_size()
+            random_logits[..., :hot] += math.log(_FORCE_SKEW)
         return random_logits
 
     @staticmethod
