@@ -27,8 +27,6 @@ Capacity: a call that routes more rows to one rank than the arena holds (capacit
 experts padded to 256 rows) gets the empty layout and undefined outputs, and sets a status bit on
 the device that stays set until read. At exit every layer's status is read once (one device sync)
 and each rank prints "[KOSMOS] plan status rank R: ..." (OVERFLOW if any call exceeded capacity).
-With MOE_ROUTER_FORCE_SKEW set (moe_utils), the forced routing is drawn by Megatron's router, so
-the fused router is not used.
 
 Environment:
   KOSMOS_PYTHON             directory of the kosmos module (KOSMOS `make python`: build/python);
@@ -57,7 +55,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import kosmos_gate
 from megatron.core.transformer.moe.experts import SequentialMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
-from megatron.core.transformer.moe.moe_utils import force_skew_active, record_routing_stats
+from megatron.core.transformer.moe.moe_utils import record_routing_stats
 from megatron.core.transformer.spec_utils import ModuleSpec
 
 ROUTER = bool(int(os.environ.get("KOSMOS_ROUTER", "1")))
@@ -588,8 +586,7 @@ class KosmosMoELayer(MoELayer):
     def _router_supported(self):
         c, r = self.config, self.router
         return (
-            not force_skew_active()
-            and c.moe_router_score_function in ("sigmoid", "softmax")
+            c.moe_router_score_function in ("sigmoid", "softmax")
             and not (c.moe_router_score_function == "softmax" and c.moe_router_pre_softmax)
             and not r.get_aux_loss_coeff("global_aux_loss")
             and not c.moe_z_loss_coeff

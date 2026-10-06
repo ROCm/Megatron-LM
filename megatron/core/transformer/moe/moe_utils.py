@@ -1203,25 +1203,9 @@ def maybe_move_tensor_to_cpu(
     return tensor
 
 
-# Benchmark routing controls, read once from the environment. They act in Megatron's router, so
-# every MoE backend that takes Megatron's routing sees the same routing.
-#   MOE_ROUTER_FORCE_SKEW=s (s > 1, with --moe-router-force-load-balancing): the random logits are
-#       Gumbel(0, 1) draws instead of N(0, 1), and the experts of EP rank 0 (the first
-#       num_experts / EP) get + log(s). Top-k of Gumbel logits is a draw without replacement in
-#       which each of those experts is s times as likely as any other: the skewed routing of the
-#       KOSMOS microbenchmarks at s = 3 (dist 1, bench/common/moe_shapes.h).
-#   MOE_ROUTING_STATS=DIR: each router call's tokens per expert (this rank's tokens) stays on the
-#       device and is written at exit to DIR/rank<R>.txt, one line per call: the layer number,
-#       then the counts.
-_FORCE_SKEW = (
-    float(os.environ["MOE_ROUTER_FORCE_SKEW"]) if os.environ.get("MOE_ROUTER_FORCE_SKEW") else None
-)
-assert _FORCE_SKEW is None or _FORCE_SKEW > 1.0, "MOE_ROUTER_FORCE_SKEW must be > 1"
-
-
-def force_skew_active() -> bool:
-    """True if MOE_ROUTER_FORCE_SKEW is set (the forced routing must then be drawn here)."""
-    return _FORCE_SKEW is not None
+# MOE_ROUTING_STATS=DIR (benchmarks): each router call's tokens per expert (this rank's tokens)
+# stays on the device and is written at exit to DIR/rank<R>.txt, one line per call: the layer
+# number, then the counts.
 
 
 class _RoutingStats:
@@ -1283,14 +1267,7 @@ class RandomSTE(torch.autograd.Function):
             torch.Tensor: The random logits.
         """
         with get_cuda_rng_tracker().fork(get_expert_parallel_rng_tracker_name()):
-            if _FORCE_SKEW is None:
-                random_logits = logits.clone().normal_()
-            else:
-                u = torch.rand_like(logits, dtype=torch.float32).clamp_(1e-7, 1.0 - 1e-7)
-                random_logits = (-torch.log(-torch.log(u))).to(logits.dtype)
-        if _FORCE_SKEW is not None:
-            hot = logits.shape[-1] // parallel_state.get_expert_model_parallel_world_size()
-            random_logits[..., :hot] += math.log(_FORCE_SKEW)
+            random_logits = logits.clone().normal_()
         return random_logits
 
     @staticmethod
