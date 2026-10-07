@@ -261,6 +261,8 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
         if device_count > 0:
             torch.cuda.set_device(args.local_rank)
             device_id = torch.device(f'cuda:{args.local_rank}')
+            if args.cuda_memory_fraction is not None:
+                torch.cuda.set_per_process_memory_fraction(args.cuda_memory_fraction)
         else:
             device_id = None
 

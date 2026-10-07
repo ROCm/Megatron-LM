@@ -2851,6 +2851,9 @@ def _add_distributed_args(parser):
                        help='If not set, all PP stages will launch param all-gathers simultaneously. '
                        'Otherwise, each PP stage will independently launch as needed.',
                        dest='align_param_gather')
+    group.add_argument('--cuda-memory-fraction', type=float, default=None,
+                       help='Cap the PyTorch caching allocator at this fraction of device memory, '
+                       'leaving the rest to the runtime (kernel scratch, communication libraries).')
     group.add_argument('--use-distributed-optimizer', action='store_true',
                        help='Use distributed optimizer.')
     group.add_argument('--no-use-layer-wise-param-layout',
