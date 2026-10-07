@@ -22,7 +22,10 @@ are returned as bf16 gradients. Unsupported configs, and a token count that is n
 MXFP8 (KOSMOS_MXFP8=1, --fp8-recipe mxfp8): on the layers Megatron runs in FP8, the four expert
 GEMMs run in MXFP8 (TE recipe, no requantization): the forward quantizes X at the source and
 dispatches it in MXFP8, the backward dispatches dY in bf16 and quantizes it at the experts. The
-weights are quantized both ways once per step (on the first microbatch, as TE's weight cache);
+weights are quantized both ways once per step: with one microbatch per step, the row-wise copy in
+the forward (kept from a checkpointed first pass for its recompute) and the column-wise copy in
+the backward, each freed after its use; with more, both on the first microbatch and cached for
+the step (as TE's weight cache);
 the layer's inputs, outputs and gradients stay bf16 (probs gradient fp32). MXFP8 layers use
 Megatron's router and shared expert, and need a hidden size that is a multiple of 1024.
 
@@ -61,6 +64,7 @@ import torch
 import torch.distributed as dist
 
 from megatron.core.fp8_utils import is_first_last_bf16_layer
+from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import kosmos_gate
 from megatron.core.transformer.moe.experts import SequentialMLP
@@ -173,21 +177,21 @@ def _quantize_mxfp8(w, col):
 
 
 def _forward_mxfp8(K, x, mxw, idx, w):
-    """-> (out, G); mxw: KosmosExperts.mxfp8_weights(). The MXFP8 forward always stores G."""
+    """-> (out, G); mxw: KosmosExperts.mxfp8_row(). The MXFP8 forward always stores G."""
     out = torch.empty_like(x)
     G = _new_g(K, x, True)
     K.forward_mxfp8_train(*map(_ptr, (x, *mxw[:4], idx, w, out, G)), _stream())
     return out, G
 
 
-def _backward_mxfp8(K, dout, G, x, w1, w2, mxw):
-    """-> (dX, dprobs, dW1, dW2)."""
+def _backward_mxfp8(K, dout, G, x, w1, w2, mxc):
+    """-> (dX, dprobs, dW1, dW2); mxc: KosmosExperts.mxfp8_col()."""
     dX = torch.empty_like(dout)
     dprobs = torch.empty(
         (dout.shape[0], _kosmos().EP * w1.shape[0]), dtype=torch.float32, device=dout.device
     )
     dW1, dW2 = torch.empty_like(w1), torch.empty_like(w2)
-    K.backward_mxfp8(*map(_ptr, (dout, G, x, *mxw[4:], dX, dprobs, dW1, dW2)), _stream())
+    K.backward_mxfp8(*map(_ptr, (dout, G, x, *mxc, dX, dprobs, dW1, dW2)), _stream())
     return dX, dprobs, dW1, dW2
 
 
@@ -479,12 +483,11 @@ class KosmosMXFP8MoEFunction(torch.autograd.Function):
         hidden = hidden.contiguous()
         # Quantize after the gate: it waits for the param all-gather of the step's updated weights.
         kosmos_gate.before_kernel()
-        mxw = experts.mxfp8_weights()
-        out, G = _forward_mxfp8(K, hidden, mxw, idx32, w)
+        out, G = _forward_mxfp8(K, hidden, experts.mxfp8_row(keep=not need_g), idx32, w)
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
         ctx.save_for_backward(w1, w2, hidden)
         ctx.G = G if need_g else None
-        ctx.mxw, ctx.kctx = mxw, kctx
+        ctx.experts, ctx.kctx = experts, kctx
         return out
 
     @staticmethod
@@ -493,10 +496,10 @@ class KosmosMXFP8MoEFunction(torch.autograd.Function):
         w1, w2, hidden = ctx.saved_tensors
         kosmos_gate.before_kernel()
         dX, dprobs, dW1, dW2 = _backward_mxfp8(
-            ctx.kctx.ctx, dout.contiguous(), ctx.G, hidden, w1, w2, ctx.mxw
+            ctx.kctx.ctx, dout.contiguous(), ctx.G, hidden, w1, w2, ctx.experts.mxfp8_col()
         )
         kosmos_gate.after_kernel(backward=True)
-        ctx.G = ctx.mxw = None
+        ctx.G = ctx.experts = None
         return dX, dprobs, None, dW1, dW2, None, None, None
 
 
@@ -590,7 +593,8 @@ class KosmosExperts(MegatronModule):
 
     def mxfp8_weights(self):
         """(W1, W1_scale, W2, W2_scale, W1c, W1c_scale, W2c, W2c_scale): the weights row-wise
-        (forward) and column-wise (dgrad), quantized on the first microbatch of each step."""
+        (forward) and column-wise (dgrad), quantized on the first microbatch of each step and cached
+        for the step (more than one microbatch per step)."""
         if self._mxw is None or self.is_first_microbatch:
             w1, w2 = self.weight1.detach(), self.weight2.detach()
             self._mxw = (
@@ -601,6 +605,30 @@ class KosmosExperts(MegatronModule):
             )
         self.is_first_microbatch = False
         return self._mxw
+
+    def mxfp8_row(self, keep):
+        """(W1, W1_scale, W2, W2_scale). One microbatch per step: quantized once per step and held
+        only while used; keep (a forward with grad disabled, the checkpointed first pass) holds it
+        for the recompute's forward, which takes it. Otherwise from mxfp8_weights."""
+        if get_num_microbatches() > 1:
+            return self.mxfp8_weights()[:4]
+        if self.is_first_microbatch:
+            self._mxw = None
+            self.is_first_microbatch = False
+        row = self._mxw
+        if row is None:
+            w1, w2 = self.weight1.detach(), self.weight2.detach()
+            row = (*_quantize_mxfp8(w1, False), *_quantize_mxfp8(w2, False))
+        self._mxw = row if keep else None
+        return row
+
+    def mxfp8_col(self):
+        """(W1c, W1c_scale, W2c, W2c_scale): one microbatch per step, quantized for the step's one
+        backward and freed after it; otherwise from mxfp8_weights."""
+        if get_num_microbatches() > 1:
+            return self.mxfp8_weights()[4:]
+        w1, w2 = self.weight1.detach(), self.weight2.detach()
+        return (*_quantize_mxfp8(w1, True), *_quantize_mxfp8(w2, True))
 
     def backward_dw(self):
         pass
