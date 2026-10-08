@@ -2715,8 +2715,16 @@ except ImportError:
     te_parallel_cross_entropy = None  # type: ignore[assignment, misc]
 
 try:
+    import inspect as _te_gemm_inspect
+
     from transformer_engine.pytorch.cpp_extensions import general_gemm
     from transformer_engine.pytorch.module.base import get_workspace
+
+    # Some TE versions (e.g. ROCm TE in rocm/primus images) take `workspace` as a required
+    # positional argument; newer ones allocate it internally.
+    _general_gemm_needs_workspace = (
+        'workspace' in _te_gemm_inspect.signature(general_gemm).parameters
+    )
 
     def te_general_gemm(
         A: torch.Tensor,
@@ -2734,9 +2742,11 @@ try:
         Note: not all combinations of these settings are supported. If not supported,
         cublaslt will throw an error.
         """
+        workspace_args = (get_workspace(),) if _general_gemm_needs_workspace else ()
         return general_gemm(
             A,
             B,
+            *workspace_args,
             out_dtype=out_dtype,
             quantization_params=None,
             gelu=None,
