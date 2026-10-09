@@ -28,6 +28,11 @@ from ..utils import is_torch_min_version, log_on_each_pipeline_stage
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accumulation
 
+try:
+    from ..transformer.moe import kosmos_gate
+except ImportError:  # no KOSMOS adapter in this tree
+    kosmos_gate = None
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -188,6 +193,8 @@ class _ParamAndGradBucketGroup:
         self.param_gather_handle = None
         self.param_gather_dispatched = False
         self.grad_reduce_handle = None
+        # KOSMOS gate: grads checked at ready time, scaling + collective deferred (see kosmos_gate).
+        self.grad_sync_deferred = False
 
         # Each time a local shard is created from bucket.param_data or bucket.grad_data, it
         # introduces some CPU overheads. We use these two lists to cache the created local
@@ -379,11 +386,15 @@ class _ParamAndGradBucketGroup:
             self.grad_reduce_handle is None
         ), "Should not have multiple communication calls outstanding at once"
 
-        if self.ddp_config.check_for_nan_in_grad or self.ddp_config.check_for_large_grads:
+        # A deferred sync (KOSMOS gate) already checked the grads at ready time.
+        if (
+            self.ddp_config.check_for_nan_in_grad or self.ddp_config.check_for_large_grads
+        ) and not self.grad_sync_deferred:
             self.check_grads(
                 check_for_nan_or_inf=self.ddp_config.check_for_nan_in_grad,
                 check_for_large=self.ddp_config.check_for_large_grads,
             )
+        self.grad_sync_deferred = False
 
         # gradient_scaling_factor already takes into account whether we are computing
         # an average or sum in the data-parallel collective.
@@ -558,7 +569,27 @@ class _ParamAndGradBucketGroup:
             if not self.is_first_batch:
                 if self.per_param_grad_ready_counts == self.golden_per_param_grad_ready_counts:
                     assert len(self.per_param_grad_ready_counts) == len(self.params)
-                    self.start_grad_sync(force_all_reduce=force_all_reduce)
+                    if kosmos_gate is not None and kosmos_gate.defer_grad_sync():
+                        self._defer_grad_sync(force_all_reduce)
+                    else:
+                        self.start_grad_sync(force_all_reduce=force_all_reduce)
+
+    def _defer_grad_sync(self, force_all_reduce: Optional[bool] = False):
+        """KOSMOS gate: check the grads now (host sync, as start_grad_sync would), and leave
+        the scaling + collective to kosmos_gate, which runs them after the next KOSMOS backward
+        kernel."""
+        if self.ddp_config.check_for_nan_in_grad or self.ddp_config.check_for_large_grads:
+            self.check_grads(
+                check_for_nan_or_inf=self.ddp_config.check_for_nan_in_grad,
+                check_for_large=self.ddp_config.check_for_large_grads,
+            )
+        self.grad_sync_deferred = True
+
+        def release():
+            if self.grad_sync_deferred:  # not started by another path meanwhile
+                self.start_grad_sync(force_all_reduce=force_all_reduce)
+
+        kosmos_gate.defer(release)
 
 
 class _ParamAndGradBuffer:

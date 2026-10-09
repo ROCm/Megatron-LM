@@ -2421,6 +2421,9 @@ def _add_distributed_args(parser):
                        'complete it instead. Also turns on '
                        '--use-cpu-initialization flag. This is for '
                        'external DDP manager.' )
+    group.add_argument('--cuda-memory-fraction', type=float, default=None,
+                       help='Cap the PyTorch caching allocator at this fraction of device memory, '
+                       'leaving the rest to the runtime (kernel scratch, communication libraries).')
     group.add_argument('--use-distributed-optimizer', action='store_true',
                        help='Use distributed optimizer.')
     group.add_argument('--use-nccl-ub', action='store_true', dest='nccl_ub',

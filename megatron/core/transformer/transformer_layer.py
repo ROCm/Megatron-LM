@@ -359,18 +359,34 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         # We can change MLP to accept pg_collection but it makes the logic implicit
         # The conditional below is to make the logic explicit
         # if submodules.mlp is not a ModuleSpec,we dont have to handle passing additional kwargs
-        if isinstance(submodules.mlp, ModuleSpec):
-            if submodules.mlp.module in (MoELayer, GroupedMLP, TEGroupedMLP, SequentialMLP):
+        mlp_spec = submodules.mlp
+        if isinstance(mlp_spec, ModuleSpec) and mlp_spec.module == MoELayer:
+            if self.config.moe_use_kosmos:
+                from megatron.core.transformer.moe.kosmos_moe import kosmos_moe_spec
+
+                mlp_spec = kosmos_moe_spec(mlp_spec)
+            elif self.config.moe_use_megamoe:
+                from megatron.core.transformer.moe.megamoe_moe import megamoe_spec
+
+                mlp_spec = megamoe_spec(mlp_spec)
+            elif self.config.moe_use_torch_experts:
+                from megatron.core.transformer.moe.kosmos_moe import torch_experts_spec
+
+                mlp_spec = torch_experts_spec(mlp_spec)
+        if isinstance(mlp_spec, ModuleSpec):
+            # The KOSMOS / MegaMoE layers subclass MoELayer and take the same kwargs.
+            is_moe_spec = isinstance(mlp_spec.module, type) and issubclass(mlp_spec.module, MoELayer)
+            if is_moe_spec or mlp_spec.module in (GroupedMLP, TEGroupedMLP, SequentialMLP):
                 additional_mlp_kwargs["pg_collection"] = pg_collection
                 # Pass is_mtp_layer flag to MoELayer to distinguish MTP MoE layers.
-                if submodules.mlp.module == MoELayer:
+                if is_moe_spec:
                     additional_mlp_kwargs["is_mtp_layer"] = self.is_mtp_layer
-            elif submodules.mlp.module == MLP:
+            elif mlp_spec.module == MLP:
                 assert hasattr(
                     pg_collection, 'tp'
                 ), 'TP process group is required for MLP in TransformerLayer'
                 additional_mlp_kwargs["tp_group"] = pg_collection.tp
-            elif TEFusedMLP is not None and submodules.mlp.module == TEFusedMLP:
+            elif TEFusedMLP is not None and mlp_spec.module == TEFusedMLP:
                 assert hasattr(
                     pg_collection, 'tp'
                 ), 'TP process group is required for TEFusedMLP in TransformerLayer'
@@ -381,7 +397,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                     logging.WARNING,
                     f"Unknown MLP type: {type(submodules.mlp)}. Using default kwargs.",
                 )
-        self.mlp = build_module(submodules.mlp, config=self.config, **additional_mlp_kwargs)
+        self.mlp = build_module(mlp_spec, config=self.config, **additional_mlp_kwargs)
         if hasattr(self.mlp, 'set_layer_number'):
             self.mlp.set_layer_number(self.layer_number)
 

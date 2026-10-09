@@ -1,7 +1,9 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import atexit
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 
@@ -1156,6 +1158,49 @@ def get_moe_layer_wise_logging_tracker() -> dict:
     """Return the moe layer wise tracker."""
     global _MOE_LAYER_WISE_LOGGING_TRACKER
     return _MOE_LAYER_WISE_LOGGING_TRACKER
+
+
+# MOE_ROUTING_STATS=DIR (benchmarks): each router call's tokens per expert (this rank's tokens)
+# stays on the device and is written at exit to DIR/rank<R>.txt, one line per call: the layer
+# number, then the counts.
+
+
+class _RoutingStats:
+    """MOE_ROUTING_STATS: per-call tokens per expert, written once at exit."""
+
+    def __init__(self, path):
+        self.path = path
+        self.calls = []
+        atexit.register(self.dump)
+
+    def record(self, layer_number, tokens_per_expert):
+        self.calls.append((layer_number, tokens_per_expert.detach().to(torch.int64)))
+
+    def dump(self):
+        if not self.calls:
+            return
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        else:
+            rank = int(os.environ.get("RANK", "0"))
+        rows = [c.cpu().tolist() for _, c in self.calls]
+        os.makedirs(self.path, exist_ok=True)
+        with open(os.path.join(self.path, f"rank{rank}.txt"), "w") as f:
+            for (layer, _), row in zip(self.calls, rows):
+                f.write(f"{layer} {' '.join(map(str, row))}\n")
+
+
+_ROUTING_STATS = (
+    _RoutingStats(os.environ["MOE_ROUTING_STATS"]) if os.environ.get("MOE_ROUTING_STATS") else None
+)
+
+
+def record_routing_stats(layer_number, routing: torch.Tensor):
+    """MOE_ROUTING_STATS: keep this call's tokens per expert (this rank's tokens). routing: the
+    routing map [num_tokens, num_experts] or the tokens per expert [num_experts]. No work when
+    the variable is unset."""
+    if _ROUTING_STATS is not None:
+        _ROUTING_STATS.record(layer_number, routing.sum(dim=0) if routing.dim() == 2 else routing)
 
 
 @internal_api

@@ -184,6 +184,14 @@ MOE_ROUTER_FUSION="${MOE_ROUTER_FUSION:-false}"
 MOE_SHARED_EXPERT_OVERLAP="${MOE_SHARED_EXPERT_OVERLAP:-false}"
 GA_FUSION="${GA_FUSION:-false}"
 CE_FUSION_ARGS="${CE_FUSION_ARGS:-}"
+# MOE_EXPERTS (default: as configured): sequential = SequentialMLP experts (no --moe-grouped-gemm);
+# kosmos / megamoe / torch also pass --moe-use-kosmos / --moe-use-megamoe / --moe-use-torch-experts.
+MOE_EXPERTS=${MOE_EXPERTS:-}
+case "$MOE_EXPERTS" in
+    sequential | kosmos | megamoe | torch) USE_GROUPED_GEMM=false ;;
+esac
+# PRETRAIN_SCRIPT: training entry point (default pretrain_gpt.py).
+PRETRAIN_SCRIPT=${PRETRAIN_SCRIPT:-pretrain_gpt.py}
 echo "PROFILE: $PROFILE"
 echo "PROFILE_START: $PROFILE_START"
 echo "PROFILE_END: $PROFILE_END"
@@ -359,6 +367,12 @@ moe_options=" \
     --kv-channels ${V_HEAD_DIM} \
     ${ROPE_FUSION_OPTS} \
     "
+
+case "$MOE_EXPERTS" in
+    kosmos) moe_options="${moe_options} --moe-use-kosmos" ;;
+    megamoe) moe_options="${moe_options} --moe-use-megamoe" ;;
+    torch) moe_options="${moe_options} --moe-use-torch-experts" ;;
+esac
 
 if [ $ENABLE_DEEP_EP = true ]; then
     moe_options=" \
@@ -672,7 +686,7 @@ fi
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
-run_cmd="torchrun $DISTRIBUTED_ARGS pretrain_gpt.py
+run_cmd="torchrun $DISTRIBUTED_ARGS ${PRETRAIN_SCRIPT}
  ${megatron_options} ${pr_options} ${load_options} ${activation_checkpoint_options} \
  ${do_options} ${sp_options} ${moe_options} ${offload_option} ${comm_overlap_option} ${sft_option} ${vp_options} ${flash_options} ${profile_options} ${LOGGING_ARGS}"
 

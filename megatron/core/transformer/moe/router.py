@@ -14,6 +14,7 @@ from megatron.core.transformer.moe.moe_utils import (
     apply_router_token_dropping,
     compute_routing_scores_for_aux_loss,
     get_tokens_per_expert_and_token_count,
+    record_routing_stats,
     router_gating_linear,
     save_to_aux_losses_tracker,
     sequence_load_balancing_loss_func,
@@ -669,6 +670,7 @@ class TopKRouter(Router):
 
         # Optionally apply expert bias
         self._apply_expert_bias(routing_map, padding_mask=padding_mask)
+        record_routing_stats(self.layer_number, routing_map)
 
         return probs, routing_map
 
