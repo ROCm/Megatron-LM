@@ -1,5 +1,4 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 
 from __future__ import annotations
 
