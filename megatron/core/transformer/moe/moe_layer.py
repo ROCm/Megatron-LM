@@ -1,4 +1,5 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 
 from __future__ import annotations
 
@@ -21,6 +22,7 @@ from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.token_dispatcher import (
     MoEAllGatherTokenDispatcher,
     MoEAlltoAllTokenDispatcher,
+    MoEDeduplicatingAlltoAllTokenDispatcher,
     MoEFlexTokenDispatcher,
     MoETokenDispatcher,
 )
@@ -201,6 +203,14 @@ class MoELayer(BaseMoELayer):
             )
 
         # Initialize token dispatcher
+        if (
+            getattr(config, "moe_token_dedup", False)
+            and config.moe_token_dispatcher_type != "alltoall"
+        ):
+            raise ValueError(
+                "moe_token_dedup only supports the 'alltoall' token dispatcher, "
+                f"got '{config.moe_token_dispatcher_type}'."
+            )
         if config.moe_token_dispatcher_type == "allgather":
             self.token_dispatcher = MoEAllGatherTokenDispatcher(
                 self.num_local_experts,
@@ -209,7 +219,19 @@ class MoELayer(BaseMoELayer):
                 pg_collection=pg_collection,
             )
         elif config.moe_token_dispatcher_type == "alltoall":
-            self.token_dispatcher = MoEAlltoAllTokenDispatcher(
+            # The deduplicating dispatcher sends one hidden row per unique
+            # (token, destination EP rank) instead of one row per (token, expert). It silently
+            # falls back to the stock dispatcher at EP == 1 where there is nothing to dedup.
+            use_dedup_dispatcher = (
+                getattr(config, "moe_token_dedup", False)
+                and utils.get_pg_size(pg_collection.ep) > 1
+            )
+            dispatcher_cls = (
+                MoEDeduplicatingAlltoAllTokenDispatcher
+                if use_dedup_dispatcher
+                else MoEAlltoAllTokenDispatcher
+            )
+            self.token_dispatcher = dispatcher_cls(
                 self.num_local_experts,
                 self.local_expert_indices,
                 config=self.config,

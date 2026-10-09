@@ -1,6 +1,7 @@
 #!/bin/bash
 ###############################################################################
 # Copyright (c) 2024, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 #
 # See LICENSE for license information.
 #################################################################################
@@ -385,6 +386,22 @@ else
         moe_options="${moe_options} --moe-shared-expert-overlap"
     fi
 fi
+
+# MoE communication: MOE_VARIANT=baseline (stock alltoall dispatcher) or dedup
+# (--moe-token-dedup: one wire row per unique (token, destination EP rank); alltoall dispatcher, EP > 1, ETP = 1).
+MOE_VARIANT="${MOE_VARIANT:-baseline}"
+case "$MOE_VARIANT" in
+    baseline)
+        ;;
+    dedup)
+        moe_options="${moe_options} --moe-token-dedup"
+        echo "[INFO] MoE variant dedup: --moe-token-dedup"
+        ;;
+    *)
+        echo "[ERROR] Unknown MOE_VARIANT '${MOE_VARIANT}' (baseline|dedup)"
+        exit 1
+        ;;
+esac
 
 # MXFP8: pad per-expert token counts for FP8 grouped GEMM (requires FP8 + non-allgather dispatcher).
 if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
