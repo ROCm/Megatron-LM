@@ -90,7 +90,7 @@ FP4_BF16_START="${FP4_BF16_START:-2}"    # Number of layers at start in BF16 (pa
 FP4_BF16_END="${FP4_BF16_END:-8}"        # Number of layers at end in BF16 (paper: 8)
 
 # --- Fusion / data-parallel-comm perf toggles (ON by default; ~+3.5-7% across bf16/fp8/fp4). Set 0 to disable. ---
-GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-1}"  # fuse wgrad accumulation into the GEMM
+GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-0}"  # fuse wgrad accumulation into the GEMM
 DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradient averaging into the DP collective
 CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
 CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
@@ -212,7 +212,7 @@ elif [[ $MODEL_SIZE -eq 70 ]]; then
 elif [[ $MODEL_SIZE -eq 405 ]]; then
     HIDDEN_SIZE=16384 # e.g. llama-13b: 5120
     FFN_HIDDEN_SIZE=53248 # e.g. llama-13b: 13824
-    NUM_LAYERS=24 # e.g. llama-13b: 40
+    NUM_LAYERS=28 # e.g. llama-13b: 40
     NUM_HEADS=128 # e.g. llama-13b: 40
     NUM_KV_HEADS=8 # llama3 70B uses GQA
 else

@@ -187,10 +187,10 @@ MOE_SHARED_EXPERT_OVERLAP="${MOE_SHARED_EXPERT_OVERLAP:-false}"
 GA_FUSION="${GA_FUSION:-false}"
 CE_FUSION_ARGS="${CE_FUSION_ARGS:-}"
 # MOE_EXPERTS (default: as configured): sequential = SequentialMLP experts (no --moe-grouped-gemm);
-# kosmos / megamoe / torch also pass --moe-use-kosmos / --moe-use-megamoe / --moe-use-torch-experts.
+# kosmos / megamoe also pass --moe-use-kosmos / --moe-use-megamoe.
 MOE_EXPERTS=${MOE_EXPERTS:-}
 case "$MOE_EXPERTS" in
-    sequential | kosmos | megamoe | torch) USE_GROUPED_GEMM=false ;;
+    sequential | kosmos | megamoe) USE_GROUPED_GEMM=false ;;
 esac
 # PRETRAIN_SCRIPT: training entry point (default pretrain_gpt.py).
 PRETRAIN_SCRIPT=${PRETRAIN_SCRIPT:-pretrain_gpt.py}
@@ -373,7 +373,6 @@ moe_options=" \
 case "$MOE_EXPERTS" in
     kosmos) moe_options="${moe_options} --moe-use-kosmos" ;;
     megamoe) moe_options="${moe_options} --moe-use-megamoe" ;;
-    torch) moe_options="${moe_options} --moe-use-torch-experts" ;;
 esac
 
 if [ $ENABLE_DEEP_EP = true ]; then

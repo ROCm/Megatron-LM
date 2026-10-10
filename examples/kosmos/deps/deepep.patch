@@ -1,0 +1,197 @@
+diff -ruN a/pylib/deep_ep/buffer.py b/pylib/deep_ep/buffer.py
+--- a/pylib/deep_ep/buffer.py
++++ b/pylib/deep_ep/buffer.py
+@@ -16,8 +16,8 @@
+ import torch
+ import torch.distributed as dist
+ 
+-import primus_turbo.pytorch._C.deep_ep as deep_ep_cpp
+-from primus_turbo.pytorch._C.deep_ep import Config, EventHandle
++from . import _C as deep_ep_cpp
++from ._C import Config, EventHandle
+ 
+ from .utils import EventOverlap, check_nvlink_connections
+ 
+diff -ruN a/pylib/deep_ep/__init__.py b/pylib/deep_ep/__init__.py
+--- a/pylib/deep_ep/__init__.py
++++ b/pylib/deep_ep/__init__.py
+@@ -10,7 +10,8 @@
+ 
+ ###############################################################################
+ 
+-from primus_turbo.pytorch._C.deep_ep import Config
++import torch  # [deepep-standalone] load torch before the extension
++from ._C import Config
+ 
+ from .buffer import Buffer
+ from .utils import EventOverlap
+diff -ruN a/pylib/deep_ep/utils.py b/pylib/deep_ep/utils.py
+--- a/pylib/deep_ep/utils.py
++++ b/pylib/deep_ep/utils.py
+@@ -15,7 +15,7 @@
+ import torch
+ import torch.distributed as dist
+ 
+-from primus_turbo.pytorch._C.deep_ep import EventHandle
++from ._C import EventHandle
+ 
+ 
+ class EventOverlap:
+diff -ruN a/src/include/primus_turbo/deep_ep/config.hpp b/src/include/primus_turbo/deep_ep/config.hpp
+--- a/src/include/primus_turbo/deep_ep/config.hpp
++++ b/src/include/primus_turbo/deep_ep/config.hpp
+@@ -105,6 +105,9 @@
+         num_bytes = ((num_bytes + 127) / 128) * 128;
+         return num_bytes;
+ #else
++        // [deepep-standalone] intranode needs no RDMA buffer; same value the rocSHMEM build returns
++        if (num_ranks <= NUM_MAX_NVL_PEERS)
++            return 0;
+         PRIMUS_TURBO_CHECK(false, "rocSHMEM is disabled during compilation, please install "
+                                   "rocSHMEM by following docs/install_dependencies.md");
+ #endif
+diff -ruN a/src/pytorch/bindings_deep_ep.cpp b/src/pytorch/bindings_deep_ep.cpp
+--- a/src/pytorch/bindings_deep_ep.cpp
++++ b/src/pytorch/bindings_deep_ep.cpp
+@@ -0,0 +1,56 @@
++// DeepEP-only pybind module, extracted from Primus-Turbo csrc/pytorch/bindings_pytorch_hip.cpp
++// (HEAD 4b0f01b9, the "DeepEP" block of PYBIND11_MODULE). Changes vs that block:
++//   - module is `deep_ep._C` itself instead of a `deep_ep` submodule of primus_turbo._C
++//   - Runtime / ODC rocSHMEM / torch-op registrations of the full Turbo extension are not included
++#include <torch/extension.h>
++
++#include "deep_ep_hip.hpp"
++
++namespace primus_turbo::pytorch {
++
++PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
++    // ********* DeepEP *********
++    auto deep_ep_module = m;
++    pybind11::class_<primus_turbo::deep_ep::Config>(deep_ep_module, "Config")
++        .def(pybind11::init<int, int, int, int, int>(), py::arg("num_sms") = DEFAULT_NUM_CU,
++             py::arg("num_max_nvl_chunked_send_tokens")  = DEFAULT_NUM_MAX_XGMI_CHUNKED_SEND_TOKENS,
++             py::arg("num_max_nvl_chunked_recv_tokens")  = DEFAULT_NUM_MAX_XGMI_CHUNKED_RECV_TOKENS,
++             py::arg("num_max_rdma_chunked_send_tokens") = DEFAULT_NUM_MAX_RDMA_CHUNKED_SEND_TOKENS,
++             py::arg("num_max_rdma_chunked_recv_tokens") = DEFAULT_NUM_MAX_RDMA_CHUNKED_RECV_TOKENS)
++        .def("get_nvl_buffer_size_hint", &primus_turbo::deep_ep::Config::get_nvl_buffer_size_hint)
++        .def("get_rdma_buffer_size_hint",
++             &primus_turbo::deep_ep::Config::get_rdma_buffer_size_hint);
++
++    deep_ep_module.def("get_low_latency_rdma_size_hint",
++                       &primus_turbo::deep_ep::get_low_latency_rdma_size_hint);
++
++    pybind11::class_<deep_ep::EventHandle>(deep_ep_module, "EventHandle")
++        .def(pybind11::init<>())
++        .def("current_stream_wait", &deep_ep::EventHandle::current_stream_wait);
++
++    pybind11::class_<deep_ep::Buffer>(deep_ep_module, "Buffer")
++        .def(pybind11::init<int, int, int64_t, int64_t, bool, bool>())
++        .def("is_available", &deep_ep::Buffer::is_available)
++        .def("get_num_rdma_ranks", &deep_ep::Buffer::get_num_rdma_ranks)
++        .def("get_rdma_rank", &deep_ep::Buffer::get_rdma_rank)
++        .def("get_root_rdma_rank", &deep_ep::Buffer::get_root_rdma_rank)
++        .def("get_local_device_id", &deep_ep::Buffer::get_local_device_id)
++        .def("get_local_ipc_handle", &deep_ep::Buffer::get_local_ipc_handle)
++        .def("get_local_nvshmem_unique_id", &deep_ep::Buffer::get_local_nvshmem_unique_id)
++        .def("get_local_buffer_tensor", &deep_ep::Buffer::get_local_buffer_tensor)
++        .def("get_comm_stream", &deep_ep::Buffer::get_comm_stream)
++        .def("sync", &deep_ep::Buffer::sync)
++        .def("destroy", &deep_ep::Buffer::destroy)
++        .def("get_dispatch_layout", &deep_ep::Buffer::get_dispatch_layout)
++        .def("intranode_dispatch", &deep_ep::Buffer::intranode_dispatch)
++        .def("intranode_combine", &deep_ep::Buffer::intranode_combine)
++        .def("internode_dispatch", &deep_ep::Buffer::internode_dispatch)
++        .def("internode_combine", &deep_ep::Buffer::internode_combine)
++        .def("clean_low_latency_buffer", &deep_ep::Buffer::clean_low_latency_buffer)
++        .def("low_latency_dispatch", &deep_ep::Buffer::low_latency_dispatch)
++        .def("low_latency_combine", &deep_ep::Buffer::low_latency_combine)
++        .def("get_next_low_latency_combine_buffer",
++             &deep_ep::Buffer::get_next_low_latency_combine_buffer);
++}
++
++} // namespace primus_turbo::pytorch
+diff -ruN a/src/pytorch/deep_ep_hip.cpp b/src/pytorch/deep_ep_hip.cpp
+--- a/src/pytorch/deep_ep_hip.cpp
++++ b/src/pytorch/deep_ep_hip.cpp
+@@ -180,8 +180,8 @@
+     return comm_stream;
+ }
+ 
+-c10::hip::HIPStreamMasqueradingAsCUDA
+-Buffer::maybe_fork_stream(const c10::hip::HIPStreamMasqueradingAsCUDA      &compute_stream,
++c10::cuda::CUDAStream
++Buffer::maybe_fork_stream(const c10::cuda::CUDAStream      &compute_stream,
+                           const std::optional<EventHandle> &previous_event) const {
+     // Synchronous path: run everything on the caller's stream.  Safe for
+     // ``torch.cuda.graph`` capture because no cross-stream dependency or
+@@ -201,7 +201,7 @@
+     return comm_stream;
+ }
+ 
+-void Buffer::maybe_join_stream(const c10::hip::HIPStreamMasqueradingAsCUDA &compute_stream) const {
++void Buffer::maybe_join_stream(const c10::cuda::CUDAStream &compute_stream) const {
+     if (force_current_stream) {
+         return;
+     }
+diff -ruN a/src/pytorch/deep_ep_hip.hpp b/src/pytorch/deep_ep_hip.hpp
+--- a/src/pytorch/deep_ep_hip.hpp
++++ b/src/pytorch/deep_ep_hip.hpp
+@@ -47,7 +47,7 @@
+     hipIpcMemHandle_t ipc_handles[NUM_MAX_NVL_PEERS];
+ 
+     // Stream for communication
+-    c10::hip::HIPStreamMasqueradingAsCUDA comm_stream;
++    c10::cuda::CUDAStream comm_stream;
+ 
+     // After IPC/NVSHMEM synchronization, this flag will be true
+     bool available = false;
+@@ -85,13 +85,13 @@
+     // caller's current stream when ``force_current_stream`` is set; otherwise
+     // makes ``comm_stream`` wait on ``previous_event`` (or ``compute_stream``)
+     // and returns ``comm_stream``.
+-    c10::hip::HIPStreamMasqueradingAsCUDA maybe_fork_stream(const c10::hip::HIPStreamMasqueradingAsCUDA      &compute_stream,
++    c10::cuda::CUDAStream maybe_fork_stream(const c10::cuda::CUDAStream      &compute_stream,
+                                             const std::optional<EventHandle> &previous_event) const;
+ 
+     // Counterpart of ``maybe_fork_stream`` used in the synchronous path.  When
+     // ``force_current_stream`` is set this is a no-op; otherwise it makes
+     // ``compute_stream`` wait on ``comm_stream``.
+-    void maybe_join_stream(const c10::hip::HIPStreamMasqueradingAsCUDA &compute_stream) const;
++    void maybe_join_stream(const c10::cuda::CUDAStream &compute_stream) const;
+ 
+ public:
+     Buffer(int rank, int num_ranks, int64_t num_nvl_bytes, int64_t num_rdma_bytes,
+diff -ruN a/src/pytorch/event_hip.hpp b/src/pytorch/event_hip.hpp
+--- a/src/pytorch/event_hip.hpp
++++ b/src/pytorch/event_hip.hpp
+@@ -23,7 +23,7 @@
+         event->record(at::hip::getCurrentHIPStreamMasqueradingAsCUDA());
+     }
+ 
+-    explicit EventHandle(const c10::hip::HIPStreamMasqueradingAsCUDA &stream) {
++    explicit EventHandle(const c10::cuda::CUDAStream &stream) {
+         event = std::make_shared<torch::Event>(torch::kCUDA);
+         event->record(stream);
+     }
+@@ -33,18 +33,18 @@
+     void current_stream_wait() const { at::hip::getCurrentHIPStreamMasqueradingAsCUDA().unwrap().wait(*event); }
+ };
+ 
+-inline torch::Event create_event(const c10::hip::HIPStreamMasqueradingAsCUDA &s) {
++inline torch::Event create_event(const c10::cuda::CUDAStream &s) {
+     auto event = torch::Event(torch::kCUDA);
+     event.record(s);
+     return event;
+ }
+ 
+-inline void stream_wait(const c10::hip::HIPStreamMasqueradingAsCUDA &s_0, const c10::hip::HIPStreamMasqueradingAsCUDA &s_1) {
++inline void stream_wait(const c10::cuda::CUDAStream &s_0, const c10::cuda::CUDAStream &s_1) {
+     PRIMUS_TURBO_CHECK(s_0.id() != s_1.id());
+     s_0.unwrap().wait(create_event(s_1));
+ }
+ 
+-inline void stream_wait(const c10::hip::HIPStreamMasqueradingAsCUDA &s, const EventHandle &event) {
++inline void stream_wait(const c10::cuda::CUDAStream &s, const EventHandle &event) {
+     s.unwrap().wait(*event.event);
+ }
+ 

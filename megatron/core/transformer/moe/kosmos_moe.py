@@ -49,9 +49,6 @@ Environment:
                             0: in Megatron
   KOSMOS_MXFP8              1 (default): MXFP8 experts on the FP8 layers of an mxfp8-recipe run;
                             0: bf16 experts
-
-This file also holds the PyTorch+RCCL baseline (--moe-use-torch-experts): SequentialMLP experts
-on Megatron's local (torch matmul) linears.
 """
 
 import atexit
@@ -871,9 +868,9 @@ def _builder_parts(builder):
     return builder.func, submodules, kwargs
 
 
-def replace_moe_experts(moe_spec, layer_cls, experts_cls, flag, experts_submodules=None):
+def replace_moe_experts(moe_spec, layer_cls, experts_cls, flag):
     """MoELayer builder whose experts are SequentialMLP -> layer_cls builder with experts_cls
-    experts (built from experts_submodules, default the SequentialMLP's MLPSubmodules)."""
+    experts (built from the SequentialMLP's MLPSubmodules)."""
     _, sub, kwargs = _builder_parts(moe_spec)
     e_cls, e_sub, e_kwargs = _builder_parts(sub.experts)
     assert (
@@ -881,7 +878,7 @@ def replace_moe_experts(moe_spec, layer_cls, experts_cls, flag, experts_submodul
     ), f"{flag} needs the SequentialMLP expert spec (do not pass --moe-grouped-gemm)"
     experts = partial(
         experts_cls,
-        submodules=e_sub if experts_submodules is None else experts_submodules,
+        submodules=e_sub,
         **e_kwargs,
     )
     return partial(layer_cls, submodules=dataclasses.replace(sub, experts=experts), **kwargs)
@@ -890,29 +887,3 @@ def replace_moe_experts(moe_spec, layer_cls, experts_cls, flag, experts_submodul
 def kosmos_moe_spec(moe_spec):
     """Turn an MoELayer spec whose experts are SequentialMLP into the KOSMOS layer spec."""
     return replace_moe_experts(moe_spec, KosmosMoELayer, KosmosExperts, "--moe-use-kosmos")
-
-
-class TorchSwiGLU(torch.nn.Module):
-    """silu(gate) * up on [.., 2I] with contiguous halves [gate; up] (torch ops; used when
-    --use-te-activation-func is set, so the torch-experts baseline stays TE-free)."""
-
-    def __init__(self, config=None):
-        super().__init__()
-
-    def forward(self, x):
-        g, u = torch.chunk(x, 2, dim=-1)
-        return torch.nn.functional.silu(g) * u
-
-
-def torch_experts_spec(moe_spec):
-    """PyTorch+RCCL baseline: SequentialMLP experts on Megatron's local (torch matmul) linears."""
-    from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
-    from megatron.core.transformer.mlp import MLPSubmodules
-
-    layer_cls = _builder_parts(moe_spec)[0]
-    local = MLPSubmodules(
-        linear_fc1=ColumnParallelLinear, linear_fc2=RowParallelLinear, activation_func=TorchSwiGLU
-    )
-    return replace_moe_experts(
-        moe_spec, layer_cls, SequentialMLP, "--moe-use-torch-experts", experts_submodules=local
-    )

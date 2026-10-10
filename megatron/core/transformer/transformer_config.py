@@ -783,9 +783,6 @@ class TransformerConfig(ModelParallelConfig):
     """Run the routed part of every MoE layer (dispatch, experts, combine) with Primus-Turbo's
     fused MegaMoE op (megatron/core/transformer/moe/megamoe_moe.py)."""
 
-    moe_use_torch_experts: bool = False
-    """PyTorch+RCCL baseline: routed experts as SequentialMLP on Megatron's local (torch matmul)
-    linears instead of TE linears."""
 
     moe_aux_loss_coeff: Union[float, List[float]] = 0.0
     """Scaling coefficient for the aux loss. A starting value of 1e-2 is recommended.

@@ -422,10 +422,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 from megatron.core.transformer.moe.megamoe_moe import megamoe_spec
 
                 mlp_builder = megamoe_spec(mlp_builder)
-            elif self.config.moe_use_torch_experts:
-                from megatron.core.transformer.moe.kosmos_moe import torch_experts_spec
-
-                mlp_builder = torch_experts_spec(mlp_builder)
         if isinstance(mlp_builder, ModuleSpec) and mlp_builder.module in (MLP, TEFusedMLP):
             mlp_builder = functools.partial(
                 mlp_builder.module.as_mlp_submodule,

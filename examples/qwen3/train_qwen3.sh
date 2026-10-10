@@ -345,10 +345,10 @@ case $MODEL_SIZE in
 esac
 
 # MOE_EXPERTS (default: as configured): sequential = SequentialMLP experts (no --moe-grouped-gemm);
-# kosmos / megamoe / torch also pass --moe-use-kosmos / --moe-use-megamoe / --moe-use-torch-experts.
+# kosmos / megamoe also pass --moe-use-kosmos / --moe-use-megamoe.
 MOE_EXPERTS=${MOE_EXPERTS:-}
 case "$MOE_EXPERTS" in
-    sequential | kosmos | megamoe | torch) USE_GROUPED_GEMM=false ;;
+    sequential | kosmos | megamoe) USE_GROUPED_GEMM=false ;;
 esac
 # PRETRAIN_SCRIPT: training entry point (default pretrain_gpt.py).
 PRETRAIN_SCRIPT=${PRETRAIN_SCRIPT:-${MEGATRON_PATH}/pretrain_gpt.py}
@@ -444,7 +444,6 @@ if [ "$IS_MOE" -eq 1 ]; then
     case "$MOE_EXPERTS" in
         kosmos) moe_options="${moe_options} --moe-use-kosmos" ;;
         megamoe) moe_options="${moe_options} --moe-use-megamoe" ;;
-        torch) moe_options="${moe_options} --moe-use-torch-experts" ;;
     esac
 
     if [ "$ENABLE_DEEP_EP" = true ]; then
