@@ -34,6 +34,54 @@ MAX_ATTEMPTS=${MAX_ATTEMPTS:-3}
 export TORCH_NCCL_TIMEOUT=${TORCH_NCCL_TIMEOUT:-180}
 export TORCH_NCCL_DUMP_ON_TIMEOUT=${TORCH_NCCL_DUMP_ON_TIMEOUT:-0}
 
+# Host/GPU snapshot for CI triage (clocks, idle power, leftover processes).
+# A wedged KFD node shows SCLK=N/A and inflated idle socket power; dump this
+# before every torchrun so a hang can be correlated with node state, not guessed.
+dump_node_health() {
+    local label="$1"
+    local _xtrace_on=0
+    case "$-" in *x*) _xtrace_on=1; set +x ;; esac
+
+    echo "========== NODE HEALTH: ${label} =========="
+    echo "ts=$(date -Is 2>/dev/null || date)"
+    echo "hostname=$(hostname -f 2>/dev/null || hostname 2>/dev/null || echo unknown)"
+    echo "uname=$(uname -a 2>/dev/null || echo unknown)"
+    echo "HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-unset}"
+    echo "GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-unset}"
+    echo "HIP_ARCHITECTURES=${HIP_ARCHITECTURES:-unset}"
+    echo "NUM_GPUS=${NUM_GPUS:-unset}"
+
+    if command -v rocm-smi >/dev/null 2>&1; then
+        echo "----- rocm-smi -----"
+        rocm-smi || true
+        echo "----- rocm-smi --showclocks -----"
+        rocm-smi --showclocks || true
+        echo "----- rocm-smi --showmeminfo vram -----"
+        rocm-smi --showmeminfo vram || true
+        echo "----- rocm-smi --showpids -----"
+        rocm-smi --showpids || true
+    else
+        echo "rocm-smi not found"
+    fi
+
+    echo "----- leftover python/torchrun -----"
+    pgrep -a -f 'torchrun|pytest' 2>/dev/null || echo "(none)"
+
+    echo "----- recent amdgpu/kfd dmesg (tail) -----"
+    local dmesg_lines
+    dmesg_lines=$(dmesg -T 2>/dev/null | grep -iE 'amdgpu|kfd|gpu hang|reset' | tail -n 40 || true)
+    if [[ -n "${dmesg_lines}" ]]; then
+        echo "${dmesg_lines}"
+    else
+        echo "(dmesg unavailable or no matching lines)"
+    fi
+    echo "========== END NODE HEALTH: ${label} =========="
+
+    if ((_xtrace_on)); then set -x; fi
+}
+
+dump_node_health "job-start"
+
 # Find all test files recursively
 TEST_FILES=$(find tests/unit_tests -type f -name "test_*.py")
 
@@ -67,6 +115,8 @@ for file in $TEST_FILES; do
             pkill -9 -f "pytest.*$(basename "$file")" 2>/dev/null || true
             sleep 5
         fi
+
+        dump_node_health "$file attempt ${attempt}/${MAX_ATTEMPTS}"
 
         timeout --kill-after="$KILL_AFTER" "$file_timeout" \
             torchrun --standalone --nproc_per_node=$NUM_GPUS -m pytest \

@@ -56,7 +56,14 @@ class TestDelayWgradCompute:
         )
 
     def teardown_method(self, method):
-        Utils.destroy_model_parallel()
+        # MORI shmem cannot be finalized and reinitialized in the same process.
+        # Drop the per-case op here; session-scoped conftest finalizes shmem once.
+        try:
+            from megatron.core.transformer.moe.fused_a2a import reset_mori_op
+
+            reset_mori_op()
+        finally:
+            Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not is_te_min_version("2.3.0"), reason="Requires TE >= 2.3.0")
     @pytest.mark.parametrize("shared_expert_intermediate_size", [None, 512])
