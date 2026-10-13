@@ -18,6 +18,46 @@ except ImportError:
 _PAYLOAD_ALIGNMENT_BYTES = 16
 
 
+_PRIMUS_GROUPED_GEMM = None
+_PRIMUS_CHECKED = False
+
+
+PRIMUS_GROUPED_GEMM_BACKEND_ENV = "PRIMUS_TURBO_GROUPED_GEMM_BACKEND"
+PRIMUS_GROUPED_GEMM_DEFAULT_BACKEND = "TRITON"
+
+
+def primus_grouped_gemm():
+    """Primus-Turbo's grouped GEMM (``primus_turbo.pytorch.ops.grouped_gemm``) or None.
+
+    Imported lazily on first use so runs without token dedup never load the package. When the
+    package is missing the dedup expert batch falls back to the legacy grouped_gemm backend and
+    a warning is printed once.
+
+    Primus-Turbo's own default backend (CK) converts its accumulator to bf16 with round-toward-zero,
+    which shrinks every expert output by ~0.28% per GEMM and shows up as a systematic loss /
+    grad-norm offset against the stock dispatcher. The TRITON backend accumulates in fp32, rounds
+    to nearest like grouped_gemm, and is faster than CK on MI300X, so it is selected here unless
+    PRIMUS_TURBO_GROUPED_GEMM_BACKEND is already set in the environment.
+    """
+    global _PRIMUS_GROUPED_GEMM, _PRIMUS_CHECKED
+    if not _PRIMUS_CHECKED:
+        _PRIMUS_CHECKED = True
+        try:
+            os.environ.setdefault(PRIMUS_GROUPED_GEMM_BACKEND_ENV, PRIMUS_GROUPED_GEMM_DEFAULT_BACKEND)
+            from primus_turbo.pytorch.ops import grouped_gemm
+
+            _PRIMUS_GROUPED_GEMM = grouped_gemm
+        except ImportError:
+            import warnings
+
+            warnings.warn(
+                "primus_turbo is not importable: --moe-token-dedup runs the expert grouped GEMMs "
+                "on the legacy grouped_gemm backend (pass --no-moe-token-dedup-primus-gemm to "
+                "silence this)."
+            )
+    return _PRIMUS_GROUPED_GEMM
+
+
 def dedup_payload_width(hidden_size: int, topk: int, element_size: int) -> int:
     """Return the activation-plus-route-metadata width with RCCL-safe alignment."""
     # Each route slot carries one exactly-representable local expert ID and one

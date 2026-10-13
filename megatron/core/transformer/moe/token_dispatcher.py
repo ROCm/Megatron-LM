@@ -40,6 +40,7 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.moe.token_dedup import (
+    primus_grouped_gemm,
     build_wire_recv_index,
     build_wire_send_index,
     dedup_payload_width,
@@ -1353,6 +1354,16 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         )
         tokens_per_expert = self.tokens_per_expert
         self.tokens_per_expert = None
+        if (
+            self.config.moe_token_dedup_primus_gemm
+            and self.config.moe_use_legacy_grouped_gemm
+            and primus_grouped_gemm() is not None
+        ):
+            # Primus-Turbo's grouped GEMM takes the group sizes on the device (int64) and
+            # keeps them for its backward, so hand over the counts tensor itself.
+            tokens_per_expert_gpu = self.tokens_per_expert_gpu
+            self.tokens_per_expert_gpu = None
+            return expanded, (tokens_per_expert, tokens_per_expert_gpu), permuted_probs
         if os.environ.get("NVTE_USE_GROUPED_GEMM_TRITON") == "1":
             tokens_per_expert_gpu = self.tokens_per_expert_gpu.to(torch.int32)
             self.tokens_per_expert_gpu = None

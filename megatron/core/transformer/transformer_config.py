@@ -749,6 +749,15 @@ class TransformerConfig(ModelParallelConfig):
     direction is deduplicated symmetrically. The default dispatcher is unchanged when this
     option is disabled."""
 
+    moe_token_dedup_primus_gemm: bool = True
+    """With moe_token_dedup and the legacy GroupedMLP experts, run the expert grouped GEMMs on
+    Primus-Turbo's grouped GEMM (AMD; needs the primus_turbo package, which ships in the
+    rocm/primus containers), TRITON backend unless PRIMUS_TURBO_GROUPED_GEMM_BACKEND is set
+    (Primus's CK default truncates to bf16 and biases the expert outputs). The expert counts stay
+    on the GPU, so no host sync is needed. Falls back to the grouped_gemm backend when
+    primus_turbo is missing. Disable with --no-moe-token-dedup-primus-gemm. No effect without
+    moe_token_dedup."""
+
     moe_deepep_num_sms: int = 20
     """Number of SMs to use for DeepEP."""
 

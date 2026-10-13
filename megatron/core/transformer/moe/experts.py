@@ -36,6 +36,7 @@ from megatron.core.tensor_parallel.utils import divide
 from megatron.core.transformer.mlp import MLP, MLPSubmodules, apply_swiglu_sharded_factory
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import grouped_gemm_util as gg
+from megatron.core.transformer.moe.token_dedup import primus_grouped_gemm
 from megatron.core.transformer.moe.moe_utils import (
     ProcessGroupCollection,
     get_align_size_for_quantization,
@@ -60,7 +61,6 @@ except ImportError:
     HAVE_TE = False
 
 logger = logging.getLogger(__name__)
-
 
 class GroupedMLP(MegatronModule):
     """An efficient implementation of the Experts layer using GroupedGEMM.
@@ -223,6 +223,11 @@ class GroupedMLP(MegatronModule):
     ):
         """Forward step of the GroupedMLP."""
         assert self.config.bf16, "Currently GroupedMLP for MoE only supports bf16."
+        # The token-dedup dispatcher hands over (host counts, device counts) when the expert
+        # batch runs on Primus-Turbo's grouped GEMM; every other dispatcher passes host counts only.
+        tokens_per_expert_gpu = None
+        if isinstance(tokens_per_expert, tuple):
+            tokens_per_expert, tokens_per_expert_gpu = tokens_per_expert
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
 
@@ -243,20 +248,24 @@ class GroupedMLP(MegatronModule):
             w1 = self.weight1.view(self.num_local_experts, self.config.hidden_size, -1)
             w2 = self.weight2.view(self.num_local_experts, -1, self.config.hidden_size)
 
-            fc1_output = gg.ops.gmm(
-                permuted_local_hidden_states, w1, tokens_per_expert, trans_b=False
+            fc1_output = self._grouped_gemm(
+                permuted_local_hidden_states, w1, tokens_per_expert, tokens_per_expert_gpu
             )
             if self.activation_recompute:
                 intermediate_parallel = self.activation_checkpoint.checkpoint(
                     self.activation_func_with_probs, fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = gg.ops.gmm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                fc2_output = self._grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, tokens_per_expert_gpu
+                )
                 self.activation_checkpoint.discard_output_and_register_recompute(fc2_output)
             else:
                 intermediate_parallel = self.activation_func_with_probs(
                     fc1_output, permuted_probs.unsqueeze(-1)
                 )
-                fc2_output = gg.ops.gmm(intermediate_parallel, w2, tokens_per_expert, trans_b=False)
+                fc2_output = self._grouped_gemm(
+                    intermediate_parallel, w2, tokens_per_expert, tokens_per_expert_gpu
+                )
         else:
             # No token is allocated for local experts.
             assert torch.count_nonzero(tokens_per_expert) == 0
@@ -276,6 +285,18 @@ class GroupedMLP(MegatronModule):
                 fc2_output = torch.matmul(h, w2)
 
         return fc2_output, None
+
+    def _grouped_gemm(
+        self,
+        activations: torch.Tensor,
+        weights: torch.Tensor,
+        tokens_per_expert_cpu: torch.Tensor,
+        tokens_per_expert_gpu: Optional[torch.Tensor],
+    ) -> torch.Tensor:
+        """Expert grouped GEMM: Primus-Turbo when the dedup dispatcher supplied device-side counts."""
+        if tokens_per_expert_gpu is not None and self.config.moe_token_dedup_primus_gemm:
+            return primus_grouped_gemm()(activations, weights, tokens_per_expert_gpu, trans_b=False)
+        return gg.ops.gmm(activations, weights, tokens_per_expert_cpu, trans_b=False)
 
     def sharded_state_dict(self, prefix='', sharded_offsets=(), metadata=None):
         """
