@@ -386,8 +386,10 @@ else
     fi
 fi
 
-# MoE communication: MOE_VARIANT=baseline (stock alltoall dispatcher) or dedup
-# (--moe-token-dedup: one wire row per unique (token, destination EP rank); alltoall dispatcher, EP > 1, ETP = 1).
+# MoE communication: MOE_VARIANT=baseline (stock alltoall dispatcher), dedup
+# (--moe-token-dedup: one wire row per unique (token, destination EP rank); alltoall dispatcher, EP > 1, ETP = 1;
+# the expert batch runs on Primus-Turbo's grouped GEMM when primus_turbo is present) or dedup_legacy
+# (dedup with --no-moe-token-dedup-primus-gemm: legacy grouped_gemm backend).
 MOE_VARIANT="${MOE_VARIANT:-baseline}"
 case "$MOE_VARIANT" in
     baseline)
@@ -396,8 +398,12 @@ case "$MOE_VARIANT" in
         moe_options="${moe_options} --moe-token-dedup"
         echo "[INFO] MoE variant dedup: --moe-token-dedup"
         ;;
+    dedup_legacy)
+        moe_options="${moe_options} --moe-token-dedup --no-moe-token-dedup-primus-gemm"
+        echo "[INFO] MoE variant dedup_legacy: --moe-token-dedup --no-moe-token-dedup-primus-gemm"
+        ;;
     *)
-        echo "[ERROR] Unknown MOE_VARIANT '${MOE_VARIANT}' (baseline|dedup)"
+        echo "[ERROR] Unknown MOE_VARIANT '${MOE_VARIANT}' (baseline|dedup|dedup_legacy)"
         exit 1
         ;;
 esac
