@@ -961,7 +961,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
     row only once when several selected experts are on the same EP rank. A small
     expert-id record accompanies each wire row and the receiver expands directly
     into expert-major order. The combine direction is deduplicated too: local
-    expert outputs for the same wire row are probability-weighted and collapsed
+    expert outputs for the same wire row (weighted inside the experts) are summed
     to one row before the combine all-to-all.
 
     The default dispatcher does not call this class, so enabling this
