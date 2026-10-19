@@ -231,113 +231,6 @@ if triton is not None:
         )
 
     @triton.jit
-    def _weighted_reduce_token_dedup_kernel(
-        expert_output_ptr,
-        wire_to_expert_rows_ptr,
-        wire_prob_ptr,
-        output_ptr,
-        wire_prob_stride,
-        hidden_size: tl.constexpr,
-        topk: tl.constexpr,
-        block_size: tl.constexpr,
-    ):
-        wire_row = tl.program_id(0)
-        block = tl.program_id(1)
-        columns = block * block_size + tl.arange(0, block_size)
-        hidden_mask = columns < hidden_size
-        accumulator = tl.zeros((block_size,), dtype=tl.float32)
-
-        for slot in tl.static_range(0, topk):
-            expert_row = tl.load(
-                wire_to_expert_rows_ptr + wire_row * topk + slot
-            )
-            valid = expert_row >= 0
-            safe_expert_row = tl.where(valid, expert_row, 0)
-            expert_value = tl.load(
-                expert_output_ptr + safe_expert_row * hidden_size + columns,
-                mask=hidden_mask & valid,
-                other=0.0,
-            )
-            probability = tl.load(
-                wire_prob_ptr + wire_row * wire_prob_stride + slot,
-                mask=valid,
-                other=0.0,
-            )
-            # Match the existing eager BF16 expression: round each weighted
-            # product to the activation dtype before the top-k reduction.
-            product = (expert_value * probability).to(
-                output_ptr.dtype.element_ty
-            )
-            accumulator += product.to(tl.float32)
-
-        tl.store(
-            output_ptr + wire_row * hidden_size + columns,
-            accumulator,
-            mask=hidden_mask,
-        )
-
-    @triton.jit
-    def _weighted_reduce_token_dedup_backward_kernel(
-        grad_output_ptr,
-        expert_output_ptr,
-        wire_to_expert_rows_ptr,
-        wire_prob_ptr,
-        grad_expert_ptr,
-        grad_prob_ptr,
-        wire_prob_stride,
-        hidden_size: tl.constexpr,
-        topk: tl.constexpr,
-        block_size: tl.constexpr,
-    ):
-        assignment = tl.program_id(0)
-        wire_row = assignment // topk
-        slot = assignment % topk
-        expert_row = tl.load(wire_to_expert_rows_ptr + assignment)
-        valid = expert_row >= 0
-        safe_expert_row = tl.where(valid, expert_row, 0)
-        probability = tl.load(
-            wire_prob_ptr + wire_row * wire_prob_stride + slot,
-            mask=valid,
-            other=0.0,
-        )
-        accumulator = tl.zeros((block_size,), dtype=tl.float32)
-        columns = tl.arange(0, block_size)
-
-        for block in tl.static_range(
-            0, (hidden_size + block_size - 1) // block_size
-        ):
-            offsets = block * block_size + columns
-            hidden_mask = offsets < hidden_size
-            grad_output = tl.load(
-                grad_output_ptr + wire_row * hidden_size + offsets,
-                mask=hidden_mask & valid,
-                other=0.0,
-            )
-            expert_value = tl.load(
-                expert_output_ptr + safe_expert_row * hidden_size + offsets,
-                mask=hidden_mask & valid,
-                other=0.0,
-            )
-            grad_expert = (grad_output * probability).to(
-                grad_expert_ptr.dtype.element_ty
-            )
-            tl.store(
-                grad_expert_ptr + safe_expert_row * hidden_size + offsets,
-                grad_expert,
-                mask=hidden_mask & valid,
-            )
-            prob_product = (grad_output * expert_value).to(
-                grad_prob_ptr.dtype.element_ty
-            )
-            accumulator += prob_product.to(tl.float32)
-
-        tl.store(
-            grad_prob_ptr + assignment,
-            tl.sum(accumulator, axis=0),
-            mask=valid,
-        )
-
-    @triton.jit
     def _build_wire_send_index_kernel(
         routing_map_ptr,  # uint8 [T, E], slot-space routing bits
         order_ptr,  # int64 [T, EP], inclusive per-destination token prefix of hits
@@ -678,87 +571,23 @@ class _PermuteTokenDedup(torch.autograd.Function):
         return grad_expert_output, None, None
 
 
-class _WeightedReduceTokenDedup(torch.autograd.Function):
-    """Weight expert outputs and reduce them to one row per destination."""
+class _ReduceTokenDedup(torch.autograd.Function):
+    """Sum each wire row's expert rows; the adjoint of ``_ExpandTokenDedup``."""
 
     @staticmethod
-    def forward(
-        ctx,
-        expert_output: torch.Tensor,
-        wire_to_expert_rows: torch.Tensor,
-        wire_probs: torch.Tensor,
-    ) -> torch.Tensor:
-        num_wire_rows, topk = wire_to_expert_rows.shape
-        hidden_size = expert_output.shape[1]
-        ctx.save_for_backward(expert_output, wire_to_expert_rows, wire_probs)
+    def forward(ctx, expert_output, expert_wire_rows, wire_to_expert_rows):
+        ctx.save_for_backward(expert_wire_rows)
+        num_wire_rows, hidden_size = wire_to_expert_rows.shape[0], expert_output.shape[1]
         if num_wire_rows == 0:
             return expert_output.new_empty((0, hidden_size))
-
-        if triton is None or not expert_output.is_cuda:
-            safe_rows = wire_to_expert_rows.clamp_min(0)
-            gathered = expert_output.index_select(0, safe_rows.reshape(-1)).view(
-                num_wire_rows, topk, hidden_size
-            )
-            weighted = gathered * wire_probs.unsqueeze(-1)
-            weighted = weighted.masked_fill(
-                (wire_to_expert_rows < 0).unsqueeze(-1), 0
-            )
-            return weighted.sum(dim=1)
-
-        output = expert_output.new_empty((num_wire_rows, hidden_size))
-        block_size = 1024
-        grid = (num_wire_rows, triton.cdiv(hidden_size, block_size))
-        _weighted_reduce_token_dedup_kernel[grid](
-            expert_output,
-            wire_to_expert_rows,
-            wire_probs,
-            output,
-            wire_probs.stride(0),
-            hidden_size=hidden_size,
-            topk=topk,
-            block_size=block_size,
+        return _expanded_token_dedup_grad(
+            expert_output, wire_to_expert_rows, num_wire_rows, hidden_size, expert_wire_rows
         )
-        return output
 
     @staticmethod
-    def backward(ctx, grad_output: torch.Tensor):
-        expert_output, wire_to_expert_rows, wire_probs = ctx.saved_tensors
-        num_wire_rows, topk = wire_to_expert_rows.shape
-        if triton is None or not grad_output.is_cuda:
-            safe_rows = wire_to_expert_rows.clamp_min(0)
-            valid = wire_to_expert_rows >= 0
-            gathered = expert_output.index_select(0, safe_rows.reshape(-1)).view(
-                num_wire_rows, topk, expert_output.shape[1]
-            )
-            grad_expanded = grad_output.unsqueeze(1) * wire_probs.unsqueeze(-1)
-            grad_expert = torch.zeros_like(expert_output)
-            grad_expert.index_add_(
-                0,
-                safe_rows[valid],
-                grad_expanded[valid],
-            )
-            grad_prob = (grad_output.unsqueeze(1) * gathered).sum(dim=-1)
-            grad_prob.masked_fill_(~valid, 0)
-            return grad_expert, None, grad_prob
-
-        grad_expert = torch.empty_like(expert_output)
-        grad_prob = torch.zeros_like(wire_probs)
-        block_size = 1024
-        grid = (num_wire_rows * topk,)
-        _weighted_reduce_token_dedup_backward_kernel[grid](
-            grad_output,
-            expert_output,
-            wire_to_expert_rows,
-            wire_probs,
-            grad_expert,
-            grad_prob,
-            wire_probs.stride(0),
-            hidden_size=expert_output.shape[1],
-            topk=topk,
-            block_size=block_size,
-            num_warps=8,
-        )
-        return grad_expert, None, grad_prob
+    def backward(ctx, grad_output):
+        (expert_wire_rows,) = ctx.saved_tensors
+        return grad_output.index_select(0, expert_wire_rows), None, None
 
 
 class _RestoreTokenDedup(torch.autograd.Function):
@@ -840,15 +669,13 @@ def permute_token_dedup_expert_output(
     )
 
 
-def weighted_reduce_token_dedup_expert_output(
+def reduce_token_dedup_expert_output(
     expert_output: torch.Tensor,
+    expert_wire_rows: torch.Tensor,
     wire_to_expert_rows: torch.Tensor,
-    wire_probs: torch.Tensor,
 ) -> torch.Tensor:
-    """Return one probability-weighted expert-output row per wire row."""
-    return _WeightedReduceTokenDedup.apply(
-        expert_output, wire_to_expert_rows, wire_probs
-    )
+    """Return one summed expert-output row per wire row."""
+    return _ReduceTokenDedup.apply(expert_output, expert_wire_rows, wire_to_expert_rows)
 
 
 def restore_token_dedup_output(

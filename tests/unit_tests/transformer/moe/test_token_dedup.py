@@ -13,8 +13,8 @@ from megatron.core.transformer.moe.token_dedup import (
     expand_token_dedup_received,
     pack_token_dedup_payload,
     permute_token_dedup_expert_output,
+    reduce_token_dedup_expert_output,
     restore_token_dedup_output,
-    weighted_reduce_token_dedup_expert_output,
 )
 
 
@@ -151,60 +151,22 @@ def test_received_expansion_and_wire_permutation_preserve_gradients():
     )
 
 
-def test_weighted_reduce_and_restore_match_post_combine_weighting():
-    expert_output = torch.tensor(
-        [
-            [1.0, 2.0],
-            [3.0, 4.0],
-            [5.0, 6.0],
-            [7.0, 8.0],
-        ],
-        requires_grad=True,
-    )
-    # Wire 0 contains two experts for token 0. Wires 1 and 2 contain the two
-    # experts for token 1 on different destinations.
+def test_reduce_and_restore_sum_expert_rows():
+    expert_output = torch.arange(8, dtype=torch.float32).view(4, 2).requires_grad_()
+    # Wire 0 holds two experts of token 0; wires 1 and 2 hold token 1's experts.
     wire_to_expert_rows = torch.tensor([[0, 1], [2, -1], [-1, 3]])
-    wire_probs = torch.tensor(
-        [[0.25, 0.75], [0.4, 0.0], [0.0, 0.6]], requires_grad=True
-    )
+    expert_wire_rows = torch.tensor([0, 0, 1, 2])
     token_wire_rows = torch.tensor([[0, -1], [1, 2]])
     wire_tokens = torch.tensor([0, 1, 1])
 
-    partials = weighted_reduce_token_dedup_expert_output(
-        expert_output, wire_to_expert_rows, wire_probs
+    partials = reduce_token_dedup_expert_output(
+        expert_output, expert_wire_rows, wire_to_expert_rows
     )
-    output = restore_token_dedup_output(
-        partials, token_wire_rows, wire_tokens
-    )
-
-    expected = torch.stack(
-        (
-            expert_output[0] * wire_probs[0, 0]
-            + expert_output[1] * wire_probs[0, 1],
-            expert_output[2] * wire_probs[1, 0]
-            + expert_output[3] * wire_probs[2, 1],
-        )
-    )
-    assert torch.equal(output, expected)
+    output = restore_token_dedup_output(partials, token_wire_rows, wire_tokens)
+    e = expert_output.detach()
+    assert torch.equal(output, torch.stack((e[0] + e[1], e[2] + e[3])))
 
     grad = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
     output.backward(grad)
-    expected_expert_grad = torch.stack(
-        (
-            grad[0] * 0.25,
-            grad[0] * 0.75,
-            grad[1] * 0.4,
-            grad[1] * 0.6,
-        )
-    )
-    assert torch.equal(expert_output.grad, expected_expert_grad)
-    assert torch.equal(
-        wire_probs.grad,
-        torch.tensor(
-            [
-                [(grad[0] * expert_output[0]).sum(), (grad[0] * expert_output[1]).sum()],
-                [(grad[1] * expert_output[2]).sum(), 0.0],
-                [0.0, (grad[1] * expert_output[3]).sum()],
-            ]
-        ),
-    )
+    assert torch.equal(expert_output.grad, grad[[0, 0, 1, 1]])
+

@@ -49,7 +49,7 @@ from megatron.core.transformer.moe.token_dedup import (
     pack_token_dedup_payload,
     permute_token_dedup_expert_output,
     restore_token_dedup_output,
-    weighted_reduce_token_dedup_expert_output,
+    reduce_token_dedup_expert_output,
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -1018,7 +1018,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         self._dedup_token_wire_rows = None
         self._dedup_wire_tokens = None
         self._dedup_wire_to_expert_rows = None
-        self._dedup_received_probs = None
+        self._dedup_expert_wire_rows = None
         self._dedup_topk = 0
 
     def _metadata_gather_launch(
@@ -1167,6 +1167,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         num_assignments = sum(self.output_splits)
         if num_assignments == 0:
             self._dedup_wire_to_expert_rows = torch.full_like(received_experts, -1)
+            self._dedup_expert_wire_rows = received_experts.new_empty(0)
             return received[:0]
         if fused_index_build_available(received.device):
             wire_to_expert_rows, expert_wire_rows = build_wire_recv_index(
@@ -1183,6 +1184,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
                     received, expert_wire_rows, wire_to_expert_rows
                 )
             self._dedup_wire_to_expert_rows = wire_to_expert_rows
+            self._dedup_expert_wire_rows = expert_wire_rows
             return expanded
         flat_experts = received_experts.reshape(-1)
         expert_ids = torch.arange(self.num_local_experts, device=received.device).unsqueeze(1)
@@ -1220,6 +1222,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         else:
             expanded = expand_token_dedup_received(received, wire_rows, wire_to_expert_rows)
         self._dedup_wire_to_expert_rows = wire_to_expert_rows
+        self._dedup_expert_wire_rows = wire_rows
         return expanded
 
     def dispatch_preprocess(
@@ -1338,20 +1341,18 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         received_experts = global_input_tokens[
             :, hidden_size : hidden_size + self._dedup_topk
         ].to(dtype=torch.long)
-        self._dedup_received_probs = global_input_tokens[
+        received_probs = global_input_tokens[
             :, hidden_size + self._dedup_topk : hidden_size + 2 * self._dedup_topk
         ]
         expanded = self._expand_received(received, received_experts)
         if self.shared_experts is not None:
             self.shared_experts.linear_fc1_forward_and_act(expanded)
-        # The experts must not weight their outputs: routing probabilities are applied by
-        # the deduplicated combine (weighted_reduce_token_dedup_expert_output), which
-        # collapses all local expert outputs for one wire row into a single row before the
-        # combine all-to-all. Handing the experts all-ones probabilities keeps the stock
-        # expert code path intact.
-        permuted_probs = torch.ones(
-            expanded.shape[0], dtype=self.probs.dtype, device=expanded.device
-        )
+        # Weight inside the experts as the stock dispatcher does; the combine then only sums.
+        wire_rows = self._dedup_expert_wire_rows
+        rows = torch.arange(wire_rows.numel(), device=wire_rows.device).unsqueeze(1)
+        wire_slots = self._dedup_wire_to_expert_rows.index_select(0, wire_rows) == rows
+        flat_slots = wire_rows * self._dedup_topk + wire_slots.to(torch.int8).argmax(dim=1)
+        permuted_probs = received_probs.reshape(-1)[flat_slots].to(self.probs.dtype)
         tokens_per_expert = self.tokens_per_expert
         self.tokens_per_expert = None
         if (
@@ -1371,13 +1372,9 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         return expanded, tokens_per_expert, permuted_probs
 
     def combine_preprocess(self, hidden_states):
-        """Weight and collapse local expert outputs to one row per wire row.
-
-        The routing probabilities arrived inside dispatch's aligned payload, so this needs
-        no metadata collective and produces exactly one row per dispatch wire row.
-        """
-        return weighted_reduce_token_dedup_expert_output(
-            hidden_states, self._dedup_wire_to_expert_rows, self._dedup_received_probs
+        """Sum the (already weighted) local expert outputs to one row per wire row."""
+        return reduce_token_dedup_expert_output(
+            hidden_states, self._dedup_expert_wire_rows, self._dedup_wire_to_expert_rows
         )
 
     def token_combine(
@@ -1406,7 +1403,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         self._dedup_token_wire_rows = None
         self._dedup_wire_tokens = None
         self._dedup_wire_to_expert_rows = None
-        self._dedup_received_probs = None
+        self._dedup_expert_wire_rows = None
         self._dedup_destinations = None
         self._dedup_hits = None
         if self.shared_experts is not None:

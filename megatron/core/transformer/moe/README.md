@@ -442,8 +442,9 @@ EP All-to-All can consume 30-40% of training time without optimization. These fe
 With the `alltoall` dispatcher a token is sent once per selected expert, even when several of its experts live on the
 same EP rank. `--moe-token-dedup` sends one row per unique (token, destination rank); the row carries the token's local
 expert ids and routing weights, the receiver expands it into expert-major order for the grouped GEMM, and the combine
-is deduplicated the same way. Routing and the rows each expert computes are unchanged; only the summation order of a
-token's expert outputs in the combine differs (bf16 rounding level). The expert grouped GEMMs then run on
+is deduplicated the same way. Routing and the rows each expert computes are unchanged; the routing weights travel in
+the activation dtype and the summation order of a token's expert outputs differs (both at bf16 rounding level). The
+expert grouped GEMMs then run on
 [Primus-Turbo](https://github.com/AMD-AGI/Primus-Turbo)'s grouped GEMM (TRITON backend);
 `--no-moe-token-dedup-primus-gemm` keeps the legacy grouped_gemm backend.
 
