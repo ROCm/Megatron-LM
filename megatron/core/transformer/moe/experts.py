@@ -294,7 +294,12 @@ class GroupedMLP(MegatronModule):
         tokens_per_expert_gpu: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Expert grouped GEMM: Primus-Turbo when the dedup dispatcher supplied device-side counts."""
-        if tokens_per_expert_gpu is not None and self.config.moe_token_dedup_primus_gemm:
+        if (
+            tokens_per_expert_gpu is not None
+            and self.config.moe_token_dedup
+            and self.config.moe_token_dedup_primus_gemm
+            and primus_grouped_gemm() is not None
+        ):
             return primus_grouped_gemm()(activations, weights, tokens_per_expert_gpu, trans_b=False)
         return gg.ops.gmm(activations, weights, tokens_per_expert_cpu, trans_b=False)
 

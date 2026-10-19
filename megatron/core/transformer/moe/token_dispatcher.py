@@ -1357,6 +1357,7 @@ class MoEDeduplicatingAlltoAllTokenDispatcher(MoEAlltoAllTokenDispatcher):
         self.tokens_per_expert = None
         if (
             self.config.moe_token_dedup_primus_gemm
+            and self.config.moe_grouped_gemm
             and self.config.moe_use_legacy_grouped_gemm
             and primus_grouped_gemm() is not None
         ):
