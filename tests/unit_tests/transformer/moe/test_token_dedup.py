@@ -170,3 +170,28 @@ def test_reduce_and_restore_sum_expert_rows():
     output.backward(grad)
     assert torch.equal(expert_output.grad, grad[[0, 0, 1, 1]])
 
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("ep_size,topk", [(2, 2), (8, 2), (8, 6)])
+def test_dedup_matches_alltoall_dispatcher(ep_size, topk):
+    from tests.unit_tests.test_utilities import Utils
+    from tests.unit_tests.transformer.moe.test_token_dispatcher import MoEModelTestContainer
+
+    container = MoEModelTestContainer(
+        tp_size=1, ep_size=ep_size, pp_size=1, num_moe_experts=32, moe_router_topk=topk
+    )
+    dedup = container.new_moe_layer(moe_token_dedup=True)
+    dedup.load_state_dict(container.moe_layer.state_dict())
+    assert isinstance(dedup.token_dispatcher, MoEDeduplicatingAlltoAllTokenDispatcher)
+    gen = torch.Generator(device="cuda").manual_seed(torch.distributed.get_rank())
+    x = torch.randn(64, 2, dedup.config.hidden_size, device="cuda", generator=gen)
+    grad = torch.randn(x.shape, device="cuda", generator=gen)
+    results = []
+    for layer in (container.moe_layer, dedup):
+        inp = x.clone().requires_grad_()
+        out, _ = layer(inp)
+        out.backward(grad)
+        results.append((out, inp.grad, layer.router.weight.grad))
+    for ref, got in zip(*results):
+        torch.testing.assert_close(got, ref)
+    Utils.destroy_model_parallel()
