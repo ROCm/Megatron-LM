@@ -280,7 +280,7 @@ class MLP(MegatronModule):
             # Submodules without a sharded_state_dict method (e.g. the TE activation op
             # built with --use-te-activation-func) fall back to their plain state dict.
             sub_sd = sharded_state_dict_default(
-                module, f"{prefix}{name}.", sharded_offsets, metadata
+                module, f"{prefix}{name}.", sharded_offsets, metadata, tp_group=self.tp_group
             )
             if self.config.gated_linear_unit and name == "linear_fc1":
                 for k, v in sub_sd.items():
