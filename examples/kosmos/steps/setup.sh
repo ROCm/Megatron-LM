@@ -102,13 +102,13 @@ if [ "$BUILD" = 1 ]; then
 || { tail -20 $O/kosmos_build.log; exit 1; }" || die "KOSMOS build failed ($O/kosmos_build.log)"
     printf '[safe]\n\tdirectory = *\n' | wfile "$O/gitconfig_safe"
     log "TE: in-place build against KOSMOS in ${KOSMOS_CT:-host} -> $O/te_build.log"
-    cexec "$KOSMOS_CT" "cd $TE_DIR && env NVTE_FRAMEWORK=pytorch NVTE_ROCM_ARCH=$GPU_ARCH \
+    cexec "$KOSMOS_CT" "cd $TE_DIR && env NVTE_CK_JIT=0 NVTE_FRAMEWORK=pytorch NVTE_ROCM_ARCH=$GPU_ARCH \
 NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 NVTE_KOSMOS_ROOT=$KOSMOS_DIR NVTE_KOSMOS_LIB=$KOSMOS_BUILD/libkosmos_tpsp.a \
 GIT_CONFIG_SYSTEM=$O/gitconfig_safe MAX_JOBS=$TE_MAX_JOBS python setup.py build_ext --inplace > $O/te_build.log 2>&1 \
 || { tail -20 $O/te_build.log; exit 1; }" || die "TE build failed ($O/te_build.log)"
     if [ "$TE_BASE_DIR" != "$TE_DIR" ]; then
         log "TE baseline: in-place build of $TE_BASE_DIR without KOSMOS -> $O/te_base_build.log"
-        cexec "$KOSMOS_CT" "cd $TE_BASE_DIR && env NVTE_FRAMEWORK=pytorch NVTE_ROCM_ARCH=$GPU_ARCH \
+        cexec "$KOSMOS_CT" "cd $TE_BASE_DIR && env NVTE_CK_JIT=0 NVTE_FRAMEWORK=pytorch NVTE_ROCM_ARCH=$GPU_ARCH \
 NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 GIT_CONFIG_SYSTEM=$O/gitconfig_safe MAX_JOBS=$TE_MAX_JOBS \
 python setup.py build_ext --inplace > $O/te_base_build.log 2>&1 || { tail -20 $O/te_base_build.log; exit 1; }" ||
             die "TE baseline build failed"
@@ -117,7 +117,7 @@ python setup.py build_ext --inplace > $O/te_base_build.log 2>&1 || { tail -20 $O
     # once, with the same flags (CMake reuses the in-place build).
     log "TE: editable install of $TE_DIR in ${KOSMOS_CT:-host} unless already there -> $O/te_editable.log"
     cexec "$KOSMOS_CT" "pip show transformer_engine 2>/dev/null | grep -qx 'Editable project location: $TE_DIR' || \
-{ cd $TE_DIR && env NVTE_FRAMEWORK=pytorch NVTE_ROCM_ARCH=$GPU_ARCH NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
+{ cd $TE_DIR && env NVTE_CK_JIT=0 NVTE_FRAMEWORK=pytorch NVTE_ROCM_ARCH=$GPU_ARCH NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
 NVTE_KOSMOS_ROOT=$KOSMOS_DIR NVTE_KOSMOS_LIB=$KOSMOS_BUILD/libkosmos_tpsp.a GIT_CONFIG_SYSTEM=$O/gitconfig_safe \
 MAX_JOBS=$TE_MAX_JOBS pip install --no-build-isolation --no-deps -e . > $O/te_editable.log 2>&1 \
 || { tail -20 $O/te_editable.log; exit 1; }; }" || die "TE editable install failed ($O/te_editable.log)"

@@ -33,6 +33,8 @@ NGPU=${NGPU:-$(node_ngpu)}
 POWER_CAP_W=${POWER_CAP_W:-$(node_power_w)}
 HIP_VISIBLE_DEVICES=${HIP_VISIBLE_DEVICES:-$(seq -s, 0 $((${NGPU:-8} - 1)))}
 GPU_MAX_HW_QUEUES=${GPU_MAX_HW_QUEUES:-2}
+# 405B runs (every arm) use 1 HW queue: with 2 its first-iteration single-rank grad reduce-scatter hangs on MI350X.
+TPSP_HWQ_405=${TPSP_HWQ_405:-1}
 
 # ---- repositories: used on their branches as they are; setup verifies them ------------------------------------------
 # A *_COMMIT is the oldest accepted commit: the tree's HEAD must be it or a descendant of it.
@@ -124,13 +126,13 @@ FIXOWN=${FIXOWN:-1}                    # chown files the containers created as r
 
 # ---- step: micro (KOSMOS bench/run_all.sh) ------------------------------------------------------------------------
 MICRO_REPS=${MICRO_REPS:-3}            # bench/moe/run.sh and bench/tpsp/run.sh REPS: time = median over the reps
-MICRO_CHECK_SHAPES=${MICRO_CHECK_SHAPES:-gate8 dsv3 qwen35 dsv4pro kimi27 glm52 qwen235 qwen30}
+MICRO_CHECK_SHAPES=${MICRO_CHECK_SHAPES:-gate8 dsv3 qwen35 dsv4pro kimi27 glm52 qwen235 qwen30 llama4scout llama4maverick}
 MICRO_DISTS=${MICRO_DISTS:-0 1}       # routing: 0 balanced, 1 skewed (bench dist 1); separate tables per dist
 MICRO_RESULTS_IN_TREE=${MICRO_RESULTS_IN_TREE:-0}   # 1: write KOSMOS results/<GPU>.md in the KOSMOS tree
 MICRO_ABLATIONS=${MICRO_ABLATIONS-unfused}   # unfused (default): the KOSMOS unfused arm (MoE and TP+SP --unfused); empty: off
 MICRO_PRECISIONS=${MICRO_PRECISIONS:-bf16 mxfp8}   # run_all.sh PRECISIONS: gate, checks, MoE, MegaMoE, TP+SP
 MICRO_MEGA=${MICRO_MEGA:-0}            # 1: also MegaMoE (internal only), run_all.sh mega in PRIMUS_CT
-# MI350X minutes, estimates (these runners are not yet timed): gate + checks; MoE fwd + bwd per routing (7 shapes,
+# MI350X minutes, estimates (these runners are not yet timed): gate + checks; MoE fwd + bwd per routing (9 shapes,
 # 3 reps; the ablation adds an arm); TP+SP every config, BF16 + MXFP8, 3 reps; MegaMoE per sweep.
 EST_MICRO_CHECK_MIN=${EST_MICRO_CHECK_MIN:-3}
 EST_MICRO_MOE_MIN=${EST_MICRO_MOE_MIN:-21.5}
@@ -140,8 +142,8 @@ EST_MICRO_TPSP_UNF_MIN=${EST_MICRO_TPSP_UNF_MIN:-4.5}
 EST_MICRO_MEGA_SWEEP_MIN=${EST_MICRO_MEGA_SWEEP_MIN:-0.21}
 
 # ---- E2E protocol ---------------------------------------------------------------------------------------------------
-E2E_ITERS=${E2E_ITERS:-10}             # TP+SP TOTAL_ITERS, A2A TRAIN_ITERS, Primus --train_iters
-E2E_REPS=${E2E_REPS:-3}                # runs per (config, arm); collect reports the median of the valid quiet runs
+E2E_ITERS=${E2E_ITERS:-20}             # TP+SP TOTAL_ITERS, A2A TRAIN_ITERS, Primus --train_iters
+E2E_REPS=${E2E_REPS:-1}                # runs per (config, arm); collect reports the median of the valid quiet runs
 
 # ---- step: tpsp (Llama 3 TP+SP E2E, train_llama3.sh, BF16, SEQ 8192, TP8) --------------------------------------------
 # MODEL:MBS:GBS:LAYERS:HARD_TIMEOUT_S:EST_MIN:EST_NOOVL_MIN. EST = MI350X minutes per completed run at E2E_ITERS=10,
@@ -159,23 +161,19 @@ TPSP_ARMS=${TPSP_ARMS:-"base_noovl kos_tpsp"}     # no overlap vs KOSMOS
 TPSP_PRECISIONS=${TPSP_PRECISIONS:-"bf16 mxfp8"}  # mxfp8: TE_FP8=1 TE_FP8_RECIPE=mxfp8 (every TE linear MXFP8)
 TPSP_REPS_GA0=${TPSP_REPS_GA0:-$E2E_REPS}
 TPSP_REPS_GA1=${TPSP_REPS_GA1:-$E2E_REPS}
-# MODEL:ARM:N overrides GPU_MAX_HW_QUEUES for that model and arm: the 405B baselines hang in their first backward on
-# MI350X with more than one HW queue (the KOSMOS arms do not).
-TPSP_HWQ=${TPSP_HWQ:-"405:base_noovl:1"}
 TPSP_STALL_S=${TPSP_STALL_S:-600}
 TPSP_STALL_S_405=${TPSP_STALL_S_405:-1200}   # stall watchdog of the 405B runs (GBS 64: iterations ~4-8 min; 31-60 s at GBS 8-16)
 # 1: a stall (rc 86), hard timeout or out-of-memory / launch-resource failure of a (model, arm, GA) skips its remaining
 # repeats and every larger MBS (recorded as skipped rows); 0: every run is attempted.
 TPSP_HANG_SKIP=${TPSP_HANG_SKIP:-1}
 # Published MI350X failures, MODEL:MBS:ARM:GA:MINUTES, used only by the DRYRUN plan (the run follows real outcomes):
-# 405B base_noovl hung at MBS1 with 2 HW queues (fixed by TPSP_HWQ); kos_tpsp crashed at MBS4 after 8 iterations
-# (launch resources).
+# kos_tpsp crashed at MBS4 after 8 iterations (launch resources).
 TPSP_EST_FAIL=${TPSP_EST_FAIL:-"405:4:kos_tpsp:0:4.6"}
 
 # ---- step: a2a (Megatron example scripts, proxies, BF16 and MXFP8, EP8, PROFILE=false) -------------------------------
 A2A_MODELS=${A2A_MODELS:-"qwen dsv3"}       # qwen: Qwen3-235B proxy, 24 layers, recompute 3; dsv3: DSv3 proxy
 DSV3_MOE_LAYER_FREQ=${DSV3_MOE_LAYER_FREQ:-1}  # 1 = 3 MoE layers (published); empty = proxy default 1 dense + 2 MoE
-A2A_ARMS=${A2A_ARMS:-"kosmos grouped deepep megamoe"}   # megamoe: internal table only (never published)
+A2A_ARMS=${A2A_ARMS:-"kosmos grouped deepep"}   # + megamoe: internal table only (never published)
 # Precisions: bf16 (PR=bf16) and mxfp8 (PR=fp8 FP8_RECIPE=mxfp8, every layer FP8). An mxfp8 run is made only for the
 # arms of A2A_MXFP8_ARMS that are also in A2A_ARMS; megamoe MXFP8 is Primus-Turbo's staged op (MEGAMOE_SHIM_MX). Ablations and the Primus workflow are bf16 only.
 A2A_PRECISIONS=${A2A_PRECISIONS:-"bf16 mxfp8"}
@@ -206,6 +204,12 @@ A2A_ROUTING=${A2A_ROUTING:-both}
 KOSMOS_CF_balanced_qwen=${KOSMOS_CF_balanced_qwen:-}
 KOSMOS_CF_balanced_dsv3=${KOSMOS_CF_balanced_dsv3:-}
 KOSMOS_CF_natural_qwen=${KOSMOS_CF_natural_qwen:-4.1}
+# Per precision (KOSMOS_CF_<routing>_<model>_<precision>, over the above). MXFP8 natural qwen at aux 1e-2 needs 5.0 and
+# fits 5.5; BF16 needs 4.0 and runs out of memory at 5.1 and 5.5 (2026-10-23).
+KOSMOS_CF_natural_qwen_mxfp8=${KOSMOS_CF_natural_qwen_mxfp8:-5.5}
+# Aux loss coefficient per (routing kind, model), every arm (empty: the train script's). natural qwen 1e-2: at 1e-3 the
+# routing collapses past 4.1x on one rank by iteration 20 (5.0x, 2026-10-23), beyond the KOSMOS arena that fits in HBM.
+A2A_AUX_natural_qwen=${A2A_AUX_natural_qwen:-1e-2}
 KOSMOS_CF_natural_dsv3=${KOSMOS_CF_natural_dsv3:-3.0}
 # MegaMoE MXFP8 symmetric pool per (routing kind, model), in mean rows per rank (MEGAMOE_POOL_MULT; empty: Primus's 2,
 # which a qwen natural run, up to 4.07x on one rank, overflows: the combine times out).

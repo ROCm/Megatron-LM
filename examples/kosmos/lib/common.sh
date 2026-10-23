@@ -160,3 +160,22 @@ plan_report() { log "PLAN $1: $PLAN_N GPU runs, estimated $(awk -v m="$PLAN_MIN"
 
 # done_log LOG PATTERN: true if LOG exists and contains PATTERN (the run completed earlier; skipped on a rerun).
 done_log() { [ -f "$1" ] && grep -q "$2" "$1"; }
+
+# fingerprint TE_TREE: the build a run uses: KOSMOS and TE git describe --dirty, md5 of TE's libtransformer_engine.so.
+fingerprint() {
+    echo "kosmos $(git -C "$KOSMOS_DIR" describe --always --dirty 2>/dev/null || echo '?')," \
+        "te $(git -C "$1" describe --always --dirty 2>/dev/null || echo '?')," \
+        "libtransformer_engine.so $(md5sum 2>/dev/null < "$1/libtransformer_engine.so" | cut -c1-32)"
+}
+
+# same_build RUN FP TSV: true if the completed RUN was made by build FP. Otherwise RUN is moved to RUN.stale.<epoch>,
+# its TSV rows following it, so that it is re-run.
+same_build() {
+    local to
+    [ "$(cat "$1/fingerprint.txt" 2>/dev/null)" = "$2" ] && return 0
+    to=$1.stale.$(date +%s)
+    warn "$(basename "$1") was made by another build ($(cat "$1/fingerprint.txt" 2>/dev/null || echo unrecorded)): re-run, moved to $to"
+    dry && return 1
+    mv "$1" "$to" && sed -i "s#\t$1/#\t$to/#" "$3"
+    return 1
+}

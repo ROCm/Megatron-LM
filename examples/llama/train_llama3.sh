@@ -212,7 +212,7 @@ elif [[ $MODEL_SIZE -eq 70 ]]; then
 elif [[ $MODEL_SIZE -eq 405 ]]; then
     HIDDEN_SIZE=16384 # e.g. llama-13b: 5120
     FFN_HIDDEN_SIZE=53248 # e.g. llama-13b: 13824
-    NUM_LAYERS=28 # e.g. llama-13b: 40
+    NUM_LAYERS=24 # e.g. llama-13b: 40
     NUM_HEADS=128 # e.g. llama-13b: 40
     NUM_KV_HEADS=8 # llama3 70B uses GQA
 else

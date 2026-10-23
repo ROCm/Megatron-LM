@@ -5,19 +5,34 @@ The routed part (dispatch, GEMM1 + SwiGLU, GEMM2, combine, weighted sum) is one 
 which takes the routing in device memory and also stores the activations the backward needs, and
 its backward is one launch, which returns the bf16 input gradient and the fp32 probs gradient.
 
-Routing: for the softmax (top-k on the logits) and sigmoid (expert bias, group-limited) score
-functions with aux_loss or seq_aux_loss, the fused router runs inside the same two launches, and
-Megatron's router module only holds the router weight and the expert bias. Other router configs,
-and calls with a padding mask, keep Megatron's router.
+Experts: bias-free SwiGLU, or DeepSeek-V4's clamped SwiGLU (activation_func_clamp_value=10:
+silu(min(g, 10)) * clamp(u, -10, 10), routed and shared experts; top-k 6, 8 or 10). Top-k 1, 2, 4
+(SwiGLU) run the library's small-k kernels; with top-1, moe_apply_probs_on_input (Llama 4) scales
+each token by its weight at the dispatch and combines unweighted (Megatron's router; the backward
+also reads the forward's input, kept in the autograd context).
+
+Routing: for the softmax (top-k on the logits, or with moe_router_pre_softmax a softmax over all
+experts, then top-k), sigmoid and sqrtsoftplus (expert bias, group-limited; one group, or
+group_topk = groups, is plain top-k) score functions with aux_loss or seq_aux_loss, the fused router
+runs inside the same two launches, and Megatron's router module only holds the router weight and the
+expert bias. The aux-loss gradient is scaled by MoEAuxLossAutoScaler's scale, which Megatron rewrites
+every microbatch: it is read on the host whenever it was rewritten. Other router configs (and a
+kosmos module without that score function), per-token loss, MTP layers, context parallelism, an
+expert capacity factor, a token count that is not a multiple of 256, and calls with a padding mask,
+keep Megatron's router; its routing is passed to the kernels as top-k ids and weights, so any router
+Megatron implements works.
 
 Shared expert (KOSMOS_SHARED=1): when the layer's shared expert is one ungated SwiGLU MLP of the
-experts' intermediate size, it runs inside the same two launches (fc1 + SwiGLU + fc2 alongside the
-routed experts, its output added at the combine; its dgrad/wgrad in the backward launch, its dX
-added to the input gradient). Megatron's SharedExpertMLP keeps the parameters; its forward is
-skipped. With gradient-accumulation fusion the shared weight gradients are added into main_grad
-(fp32 or bf16) by the kernel (grad_added_to_main_grad, dummy grads, as TE does); otherwise they
-are returned as bf16 gradients. Unsupported configs, and a token count that is not a multiple of
-512, keep Megatron's shared expert.
+experts' intermediate size (with or without moe_shared_expert_gate's sigmoid gate), it runs inside
+the same two launches (fc1 + SwiGLU + fc2 alongside the routed experts, its output added at the
+combine; its dgrad/wgrad in the backward launch, its dX added to the input gradient). The gate
+s_t = sigmoid(x_t w_sg) is computed here in torch and scales the shared output at the combine; the
+kernel returns ds_t = <dout_t, shared_t> and autograd takes it through the sigmoid into w_sg and x.
+Megatron's SharedExpertMLP keeps the parameters; its forward is skipped. With gradient-accumulation
+fusion the shared weight gradients are added into main_grad (fp32 or bf16) by the kernel
+(grad_added_to_main_grad, dummy grads, as TE does); otherwise they are returned as bf16 gradients.
+Unsupported configs (a gate with top-k < 6, FP8 recipes other than mxfp8, FP8 primary weights),
+and a token count that is not a multiple of 512, keep Megatron's shared expert.
 
 MXFP8 (KOSMOS_MXFP8=1, --fp8-recipe mxfp8): on the layers Megatron runs in FP8, the four expert
 GEMMs run in MXFP8 (TE recipe, no requantization): the forward quantizes X at the source and
@@ -26,8 +41,15 @@ weights are quantized both ways once per step: with one microbatch per step, the
 the forward (kept from a checkpointed first pass for its recompute) and the column-wise copy in
 the backward, each freed after its use; with more, both on the first microbatch and cached for
 the step (as TE's weight cache);
-the layer's inputs, outputs and gradients stay bf16 (probs gradient fp32). MXFP8 layers use
-Megatron's router and shared expert, and need a hidden size that is a multiple of 1024.
+the layer's inputs, outputs and gradients stay bf16 (probs gradient fp32). MXFP8 layers run what
+bf16 layers run, through the library's MXFP8 training calls: top-k 1, 2, 4, probs on input (the
+library quantizes bf16(w x)), the fused router (bf16 inside the launch), and the fused shared
+expert with its gate, whose fc1 and fc2 run in MXFP8 too (weights quantized with the experts').
+They need a hidden size that is a multiple of 1024 and a token count that is a multiple of 256;
+otherwise the layer runs bf16 experts ("[KOSMOS] layer N: bf16 experts: ...").
+
+Each layer's decisions (precision, router, shared expert, and every feature left to Megatron with
+its reason) are printed once, at rank 0, at the layer's first forward.
 
 Every MoE layer has its own context (its arena and tables); all layers of one shape share one
 workspace (the per-call buffers), so any recompute pattern works. kosmos_gate.py keeps Megatron
@@ -42,7 +64,8 @@ Environment:
   KOSMOS_PYTHON             directory of the kosmos module (KOSMOS `make python`: build/python);
                             unset: the module is found on PYTHONPATH
   KOSMOS_WGCAP              launch width (workgroups), default 256
-  KOSMOS_CAPACITY_FACTOR    arena rows reserved per layer and rank = factor * T * k, default 1.5
+  KOSMOS_CAPACITY_FACTOR    arena rows reserved per layer and rank = factor * T * k
+                            + 256 E_loc (each local expert's rows padded to 256), default 1.5
   KOSMOS_ROUTER             1 (default): the fused router where supported; 0: Megatron's router
   KOSMOS_DDP_GATE           1 (default): the DDP gate (kosmos_gate.py); 0: off
   KOSMOS_SHARED             1 (default): the shared expert in the KOSMOS launches where supported;
@@ -60,7 +83,7 @@ from functools import partial
 import torch
 import torch.distributed as dist
 
-from megatron.core.fp8_utils import is_first_last_bf16_layer
+from megatron.core.fp8_utils import is_first_last_bf16_layer, is_float8tensor
 from megatron.core.num_microbatches_calculator import get_num_microbatches
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe import kosmos_gate
@@ -73,6 +96,8 @@ ROUTER = bool(int(os.environ.get("KOSMOS_ROUTER", "1")))
 SHARED = bool(int(os.environ.get("KOSMOS_SHARED", "1")))
 MXFP8 = bool(int(os.environ.get("KOSMOS_MXFP8", "1")))
 MXFP8_H_MULTIPLE = 1024
+MXFP8_T_MULTIPLE = 256
+ROUTER_T_MULTIPLE = 256
 SHARED_T_MULTIPLE = 512
 
 # ---------------------------------------------------------------------------------------------
@@ -122,12 +147,17 @@ def _host_allgather(ep_group):
 def _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8):
     kosmos = _kosmos()
     k = config.moe_router_topk
-    capacity_rows = int(float(os.environ.get("KOSMOS_CAPACITY_FACTOR", "1.5")) * T * k)
+    # Each local expert's rows are padded to 256 in the arena: up to 255 more rows per expert.
+    factor = float(os.environ.get("KOSMOS_CAPACITY_FACTOR", "1.5"))
+    capacity_rows = int(factor * T * k) + num_local_experts * 256
     rcfg = None
     if router is not None:
-        # router: (sigmoid, groups, group_topk, aux_groups, aux_coeff, scale, force)
-        score = kosmos.ROUTER_SIGMOID if router[0] else kosmos.ROUTER_SOFTMAX
-        rcfg = kosmos.MoeRouterConfig(score, *router[1:])
+        # router: (score, groups, group_topk, aux_groups, aux_coeff, scale, force)
+        rcfg = kosmos.MoeRouterConfig(*router)
+    act = _experts_act(config)
+    extra = {} if act is None else {"act": act}
+    if config.moe_apply_probs_on_input:
+        extra["probs_in"] = True
     return kosmos.MoeWorkspace(
         config.hidden_size,
         config.moe_ffn_hidden_size,
@@ -141,6 +171,7 @@ def _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8
         router=rcfg,
         shared=shared,
         mxfp8=mxfp8,
+        **extra,
     )
 
 
@@ -158,7 +189,9 @@ def _topk(probs, routing_map, k):
     assert (
         probs.dtype == torch.float32
     ), "KOSMOS writes the probs gradient in fp32 (--moe-router-dtype fp32)"
-    idx = routing_map.to(torch.float32).topk(k, dim=1, sorted=False).indices
+    # A stable sort, not topk: topk's order among the tied ones may change run to run, and with it
+    # the fold order.
+    idx = torch.argsort(routing_map.to(torch.int8), dim=1, descending=True, stable=True)[:, :k]
     w = probs.gather(1, idx).to(torch.float32)
     return idx.to(torch.int32).contiguous(), w.contiguous()
 
@@ -173,60 +206,64 @@ def _quantize_mxfp8(w, col):
     return q, s
 
 
-def _forward_mxfp8(K, x, mxw, idx, w):
-    """-> (out, G); mxw: KosmosExperts.mxfp8_row(). The MXFP8 forward always stores G."""
-    out = torch.empty_like(x)
-    G = _new_g(K, x, True)
-    K.forward_mxfp8_train(*map(_ptr, (x, *mxw[:4], idx, w, out, G)), _stream())
-    return out, G
+# MXFP8 (KosmosExperts.mxfp8_row / mxfp8_col): mxw = (W1, W1_scale, W2, W2_scale) row-wise, mxc the
+# same column-wise, each followed by (Ws1, Ws1_scale, Ws2, Ws2_scale) with the fused shared expert;
+# None: bf16. The MXFP8 forwards always store G (and Gs), and the MXFP8 backwards read the forward's X.
 
 
-def _backward_mxfp8(K, dout, G, x, w1, w2, mxc):
-    """-> (dX, dprobs, dW1, dW2); mxc: KosmosExperts.mxfp8_col()."""
-    dX = torch.empty_like(dout)
-    dprobs = torch.empty(
+def _new_dprobs(dout, w1):
+    return torch.empty(
         (dout.shape[0], _kosmos().EP * w1.shape[0]), dtype=torch.float32, device=dout.device
     )
-    dW1, dW2 = torch.empty_like(w1), torch.empty_like(w2)
-    K.backward_mxfp8(*map(_ptr, (dout, G, x, *mxc, dX, dprobs, dW1, dW2)), _stream())
-    return dX, dprobs, dW1, dW2
 
 
-def _forward(K, x, w1, w2, idx, w, need_g):
+def _forward(K, x, w1, w2, idx, w, need_g, mxw=None):
     """-> (out, G or None)."""
     out = torch.empty_like(x)
-    G = _new_g(K, x, need_g)
-    K.forward(*map(_ptr, (x, w1, w2, idx, w, out, G)), _stream())
+    G = _new_g(K, x, need_g or mxw is not None)
+    if mxw is None:
+        K.forward(*map(_ptr, (x, w1, w2, idx, w, out, G)), _stream())
+    else:
+        K.forward_mxfp8_train(*map(_ptr, (x, *mxw[:4], idx, w, out, G)), _stream())
     return out, G
 
 
-def _backward(K, dout, G, w1, w2):
+def _backward(K, dout, G, w1, w2, x=None, mxc=None):
     """-> (dX, dprobs, dW1, dW2)."""
-    dX = torch.empty_like(dout)
-    dprobs = torch.empty(
-        (dout.shape[0], _kosmos().EP * w1.shape[0]), dtype=torch.float32, device=dout.device
-    )
+    dX, dprobs = torch.empty_like(dout), _new_dprobs(dout, w1)
     dW1, dW2 = torch.empty_like(w1), torch.empty_like(w2)
-    K.backward(*map(_ptr, (dout, G, w1, w2, dX, dprobs, dW1, dW2)), _stream())
+    if mxc is None:
+        K.backward(*map(_ptr, (dout, G, w1, w2, dX, dprobs, dW1, dW2)), _stream())
+    else:
+        K.backward_mxfp8(*map(_ptr, (dout, G, x, *mxc[:4], dX, dprobs, dW1, dW2)), _stream())
     return dX, dprobs, dW1, dW2
 
 
-def _forward_router(K, x, wr, bias, w1, w2, seed, need_g):
+def _forward_router(K, x, wr, bias, w1, w2, seed, need_g, mxw=None):
     """-> (out, G or None, aux loss, tokens per expert)."""
     out = torch.empty_like(x)
-    G = _new_g(K, x, need_g)
+    G = _new_g(K, x, need_g or mxw is not None)
     aux = torch.empty(1, dtype=torch.float32, device=x.device)
     tpe = torch.empty(wr.shape[0], dtype=torch.int32, device=x.device)
-    K.forward_router(*map(_ptr, (x, wr, bias, w1, w2, out, G, aux, tpe, seed)), _stream())
+    outs = (out, G, aux, tpe, seed)
+    if mxw is None:
+        K.forward_router(*map(_ptr, (x, wr, bias, w1, w2, *outs)), _stream())
+    else:
+        K.forward_router_mxfp8_train(*map(_ptr, (x, wr, bias, *mxw[:4], *outs)), _stream())
     return out, G, aux, tpe
 
 
-def _backward_router(K, dout, G, x, w1, w2, wr, aux_scale):
+def _backward_router(K, dout, G, x, w1, w2, wr, aux_scale, mxc=None):
     """-> (dX, dW1, dW2, dWr)."""
     dX = torch.empty_like(dout)
     dW1, dW2, dWr = torch.empty_like(w1), torch.empty_like(w2), torch.empty_like(wr)
-    ins = map(_ptr, (dout, G, x, w1, w2, wr))
-    K.backward_router(*ins, aux_scale, *map(_ptr, (dX, dW1, dW2, dWr)), _stream())
+    outs = map(_ptr, (dX, dW1, dW2, dWr))
+    if mxc is None:
+        ins = map(_ptr, (dout, G, x, w1, w2, wr))
+        K.backward_router(*ins, aux_scale, *outs, _stream())
+    else:
+        ins = map(_ptr, (dout, G, x, *mxc[:4], wr))
+        K.backward_router_mxfp8(*ins, aux_scale, *outs, _stream())
     return dX, dW1, dW2, dWr
 
 
@@ -238,23 +275,49 @@ def _new_gs(x, ws1, need_g):
     return torch.empty((x.shape[0], ws1.shape[0]), dtype=x.dtype, device=x.device) if need_g else None
 
 
-def _forward_shared(K, x, w1, w2, ws1, ws2, idx, w, need_g):
+def _sgate_kw(sgate):
+    """The gate argument of the shared calls: sgate [T] fp32 (None: ungated, no argument)."""
+    return {} if sgate is None else {"sgate": _ptr(sgate)}
+
+
+def _dsgate(sgate):
+    """-> (dsgate [T] fp32 or None, its keyword arguments)."""
+    if sgate is None:
+        return None, {}
+    ds = torch.empty_like(sgate)
+    return ds, {"sgate": _ptr(sgate), "dsgate": _ptr(ds)}
+
+
+def _forward_shared(K, x, w1, w2, ws1, ws2, idx, w, need_g, sgate, mxw=None):
     """-> (out, G or None, Gs or None)."""
     out = torch.empty_like(x)
+    need_g = need_g or mxw is not None
     G, Gs = _new_g(K, x, need_g), _new_gs(x, ws1, need_g)
-    K.forward_shared(*map(_ptr, (x, w1, w2, ws1, ws2, idx, w, out, G, Gs)), _stream())
+    if mxw is None:
+        ins = map(_ptr, (x, w1, w2, ws1, ws2, idx, w, out, G, Gs))
+        K.forward_shared(*ins, _stream(), **_sgate_kw(sgate))
+    else:
+        assert len(mxw) == 8, "MXFP8 shared expert without its quantized weights"
+        ins = map(_ptr, (x, *mxw, idx, w, out, G, Gs))
+        K.forward_shared_mxfp8_train(*ins, _stream(), **_sgate_kw(sgate))
     return out, G, Gs
 
 
-def _forward_router_shared(K, x, wr, bias, w1, w2, ws1, ws2, seed, need_g):
+def _forward_router_shared(K, x, wr, bias, w1, w2, ws1, ws2, seed, need_g, sgate, mxw=None):
     """-> (out, G or None, Gs or None, aux loss, tokens per expert)."""
     out = torch.empty_like(x)
+    need_g = need_g or mxw is not None
     G, Gs = _new_g(K, x, need_g), _new_gs(x, ws1, need_g)
     aux = torch.empty(1, dtype=torch.float32, device=x.device)
     tpe = torch.empty(wr.shape[0], dtype=torch.int32, device=x.device)
-    K.forward_router_shared(
-        *map(_ptr, (x, wr, bias, w1, w2, ws1, ws2, out, G, Gs, aux, tpe, seed)), _stream()
-    )
+    outs = (out, G, Gs, aux, tpe, seed)
+    if mxw is None:
+        ins = map(_ptr, (x, wr, bias, w1, w2, ws1, ws2, *outs))
+        K.forward_router_shared(*ins, _stream(), **_sgate_kw(sgate))
+    else:
+        assert len(mxw) == 8, "MXFP8 shared expert without its quantized weights"
+        ins = map(_ptr, (x, wr, bias, *mxw, *outs))
+        K.forward_router_shared_mxfp8_train(*ins, _stream(), **_sgate_kw(sgate))
     return out, G, Gs, aux, tpe
 
 
@@ -306,28 +369,40 @@ def _shared_grads(ws1, ws2, dWs1, dWs2, acc):
     return _dummy_wgrad(ws1), _dummy_wgrad(ws2)
 
 
-def _backward_shared(K, config, dout, G, Gs, x, w1, w2, ws1, ws2):
-    """-> (dX, dprobs, dW1, dW2, dWs1 grad, dWs2 grad)."""
-    dX = torch.empty_like(dout)
-    dprobs = torch.empty(
-        (dout.shape[0], _kosmos().EP * w1.shape[0]), dtype=torch.float32, device=dout.device
-    )
+def _backward_shared(K, config, dout, G, Gs, x, w1, w2, ws1, ws2, sgate, mxc=None):
+    """-> (dX, dprobs, dW1, dW2, dWs1 grad, dWs2 grad, dsgate or None)."""
+    dX, dprobs = torch.empty_like(dout), _new_dprobs(dout, w1)
     dW1, dW2 = torch.empty_like(w1), torch.empty_like(w2)
     dWs1, dWs2, acc = _shared_dw(config, ws1, ws2)
-    ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, dX, dprobs, dW1, dW2, dWs1, dWs2))
-    K.backward_shared(*ins, acc, _stream())
-    return (dX, dprobs, dW1, dW2) + _shared_grads(ws1, ws2, dWs1, dWs2, acc)
+    dsgate, kw = _dsgate(sgate)
+    outs = (dX, dprobs, dW1, dW2, dWs1, dWs2)
+    if mxc is None:
+        ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, *outs))
+        K.backward_shared(*ins, acc, _stream(), **kw)
+    else:
+        assert len(mxc) == 8, "MXFP8 shared expert without its quantized weights"
+        ins = map(_ptr, (dout, G, Gs, x, *mxc, *outs))
+        K.backward_shared_mxfp8(*ins, acc, _stream(), **kw)
+    return (dX, dprobs, dW1, dW2) + _shared_grads(ws1, ws2, dWs1, dWs2, acc) + (dsgate,)
 
 
-def _backward_router_shared(K, config, dout, G, Gs, x, w1, w2, ws1, ws2, wr, aux_scale):
-    """-> (dX, dW1, dW2, dWr, dWs1 grad, dWs2 grad)."""
+def _backward_router_shared(
+    K, config, dout, G, Gs, x, w1, w2, ws1, ws2, wr, aux_scale, sgate, mxc=None
+):
+    """-> (dX, dW1, dW2, dWr, dWs1 grad, dWs2 grad, dsgate or None)."""
     dX = torch.empty_like(dout)
     dW1, dW2, dWr = torch.empty_like(w1), torch.empty_like(w2), torch.empty_like(wr)
     dWs1, dWs2, acc = _shared_dw(config, ws1, ws2)
-    ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, wr))
+    dsgate, kw = _dsgate(sgate)
     outs = map(_ptr, (dX, dW1, dW2, dWr, dWs1, dWs2))
-    K.backward_router_shared(*ins, aux_scale, *outs, acc, _stream())
-    return (dX, dW1, dW2, dWr) + _shared_grads(ws1, ws2, dWs1, dWs2, acc)
+    if mxc is None:
+        ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, wr))
+        K.backward_router_shared(*ins, aux_scale, *outs, acc, _stream(), **kw)
+    else:
+        assert len(mxc) == 8, "MXFP8 shared expert without its quantized weights"
+        ins = map(_ptr, (dout, G, Gs, x, *mxc, wr))
+        K.backward_router_shared_mxfp8(*ins, aux_scale, *outs, acc, _stream(), **kw)
+    return (dX, dW1, dW2, dWr) + _shared_grads(ws1, ws2, dWs1, dWs2, acc) + (dsgate,)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -348,6 +423,7 @@ def _workspace(config, ep_group, num_local_experts, T, router=None, shared=False
         router,
         shared,
         mxfp8,
+        config.activation_func_clamp_value,
     )
     if key not in _WS:
         _WS[key] = _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8)
@@ -427,27 +503,49 @@ class KosmosContext:
 
 
 class KosmosMoEFunction(torch.autograd.Function):
-    """out = sum_j w_j * Expert_{idx_j}(x) over the EP group; grads for x, probs, W1, W2."""
+    """out = sum_j w_j * Expert_{idx_j}(x) over the EP group; grads for x, probs, W1, W2 (and the
+    fused shared expert's Ws1, Ws2, sgate). experts: the KosmosExperts of w1, w2 for MXFP8 GEMMs,
+    None for bf16."""
 
     @staticmethod
-    def forward(ctx, hidden, probs, routing_map, w1, w2, kctx, need_g, ws1=None, ws2=None):
+    def forward(
+        ctx,
+        hidden,
+        probs,
+        routing_map,
+        w1,
+        w2,
+        kctx,
+        need_g,
+        ws1=None,
+        ws2=None,
+        sgate=None,
+        experts=None,
+    ):
         idx32, w = _topk(probs, routing_map, kctx.config.moe_router_topk)
         K = kctx.get(hidden.shape[0])
         ctx.shared = ws1 is not None
         hidden = hidden.contiguous()
         kosmos_gate.before_kernel()
+        # MXFP8: quantize after the gate: it waits for the param all-gather of the step's updated
+        # weights.
+        mxw = None if experts is None else experts.mxfp8_row(keep=not need_g)
         if ctx.shared:
-            out, G, Gs = _forward_shared(K, hidden, w1, w2, ws1, ws2, idx32, w, need_g)
+            out, G, Gs = _forward_shared(K, hidden, w1, w2, ws1, ws2, idx32, w, need_g, sgate, mxw)
         else:
-            out, G = _forward(K, hidden, w1, w2, idx32, w, need_g)
+            out, G = _forward(K, hidden, w1, w2, idx32, w, need_g, mxw)
             Gs = None
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
         if ctx.shared:
-            ctx.save_for_backward(w1, w2, hidden, ws1, ws2)
+            ctx.save_for_backward(w1, w2, hidden, ws1, ws2, sgate)
+        elif experts is not None or kctx.config.moe_apply_probs_on_input:
+            # The MXFP8 and probs-on-input backwards read the forward's X: keep it alive and
+            # unchanged.
+            ctx.save_for_backward(w1, w2, hidden)
         else:
             ctx.save_for_backward(w1, w2)
-        ctx.G, ctx.Gs = G, Gs
-        ctx.kctx = kctx
+        ctx.G, ctx.Gs = (G, Gs) if need_g else (None, None)
+        ctx.kctx, ctx.experts = kctx, experts
         return out
 
     @staticmethod
@@ -456,90 +554,87 @@ class KosmosMoEFunction(torch.autograd.Function):
         K = ctx.kctx.ctx
         dout = dout.contiguous()
         kosmos_gate.before_kernel()
+        mxc = None if ctx.experts is None else ctx.experts.mxfp8_col()
         if ctx.shared:
-            w1, w2, hidden, ws1, ws2 = ctx.saved_tensors
-            dX, dprobs, dW1, dW2, dWs1, dWs2 = _backward_shared(
-                K, ctx.kctx.config, dout, ctx.G, ctx.Gs, hidden, w1, w2, ws1, ws2
+            w1, w2, hidden, ws1, ws2, sgate = ctx.saved_tensors
+            dX, dprobs, dW1, dW2, dWs1, dWs2, dsgate = _backward_shared(
+                K, ctx.kctx.config, dout, ctx.G, ctx.Gs, hidden, w1, w2, ws1, ws2, sgate, mxc
             )
         else:
-            w1, w2 = ctx.saved_tensors
-            dX, dprobs, dW1, dW2 = _backward(K, dout, ctx.G, w1, w2)
-            dWs1 = dWs2 = None
+            w1, w2 = ctx.saved_tensors[:2]
+            hidden = ctx.saved_tensors[2] if mxc is not None else None
+            dX, dprobs, dW1, dW2 = _backward(K, dout, ctx.G, w1, w2, hidden, mxc)
+            dWs1 = dWs2 = dsgate = None
         kosmos_gate.after_kernel(backward=True)
-        ctx.G = ctx.Gs = None
-        return dX, dprobs, None, dW1, dW2, None, None, dWs1, dWs2
+        ctx.G = ctx.Gs = ctx.experts = None
+        return dX, dprobs, None, dW1, dW2, None, None, dWs1, dWs2, dsgate, None
 
 
-class KosmosMXFP8MoEFunction(torch.autograd.Function):
-    """KosmosMoEFunction with the expert GEMMs in MXFP8 (experts: the KosmosExperts of w1, w2)."""
-
-    @staticmethod
-    def forward(ctx, hidden, probs, routing_map, w1, w2, kctx, need_g, experts):
-        idx32, w = _topk(probs, routing_map, kctx.config.moe_router_topk)
-        K = kctx.get(hidden.shape[0])
-        hidden = hidden.contiguous()
-        # Quantize after the gate: it waits for the param all-gather of the step's updated weights.
-        kosmos_gate.before_kernel()
-        out, G = _forward_mxfp8(K, hidden, experts.mxfp8_row(keep=not need_g), idx32, w)
-        kosmos_gate.after_kernel(backward=False, need_backward=need_g)
-        ctx.save_for_backward(w1, w2, hidden)
-        ctx.G = G if need_g else None
-        ctx.experts, ctx.kctx = experts, kctx
-        return out
-
-    @staticmethod
-    def backward(ctx, dout):
-        assert ctx.G is not None, "KOSMOS backward without G (forward ran with grad disabled)"
-        w1, w2, hidden = ctx.saved_tensors
-        kosmos_gate.before_kernel()
-        dX, dprobs, dW1, dW2 = _backward_mxfp8(
-            ctx.kctx.ctx, dout.contiguous(), ctx.G, hidden, w1, w2, ctx.experts.mxfp8_col()
-        )
-        kosmos_gate.after_kernel(backward=True)
-        ctx.G = ctx.experts = None
-        return dX, dprobs, None, dW1, dW2, None, None, None
-
-
-_AUX_SCALE = None
+_AUX_SCALE = (None, None, 1.0)
 
 
 def _aux_scale():
-    """MoEAuxLossAutoScaler.main_loss_backward_scale, read once on the first backward."""
+    """MoEAuxLossAutoScaler.main_loss_backward_scale as a float. Megatron writes it after every
+    microbatch's forward (set_loss_scale: copy_ into the tensor); it is read on the host (one sync)
+    only when the tensor was replaced or written since the last read."""
     global _AUX_SCALE
-    if _AUX_SCALE is None:
-        from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
+    from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
 
-        s = MoEAuxLossAutoScaler.main_loss_backward_scale
-        _AUX_SCALE = 1.0 if s is None else float(s)
-    return float(_AUX_SCALE)
+    s = MoEAuxLossAutoScaler.main_loss_backward_scale
+    if s is None:
+        return 1.0
+    if not torch.is_tensor(s):
+        return float(s)
+    if _AUX_SCALE[0] is not s or _AUX_SCALE[1] != s._version:
+        _AUX_SCALE = (s, s._version, float(s.item()))
+    return _AUX_SCALE[2]
 
 
 class KosmosRouterMoEFunction(torch.autograd.Function):
     """Router + MoE in the two KOSMOS launches: out, aux-loss value and the dispatch counts per
-    expert from hidden; grads for hidden (MoE + router), the router weight, W1 and W2. The aux-loss
-    gradient is applied inside the backward launch."""
+    expert from hidden; grads for hidden (MoE + router), the router weight, W1 and W2 (and the fused
+    shared expert's). The aux-loss gradient is applied inside the backward launch. experts: as
+    KosmosMoEFunction's (the router itself stays bf16)."""
 
     @staticmethod
-    def forward(ctx, hidden, wr, bias, w1, w2, kctx, need_g, seed, router_cfg, ws1=None, ws2=None):
+    def forward(
+        ctx,
+        hidden,
+        wr,
+        bias,
+        w1,
+        w2,
+        kctx,
+        need_g,
+        seed,
+        router_cfg,
+        ws1=None,
+        ws2=None,
+        sgate=None,
+        experts=None,
+    ):
         T, _ = hidden.shape
         K = kctx.get(T, router_cfg)
         ctx.shared = ws1 is not None
         hidden = hidden.contiguous()
         kosmos_gate.before_kernel()
+        mxw = None if experts is None else experts.mxfp8_row(keep=not need_g)
         if ctx.shared:
             out, G, Gs, aux, tpe = _forward_router_shared(
-                K, hidden, wr.contiguous(), bias, w1, w2, ws1, ws2, seed, need_g
+                K, hidden, wr.contiguous(), bias, w1, w2, ws1, ws2, seed, need_g, sgate, mxw
             )
         else:
-            out, G, aux, tpe = _forward_router(K, hidden, wr.contiguous(), bias, w1, w2, seed, need_g)
+            out, G, aux, tpe = _forward_router(
+                K, hidden, wr.contiguous(), bias, w1, w2, seed, need_g, mxw
+            )
             Gs = None
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
         if ctx.shared:
-            ctx.save_for_backward(hidden, wr, w1, w2, ws1, ws2)
+            ctx.save_for_backward(hidden, wr, w1, w2, ws1, ws2, sgate)
         else:
             ctx.save_for_backward(hidden, wr, w1, w2)
-        ctx.G, ctx.Gs = G, Gs
-        ctx.kctx = kctx
+        ctx.G, ctx.Gs = (G, Gs) if need_g else (None, None)
+        ctx.kctx, ctx.experts = kctx, experts
         ctx.mark_non_differentiable(aux, tpe)
         return out, aux, tpe
 
@@ -549,18 +644,73 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
         K = ctx.kctx.ctx
         dout = dout.contiguous()
         kosmos_gate.before_kernel()
+        mxc = None if ctx.experts is None else ctx.experts.mxfp8_col()
         if ctx.shared:
-            hidden, wr, w1, w2, ws1, ws2 = ctx.saved_tensors
-            dX, dW1, dW2, dWr, dWs1, dWs2 = _backward_router_shared(
-                K, ctx.kctx.config, dout, ctx.G, ctx.Gs, hidden, w1, w2, ws1, ws2, wr, _aux_scale()
+            hidden, wr, w1, w2, ws1, ws2, sgate = ctx.saved_tensors
+            dX, dW1, dW2, dWr, dWs1, dWs2, dsgate = _backward_router_shared(
+                K,
+                ctx.kctx.config,
+                dout,
+                ctx.G,
+                ctx.Gs,
+                hidden,
+                w1,
+                w2,
+                ws1,
+                ws2,
+                wr,
+                _aux_scale(),
+                sgate,
+                mxc,
             )
         else:
             hidden, wr, w1, w2 = ctx.saved_tensors
-            dX, dW1, dW2, dWr = _backward_router(K, dout, ctx.G, hidden, w1, w2, wr, _aux_scale())
-            dWs1 = dWs2 = None
+            dX, dW1, dW2, dWr = _backward_router(
+                K, dout, ctx.G, hidden, w1, w2, wr, _aux_scale(), mxc
+            )
+            dWs1 = dWs2 = dsgate = None
         kosmos_gate.after_kernel(backward=True)
-        ctx.G = ctx.Gs = None
-        return dX, dWr, None, dW1, dW2, None, None, None, None, dWs1, dWs2
+        ctx.G = ctx.Gs = ctx.experts = None
+        return dX, dWr, None, dW1, dW2, None, None, None, None, dWs1, dWs2, dsgate, None
+
+
+# activation_func_clamp_value -> the kosmos module's clamped-SwiGLU activation (top-k 6, 8, 10).
+_CLAMP_ACTS = {10.0: "ACT_SWIGLU_CLAMP10"}
+
+
+def _experts_act(config):
+    """The kosmos activation of the experts' MLP config (None: plain SwiGLU on a kosmos module
+    without activations); raise on a config the KOSMOS kernels (bias-free SwiGLU or clamped SwiGLU,
+    probs applied at the combine) would otherwise run as something else."""
+    c = config
+    clamp = c.activation_func_clamp_value
+    why = None
+    if not c.gated_linear_unit:
+        why = "an ungated expert MLP (gated_linear_unit=False)"
+    elif c.activation_func is not torch.nn.functional.silu:
+        why = f"activation_func={getattr(c.activation_func, '__name__', c.activation_func)} (SwiGLU only)"
+    elif c.glu_linear_offset:
+        why = f"glu_linear_offset={c.glu_linear_offset}"
+    elif clamp is not None and float(clamp) not in _CLAMP_ACTS:
+        why = f"activation_func_clamp_value={clamp} (10 only)"
+    elif clamp is not None and c.moe_router_topk not in (6, 8, 10):
+        why = f"activation_func_clamp_value with moe_router_topk={c.moe_router_topk} (6/8/10 only)"
+    elif clamp is not None and (c.bias_activation_fusion or c.use_te_activation_func):
+        # Megatron's fused / TE SwiGLU drop the clamp: its shared expert would run unclamped.
+        why = "activation_func_clamp_value with fused SwiGLU (pass --no-bias-swiglu-fusion)"
+    elif clamp is not None and not hasattr(_kosmos(), _CLAMP_ACTS[float(clamp)]):
+        why = "activation_func_clamp_value (kosmos module without the clamped SwiGLU)"
+    elif c.add_bias_linear:
+        why = "expert bias (add_bias_linear)"
+    elif c.moe_apply_probs_on_input and (
+        c.moe_router_topk != 1 or "probs_in" not in (_kosmos().MoeWorkspace.__init__.__doc__ or "")
+    ):
+        why = "moe_apply_probs_on_input (top-1 only, and a kosmos module with probs_in)"
+    if why is not None:
+        raise ValueError(f"KOSMOS MoE (--moe-use-kosmos) does not support {why}")
+    if clamp is not None:
+        return getattr(_kosmos(), _CLAMP_ACTS[float(clamp)])
+    return getattr(_kosmos(), "ACT_SWIGLU", None)
 
 
 class KosmosExperts(MegatronModule):
@@ -570,7 +720,7 @@ class KosmosExperts(MegatronModule):
 
     def __init__(self, num_local_experts, config, submodules, pg_collection=None, name=None):
         super().__init__(config=config)
-        assert config.gated_linear_unit and not config.add_bias_linear
+        _experts_act(config)
         seq = SequentialMLP(
             num_local_experts, config, submodules, pg_collection=pg_collection, name=name
         )
@@ -587,48 +737,70 @@ class KosmosExperts(MegatronModule):
         # Set by Megatron's set_is_first_microbatch at each step (FP8 runs): refresh mxfp8_weights.
         self.is_first_microbatch = True
         self._mxw = None
+        # (linear_fc1.weight, linear_fc2.weight) of the layer's fused shared expert on an MXFP8
+        # layer (set by KosmosMoELayer): quantized with the experts, as one more expert each.
+        self.shared_weights = None
+
+    def _quantize(self, col):
+        """(W1, W1_scale, W2, W2_scale[, Ws1, Ws1_scale, Ws2, Ws2_scale]) row-wise or column-wise."""
+        q = ()
+        for w in (self.weight1, self.weight2, *(self.shared_weights or ())):
+            w = w.detach()
+            q += _quantize_mxfp8(w if w.dim() == 3 else w.unsqueeze(0), col)
+        return q
 
     def mxfp8_weights(self):
-        """(W1, W1_scale, W2, W2_scale, W1c, W1c_scale, W2c, W2c_scale): the weights row-wise
-        (forward) and column-wise (dgrad), quantized on the first microbatch of each step and cached
-        for the step (more than one microbatch per step)."""
+        """(row-wise, column-wise) weights (_quantize), quantized on the first microbatch of each
+        step and cached for the step (more than one microbatch per step)."""
         if self._mxw is None or self.is_first_microbatch:
-            w1, w2 = self.weight1.detach(), self.weight2.detach()
-            self._mxw = (
-                *_quantize_mxfp8(w1, False),
-                *_quantize_mxfp8(w2, False),
-                *_quantize_mxfp8(w1, True),
-                *_quantize_mxfp8(w2, True),
-            )
+            self._mxw = (self._quantize(False), self._quantize(True))
         self.is_first_microbatch = False
         return self._mxw
 
     def mxfp8_row(self, keep):
-        """(W1, W1_scale, W2, W2_scale). One microbatch per step: quantized once per step and held
-        only while used; keep (a forward with grad disabled, the checkpointed first pass) holds it
-        for the recompute's forward, which takes it. Otherwise from mxfp8_weights."""
+        """The row-wise weights (forward). One microbatch per step: quantized once per step and held
+        only while used; keep (a forward with grad disabled, the checkpointed first pass) holds them
+        for the recompute's forward, which takes them. Otherwise from mxfp8_weights."""
         if get_num_microbatches() > 1:
-            return self.mxfp8_weights()[:4]
+            return self.mxfp8_weights()[0]
         if self.is_first_microbatch:
             self._mxw = None
             self.is_first_microbatch = False
         row = self._mxw
         if row is None:
-            w1, w2 = self.weight1.detach(), self.weight2.detach()
-            row = (*_quantize_mxfp8(w1, False), *_quantize_mxfp8(w2, False))
+            row = self._quantize(False)
         self._mxw = row if keep else None
         return row
 
     def mxfp8_col(self):
-        """(W1c, W1c_scale, W2c, W2c_scale): one microbatch per step, quantized for the step's one
+        """The column-wise weights (dgrad): one microbatch per step, quantized for the step's one
         backward and freed after it; otherwise from mxfp8_weights."""
         if get_num_microbatches() > 1:
-            return self.mxfp8_weights()[4:]
-        w1, w2 = self.weight1.detach(), self.weight2.detach()
-        return (*_quantize_mxfp8(w1, True), *_quantize_mxfp8(w2, True))
+            return self.mxfp8_weights()[1]
+        return self._quantize(True)
 
     def backward_dw(self):
         pass
+
+
+# Megatron's moe_router_score_function -> the kosmos module's (pre-softmax: _router_score).
+_ROUTER_SCORES = {
+    "softmax": "ROUTER_SOFTMAX",
+    "sigmoid": "ROUTER_SIGMOID",
+    "sqrtsoftplus": "ROUTER_SQRTSOFTPLUS",
+}
+
+# The MXFP8 training calls an MXFP8 layer may use.
+_MXFP8_CALLS = (
+    "forward_mxfp8_train",
+    "backward_mxfp8",
+    "forward_router_mxfp8_train",
+    "backward_router_mxfp8",
+    "forward_shared_mxfp8_train",
+    "backward_shared_mxfp8",
+    "forward_router_shared_mxfp8_train",
+    "backward_router_shared_mxfp8",
+)
 
 
 class KosmosMoELayer(MoELayer):
@@ -647,10 +819,10 @@ class KosmosMoELayer(MoELayer):
         kosmos_gate.enable()
         assert config.tensor_model_parallel_size == 1 and config.expert_tensor_parallel_size == 1
         assert self.ep_group.size() == 8, "KOSMOS MoE is EP=8"
-        assert config.moe_router_topk in (6, 8, 10)
+        assert config.moe_router_topk in (1, 2, 4, 6, 8, 10)
         assert config.moe_latent_size is None and not config.moe_shared_expert_overlap
-        self._sh_active = False
         self.kctx = KosmosContext(config, self.ep_group, self.num_local_experts)
+        self._resolved = False
         self._configure(layer_number)
 
     def set_layer_number(self, layer_number):
@@ -658,110 +830,238 @@ class KosmosMoELayer(MoELayer):
         self._configure(layer_number)
 
     def _configure(self, layer_number):
-        """MXFP8, fused shared expert and fused router, before the first forward: the layer number
-        (set by TransformerLayer after construction) decides Megatron's bf16 first/last layers."""
+        """MXFP8, fused shared expert and fused router from the config, before the first forward:
+        the layer number (set by TransformerLayer after construction) decides Megatron's bf16
+        first/last layers. _notes: why features stay in Megatron, printed at the first forward."""
         assert self.kctx.ctx is None, "KOSMOS layer reconfigured after its first forward"
+        self._notes = []
         self._mxfp8 = self._mxfp8_supported(layer_number)
-        self._fused_shared = SHARED and not self._mxfp8 and self._shared_supported()
-        if self._fused_shared and layer_number is not None:
-            print(f"[KOSMOS] layer {layer_number}: fused shared expert", flush=True)
-        self._fused_router = ROUTER and not self._mxfp8 and self._router_supported()
-        self.kctx.shared, self.kctx.mxfp8 = self._fused_shared, self._mxfp8
+        self._fused_shared = SHARED and self._shared_supported()
+        self._fused_router = ROUTER and self._router_supported()
         self.kctx.layer_number = layer_number
+        self._apply_decisions()
+
+    def _apply_decisions(self):
+        """The decisions to the context and, for an MXFP8 fused shared expert, to the experts."""
+        self.kctx.shared, self.kctx.mxfp8 = self._fused_shared, self._mxfp8
+        sh = self.shared_experts if self._fused_shared and self._mxfp8 else None
+        self.experts.shared_weights = (
+            None if sh is None else (sh.linear_fc1.weight, sh.linear_fc2.weight)
+        )
+
+    def _resolve(self, hidden_states):
+        """At the first forward (the context is built for one token count T, the same on every
+        rank): MXFP8 training and the fused router need T % 256, the fused router's seq_aux_loss at
+        most 4 sequences, the fused shared expert T % 512; then the layer's decisions are printed
+        once, at rank 0."""
+        if self._resolved:
+            return
+        self._resolved = True
+        bsz = hidden_states.shape[1]
+        T = hidden_states.numel() // hidden_states.shape[-1]
+        if self._mxfp8 and T % MXFP8_T_MULTIPLE:
+            self._mxfp8 = False
+            self._notes.append(
+                f"bf16 experts: {T} tokens per call, not a multiple of {MXFP8_T_MULTIPLE}"
+            )
+        why = None
+        if self._fused_router and T % ROUTER_T_MULTIPLE:
+            why = f"{T} tokens per call, not a multiple of {ROUTER_T_MULTIPLE}"
+        elif self._fused_router and self.router.get_aux_loss_coeff("seq_aux_loss") and bsz > 4:
+            why = f"seq_aux_loss over {bsz} sequences (at most 4)"
+        if why is not None:
+            self._fused_router = False
+            self._notes.append(f"Megatron's router: {why}")
+        if self._fused_shared and T % SHARED_T_MULTIPLE:
+            self._fused_shared = False
+            self._notes.append(
+                f"shared expert stays in Megatron: {T} tokens per call, not a multiple of "
+                f"{SHARED_T_MULTIPLE}"
+            )
+        self._apply_decisions()
+        if dist.get_rank() != 0:
+            return
+        c, n = self.config, self.layer_number
+        for why in self._notes:
+            print(f"[KOSMOS] layer {n}: {why}", flush=True)
+        what = ["MXFP8 experts" if self._mxfp8 else "KOSMOS experts (bf16)"]
+        what.append(f"top-k {c.moe_router_topk}")
+        if c.moe_apply_probs_on_input:
+            what.append("probs on input")
+        what.append("fused router" if self._fused_router else "Megatron's router")
+        if getattr(self, "use_shared_expert", False):
+            gated = self._fused_shared and self.shared_experts.use_shared_expert_gate
+            what.append(
+                ("fused shared expert" + (" with gate" if gated else ""))
+                if self._fused_shared
+                else "Megatron's shared expert"
+            )
+        print(f"[KOSMOS] layer {n}: {', '.join(what)}", flush=True)
 
     def _mxfp8_supported(self, layer_number):
         """MXFP8 experts: an mxfp8-recipe run, a layer Megatron runs in FP8, H a multiple of 1024
-        and a library with the MXFP8 entry points."""
+        and a library with the MXFP8 training entry points."""
         c = self.config
-        if not MXFP8 or c.fp8 is None or c.fp8_recipe != "mxfp8":
+        if c.fp8 is None or c.fp8_recipe != "mxfp8":
             return False
         if layer_number is not None and is_first_last_bf16_layer(c, layer_number - 1):
             return False
         why = None
-        if c.hidden_size % MXFP8_H_MULTIPLE:
+        if not MXFP8:
+            why = "KOSMOS_MXFP8=0"
+        elif c.hidden_size % MXFP8_H_MULTIPLE:
             why = f"hidden size not a multiple of {MXFP8_H_MULTIPLE}"
-        elif not hasattr(_kosmos(), "quantize_mxfp8"):
-            why = "kosmos module without the MXFP8 entry points"
+        elif not hasattr(_kosmos(), "quantize_mxfp8") or not all(
+            hasattr(_kosmos().MoeContext, f) for f in _MXFP8_CALLS
+        ):
+            why = "kosmos module without the MXFP8 training entry points"
         if why is not None:
-            if layer_number is not None:
-                print(f"[KOSMOS] layer {layer_number}: bf16 experts: {why}", flush=True)
+            self._notes.append(f"bf16 experts: {why}")
             return False
-        if layer_number is not None and dist.get_rank() == 0:
-            print(f"[KOSMOS] layer {layer_number}: MXFP8 experts", flush=True)
         return True
 
     def _shared_supported(self):
-        """The shared expert fits the KOSMOS launches: one ungated SwiGLU MLP of the experts' intermediate
-        size, bf16 linears without bias or fused norm, and a library with the shared entry points."""
+        """The shared expert fits the KOSMOS launches: one SwiGLU MLP of the experts' intermediate
+        size, bf16 linears without bias or fused norm (bf16 run, or an mxfp8 run: in the layer's
+        precision), and a library with the shared entry points."""
         c, sh = self.config, getattr(self, "shared_experts", None)
         if not getattr(self, "use_shared_expert", False) or sh is None:
             return False
         fc1, fc2 = getattr(sh, "linear_fc1", None), getattr(sh, "linear_fc2", None)
         w1, w2 = getattr(fc1, "weight", None), getattr(fc2, "weight", None)
         H, I = c.hidden_size, c.moe_ffn_hidden_size
+        gated = c.moe_shared_expert_gate or getattr(sh, "use_shared_expert_gate", False)
         why = None
-        if c.moe_shared_expert_gate or getattr(sh, "use_shared_expert_gate", False):
-            why = "shared expert gate"
+        if gated and "sgate" not in (_kosmos().MoeContext.forward_shared.__doc__ or ""):
+            why = "shared expert gate (kosmos module without sgate)"
+        elif gated and c.moe_router_topk < 6:
+            why = "shared expert gate with top-k < 6 (the library's gate needs top-k 6, 8 or 10)"
         elif not c.gated_linear_unit or c.activation_func is not torch.nn.functional.silu:
             why = "not SwiGLU"
         elif c.add_bias_linear or any(getattr(m, "bias", None) is not None and m.bias.numel() for m in (fc1, fc2)):
             why = "bias"
         elif w1 is None or w2 is None or tuple(w1.shape) != (2 * I, H) or tuple(w2.shape) != (H, I):
             why = "shared intermediate size != moe_ffn_hidden_size"
+        elif is_float8tensor(w1) or is_float8tensor(w2):
+            why = "FP8 primary weights (--fp8-param-gather)"
         elif w1.dtype != torch.bfloat16 or w2.dtype != torch.bfloat16:
             why = "not bf16"
-        elif hasattr(fc1, "layer_norm_weight") or c.fp8 or getattr(c, "fp4", None):
-            why = "fused norm or low precision"
+        elif hasattr(fc1, "layer_norm_weight"):
+            why = "fused norm"
+        elif c.fp8 and c.fp8_recipe != "mxfp8":
+            why = f"FP8 recipe {c.fp8_recipe} (KOSMOS runs it in bf16 or MXFP8)"
+        elif getattr(c, "fp4", None):
+            why = "FP4"
         elif not hasattr(_kosmos().MoeContext, "forward_router_shared"):
             why = "kosmos module without the shared entry points"
         if why is not None:
-            if self.layer_number in (None, 1):
-                print(f"[KOSMOS] shared expert stays in Megatron: {why}", flush=True)
+            self._notes.append(f"shared expert stays in Megatron: {why}")
             return False
         return True
 
     def shared_experts_compute(self, hidden_states):
         # Fused: the shared expert runs in the KOSMOS launches (routed_experts_compute); no output here.
-        T = hidden_states.numel() // hidden_states.shape[-1]
-        self._sh_active = self._fused_shared and T % SHARED_T_MULTIPLE == 0
-        if self._sh_active:
+        self._resolve(hidden_states)
+        if self._fused_shared:
             return None
         return super().shared_experts_compute(hidden_states)
 
-    def _shared_weights(self):
-        if not self._sh_active:
-            return None, None
+    def _shared_args(self, hidden_states):
+        """(Ws1, Ws2, sgate) of the fused shared expert, or Nones. sgate [T] fp32: the gate's
+        sigmoid(x w_sg) (SharedExpertMLP.forward's), in autograd; None: ungated."""
+        if not self._fused_shared:
+            return None, None, None
         sh = self.shared_experts
-        return sh.linear_fc1.weight, sh.linear_fc2.weight
+        sgate = None
+        if sh.use_shared_expert_gate:
+            logits = torch.nn.functional.linear(hidden_states, sh.gate_weight)
+            sgate = torch.sigmoid(logits.float()).view(-1)
+        return sh.linear_fc1.weight, sh.linear_fc2.weight, sgate
+
+    def _mx_experts(self):
+        """The experts argument of the KOSMOS functions: MXFP8 GEMMs or (None) bf16."""
+        return self.experts if self._mxfp8 else None
+
+    def _router_score(self):
+        """The kosmos score function of Megatron's router config, or None (no fused router)."""
+        c = self.config
+        name = _ROUTER_SCORES.get(c.moe_router_score_function)
+        if c.moe_router_score_function == "softmax" and c.moe_router_pre_softmax:
+            name = "ROUTER_SOFTMAX_PRE"
+        return getattr(_kosmos(), name, None) if name else None
+
+    def _router_groups(self):
+        """(groups, group_topk) of the group-limited routing; (0, 0) when every group is selected
+        (one group, or group_topk = groups: plain top-k)."""
+        c = self.config
+        groups, gtopk = c.moe_router_num_groups or 0, c.moe_router_group_topk or 0
+        if groups <= 1 or gtopk == groups:
+            return 0, 0
+        return groups, gtopk
 
     def _router_supported(self):
+        """The fused router computes Megatron's routing, aux loss and their gradients for this
+        config (the per-call limits are _resolve's); else Megatron's router, with the reason noted."""
         c, r = self.config, self.router
-        return (
-            c.moe_router_score_function in ("sigmoid", "softmax")
-            and not (c.moe_router_score_function == "softmax" and c.moe_router_pre_softmax)
-            and not r.get_aux_loss_coeff("global_aux_loss")
-            and not c.moe_z_loss_coeff
-            and not c.moe_input_jitter_eps
-            and not (r.get_aux_loss_coeff("seq_aux_loss") and r.get_aux_loss_coeff("aux_loss"))
-            and c.moe_router_force_biased is None
-            and not c.moe_enable_routing_replay
-        )
+        k, E = c.moe_router_topk, c.num_moe_experts
+        groups, gtopk = self._router_groups()
+        why = None
+        if self._router_score() is None:
+            why = f"score function {c.moe_router_score_function} (not in the kosmos module)"
+        elif c.moe_apply_probs_on_input:
+            why = "moe_apply_probs_on_input"
+        elif r.get_aux_loss_coeff("global_aux_loss"):
+            why = "global_aux_loss"
+        elif c.moe_z_loss_coeff:
+            why = "moe_z_loss_coeff"
+        elif c.moe_input_jitter_eps:
+            why = "moe_input_jitter_eps"
+        elif r.get_aux_loss_coeff("seq_aux_loss") and r.get_aux_loss_coeff("aux_loss"):
+            why = "seq_aux_loss with aux_loss"
+        elif c.moe_router_force_biased is not None:
+            why = "moe_router_force_biased"
+        elif c.moe_enable_routing_replay:
+            why = "moe_enable_routing_replay"
+        elif c.calculate_per_token_loss:
+            why = "calculate_per_token_loss (the in-kernel aux-loss gradient does not model it)"
+        elif self.is_mtp_layer:
+            why = "MTP layer (the in-kernel aux-loss gradient does not model it)"
+        elif c.context_parallel_size > 1:
+            why = "context parallelism (the in-kernel aux-loss gradient does not model it)"
+        elif c.moe_expert_capacity_factor is not None:
+            why = "moe_expert_capacity_factor (token dropping)"
+        elif E > 512:
+            why = f"{E} experts (at most 512)"
+        elif groups and (
+            groups > 64
+            or E % groups
+            or gtopk < 1
+            or gtopk > groups
+            or k % gtopk
+            or k // gtopk > 4
+            or k // gtopk > E // groups
+        ):
+            why = f"group-limited routing (groups {groups}, group_topk {gtopk}, top-k {k})"
+        if why is not None:
+            self._notes.append(f"Megatron's router: {why}")
+            return False
+        return True
 
     def route(self, hidden_states, padding_mask=None):
         # (None, None): the fused router routes inside the KOSMOS launches (routed_experts_compute).
+        self._resolve(hidden_states)
         if not self._fused_router or padding_mask is not None:
             return super().route(hidden_states, padding_mask)
         return None, None
 
     def _router_cfg(self, bsz):
-        """(sigmoid, groups, group_topk, aux_groups, aux_coeff, scale, force) of Megatron's router
+        """(score, groups, group_topk, aux_groups, aux_coeff, scale, force) of Megatron's router
         config."""
         c, r = self.config, self.router
         seq, aux = r.get_aux_loss_coeff("seq_aux_loss"), r.get_aux_loss_coeff("aux_loss")
         return (
-            int(c.moe_router_score_function == "sigmoid"),
-            c.moe_router_num_groups or 0,
-            c.moe_router_group_topk or 0,
+            self._router_score(),
+            *self._router_groups(),
             bsz if seq else (1 if aux else 0),
             seq or aux,
             c.moe_router_topk_scaling_factor or 1.0,
@@ -791,7 +1091,8 @@ class KosmosMoELayer(MoELayer):
             torch.is_grad_enabled(),
             seed,
             cfg,
-            *self._shared_weights(),
+            *self._shared_args(hidden_states),
+            self._mx_experts(),
         )
         record_routing_stats(r.layer_number, tpe)
         if r.enable_expert_bias and torch.is_grad_enabled():
@@ -823,18 +1124,6 @@ class KosmosMoELayer(MoELayer):
             # Megatron's routing on a fused-router layer: the context still goes on the router
             # workspace.
             self.kctx.get(hidden_states.shape[0], self._router_cfg(self._in_shape[1]))
-        if self._mxfp8:
-            out = KosmosMXFP8MoEFunction.apply(
-                hidden_states,
-                probs,
-                routing_map,
-                self.experts.weight1,
-                self.experts.weight2,
-                self.kctx,
-                torch.is_grad_enabled(),
-                self.experts,
-            )
-            return out, None
         out = KosmosMoEFunction.apply(
             hidden_states,
             probs,
@@ -843,7 +1132,8 @@ class KosmosMoELayer(MoELayer):
             self.experts.weight2,
             self.kctx,
             torch.is_grad_enabled(),
-            *self._shared_weights(),
+            *self._shared_args(hidden_states),
+            self._mx_experts(),
         )
         return out, None
 

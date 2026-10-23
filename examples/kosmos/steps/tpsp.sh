@@ -5,7 +5,7 @@
 # See LICENSE for license information.
 ###############################################################################
 # steps/tpsp.sh: Llama 3 8B / 70B / 405B TP+SP E2E, BF16 and MXFP8 (TPSP_PRECISIONS; train_llama3.sh, SEQ 8192, TP8,
-# E2E_ITERS (10) iterations, mock data; mxfp8: TE_FP8=1 TE_FP8_RECIPE=mxfp8, tag suffix _mxfp8), every published config
+# E2E_ITERS (20) iterations, mock data; mxfp8: TE_FP8=1 TE_FP8_RECIPE=mxfp8, tag suffix _mxfp8), every published config
 # x GA fusion x arm x precision, (arm, precision) order shuffled per (config, GA, rep). One TE build (TE_DIR) for every arm:
 #   base_noovl  TP_COMM_OVERLAP=0 (hipBLASLt + RCCL)
 #   kos_tpsp    NVTE_USE_KOSMOS=1 NVTE_KOSMOS_BULK=1 (every overlapped op on KOSMOS)
@@ -30,6 +30,8 @@ else
                 die "$TE_DIR/libtransformer_engine.so has no KOSMOS backend: run_all.sh setup --build" ;;
     esac
 fi
+FP_KOS=$(fingerprint "$TE_DIR")
+FP_BASE=$(fingerprint "$TE_BASE_DIR")
 sampler_start "$O/loadavg.log"
 OOM_RE="out of memory|OutOfMemoryError|hipErrorOutOfMemory|too many resources requested"
 declare -A FAIL=()   # model:arm:ga -> MBS:rep:class of its smallest-MBS failure
@@ -49,6 +51,7 @@ arm_env() {  # arm_env ARM GA: the arm's exports
     echo "export PYTHONPATH=$([ "$2" = 1 ] && echo "$APEX_SHIM_DIR:")$te\${PYTHONPATH:+:\$PYTHONPATH}"
     echo "export GA_FUSION=$2 HIP_VISIBLE_DEVICES=$HIP_VISIBLE_DEVICES${LLAMA_HF_HOME:+ HF_HOME=$LLAMA_HF_HOME}"
     echo "export ROCM_PATH=$CT_ROCM HSA_DISABLE_COREDUMP_ON_EXCEPTION=1 GEMM_TUNING=0"
+    [ -n "${TPSP_ALLOC_CONF:-}" ] && echo "export PYTORCH_CUDA_ALLOC_CONF=$TPSP_ALLOC_CONF"
     case $1 in
         base_noovl) ;;
         kos_tpsp)   echo "export NVTE_USE_KOSMOS=1 NVTE_KOSMOS_BULK=1 NVTE_KOSMOS_LOG=1" ;;
@@ -69,7 +72,9 @@ for ga in $TPSP_GA; do
                 [ "$arm" = base_noovl ] && est=$EST_NO
                 tag=llama${M}B_mbs${MBS}_gbs${GBS}_L${L}_${arm}${ptag}_ga${ga}_r${r}
                 RUN=$O/runs/$tag
-                if done_log "$RUN/output_perf.log" '^elapsed time per iteration: [0-9]'; then
+                fp=$FP_BASE; case $arm in kos_*) fp=$FP_KOS ;; esac
+                if done_log "$RUN/output_perf.log" '^elapsed time per iteration: [0-9]' &&
+                    same_build "$RUN" "$fp" "$O/runs.tsv"; then
                     log "$tag done already"; continue
                 fi
                 key=$M:$arm:$ga:$pr
@@ -94,15 +99,15 @@ for ga in $TPSP_GA; do
                 fi
                 next_port
                 ovl=1; [ "$arm" = base_noovl ] && ovl=0
-                hwq=$GPU_MAX_HW_QUEUES
-                for x in $TPSP_HWQ; do [ "${x%:*}" = "$M:$arm" ] && hwq=${x##*:}; done
                 rcp=0; [[ " $TPSP_RECOMPUTE_MODELS " == *" $M "* ]] && rcp=1
                 args="MODEL_SIZE=$M TP=8 PP=1 CP=1 MBS=$MBS BS=$GBS SEQ_LENGTH=8192 TOTAL_ITERS=$E2E_ITERS RECOMPUTE=$rcp"
                 case $pr in bf16) args="$args TE_FP8=0" ;; mxfp8) args="$args TE_FP8=1 TE_FP8_RECIPE=mxfp8" ;; esac
+                hwq=$GPU_MAX_HW_QUEUES; [ "$M" = 405 ] && hwq=$TPSP_HWQ_405
                 args="$args TP_COMM_OVERLAP=$ovl NUM_LAYERS_OVERRIDE=$L GPU_MAX_HW_QUEUES=$hwq MASTER_PORT=$PORT"
                 { arm_env "$arm" "$ga"
                   echo "MLM_DIR=$TPSP_MLM_DIR SCRIPT=$SCRIPT TMO=$TMO STALL_S=$stall"
                   echo "LLAMA_ARGS='$args'"; } | wfile "$RUN/run.env"
+                echo "$fp" | wfile "$RUN/fingerprint.txt"
                 cls=-
                 if dry; then  # the plan follows the published outcomes (TPSP_EST_FAIL)
                     for x in $TPSP_EST_FAIL; do

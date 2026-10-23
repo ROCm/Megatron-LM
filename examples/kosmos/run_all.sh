@@ -13,6 +13,7 @@
 #   a2a      Qwen3-235B / DeepSeek-V3 MoE E2E, every backend
 #   collect  Megatron's printed numbers -> OUT_ROOT/RESULTS_TPSP.md, RESULTS_A2A.md, RESULTS_A2A_internal.md
 #   scale    Llama 3 70B TP+SP weak and strong scaling over TP 2, 4, 8 (BF16) -> OUT_ROOT/RESULTS_SCALE.md
+#   fsdp     Llama 3 8B / 70B / 405B with PyTorch FSDP2 (DP 8), MBS x recompute sweep -> OUT_ROOT/fsdp/fsdp_best.csv
 set -uo pipefail
 KIT=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$KIT/lib/common.sh"
@@ -32,8 +33,8 @@ log "node $GPU_NAME ($GPU_ARCH, $NGPU GPUs, ${POWER_CAP_W:-?} W), out $OUT_ROOT,
 for i in "${!steps[@]}"; do
     s=${steps[$i]}
     case $s in
-        manual | setup | micro | tpsp | a2a | collect | scale) ;;
-        *) die "unknown step $s (manual setup micro tpsp a2a collect scale)" ;;
+        manual | setup | micro | tpsp | a2a | collect | scale | fsdp) ;;
+        *) die "unknown step $s (manual setup micro tpsp a2a collect scale fsdp)" ;;
     esac
     log "=== step $s${flags[$i]} ==="
     # shellcheck disable=SC2086

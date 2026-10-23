@@ -4,7 +4,7 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-# steps/a2a.sh: MoE (A2A) E2E through Megatron's example scripts, BF16 and MXFP8, E2E_ITERS (10) iterations, EP8: the Qwen3-235B
+# steps/a2a.sh: MoE (A2A) E2E through Megatron's example scripts, BF16 and MXFP8, E2E_ITERS (20) iterations, EP8: the Qwen3-235B
 # proxy (24 layers, recompute 3) and the DSv3 proxy with MOE_LAYER_FREQ=1 (3 MoE layers); GA fusion off, GEMM_TUNING=0
 # and ENABLE_MORI=false in every arm (the proxies export GA_FUSION / ENABLE_MORI true).
 # Every arm of A2A_ARMS, plus A2A_ABLATIONS and (A2A_PRIMUS=1) Primus's own workflow.
@@ -45,6 +45,7 @@ if [[ " $A2A_ABLATIONS " == *":noovl "* ]] || { [[ " $A2A_PRECISIONS " == *" mxf
         else bash "$KIT/tools/gen_scripts.sh" "$m" "$A2A_MLM_DIR" "$O" > /dev/null || die "cannot derive the e2e scripts"; fi
     done
 fi
+FP=$(fingerprint "$TE_DIR")
 sampler_start "$O/loadavg.log"
 PORT=$((PORT0 + 500))   # apart from the tpsp ports
 case $A2A_ROUTING in
@@ -108,7 +109,9 @@ arm_env() {  # arm_env MODEL ARM VARIANT RUN ROUTING PRECISION: exports applied 
         balanced) ;;
         natural)  echo "export FORCE_BALANCE=false MOE_ROUTING_STATS=$run/routing" ;;
     esac
-    cf=$(eval echo "\${KOSMOS_CF_${rt}_$m:-}")
+    aux=$(eval echo "\${A2A_AUX_${rt}_$m:-}")
+    [ -n "$aux" ] && echo "export MOE_AUX_LOSS=$aux"
+    cf=$(eval echo "\${KOSMOS_CF_${rt}_${m}_$pr:-\${KOSMOS_CF_${rt}_$m:-}}")
     if [ "$arm" = kosmos ] && [ -n "$cf" ]; then echo "export KOSMOS_CAPACITY_FACTOR=$cf"; fi
     pm=$(eval echo "\${MEGAMOE_POOL_${rt}_$m:-}")
     if [ "$arm" = megamoe ] && [ "$pr" = mxfp8 ] && [ -n "$pm" ]; then echo "export MEGAMOE_POOL_MULT=$pm"; fi
@@ -157,7 +160,9 @@ for r in $(seq 1 "$maxr"); do
         [ "$r" -le "$n" ] || continue
         tag=${m}_${arm}$([ "$var" = - ] || echo "_$var")$(pr_tag "$pr")$(rt_tag "$rt")_r$r
         RUN=$O/runs/$tag
-        if done_log "$RUN/rc" 'rc=0 '; then log "$tag done already"; continue; fi
+        if done_log "$RUN/rc" 'rc=0 ' && { [ "$arm" = primus ] || same_build "$RUN" "$FP" "$O/runs.tsv"; }; then
+            log "$tag done already"; continue
+        fi
         next_port
         if [ "$arm" = primus ]; then
             { echo "export PYTHONPATH=$PT_DIR:\$PYTHONPATH"
@@ -178,6 +183,7 @@ for r in $(seq 1 "$maxr"); do
               echo "export ROCM_PATH=$CT_ROCM HSA_DISABLE_COREDUMP_ON_EXCEPTION=1"
               echo "MLM_DIR=$A2A_MLM_DIR PROXY=$proxy TRAIN=$train TMO=$A2A_TMO STALL_S=$A2A_STALL_S PREC=$pr"; } | wfile "$RUN/run.env"
             arm_env "$m" "$arm" "$var" "$RUN" "$rt" "$pr" | wfile "$RUN/arm.env"
+            echo "$FP" | wfile "$RUN/fingerprint.txt"
             if [ "$pr" = mxfp8 ]; then plan_add "$(eval echo \$EST_A2A_MX_MIN_$m)"; else plan_add "$(eval echo \$EST_A2A_MIN_$m)"; fi
             gpu "$KOSMOS_CT" "$tag" "bash $KIT/tools/moe_run.sh $RUN > $RUN/runner.log 2>&1"
             rc=$?
