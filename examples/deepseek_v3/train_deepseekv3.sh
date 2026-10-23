@@ -269,6 +269,7 @@ if [ $MODEL_SIZE = 671B ]; then
         --moe-router-score-function sigmoid \
         --moe-router-num-groups ${EP} \
         --moe-router-group-topk 4 \
+        --moe-router-topk-scaling-factor 2.5 \
         --moe-router-enable-expert-bias \
         --moe-router-bias-update-rate 1e-3
     "

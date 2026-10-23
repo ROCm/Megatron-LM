@@ -173,7 +173,7 @@ case $MODEL_SIZE in
     NUM_EXPERTS=${NUM_EXPERTS:-128}
     MOE_INTERMEDIATE_SIZE=1536
     ROUTER_TOPK=${ROUTER_TOPK:-8}
-    MOE_AUX_LOSS=1e-3
+    MOE_AUX_LOSS=${MOE_AUX_LOSS:-1e-3}
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
     EP=${EP:-8}
@@ -203,7 +203,7 @@ case $MODEL_SIZE in
     NUM_EXPERTS=128
     MOE_INTERMEDIATE_SIZE=768
     ROUTER_TOPK=8
-    MOE_AUX_LOSS=1e-3
+    MOE_AUX_LOSS=${MOE_AUX_LOSS:-1e-3}
     EMBED_OPT="--untie-embeddings-and-output-weights"
 
     EP=${EP:-${EP:-8}}
