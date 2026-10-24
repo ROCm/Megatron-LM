@@ -1522,6 +1522,9 @@ def validate_args(args, defaults={}):
         assert args.num_experts % args.expert_model_parallel_size == 0, \
             "Number of experts should be a multiple of expert model parallel_size."
 
+    # Token dedup (see validate_moe_args).
+    validate_moe_args(args)
+
     # MoE router check
     if isinstance(args.moe_router_load_balancing_type, list) and len(args.moe_router_load_balancing_type) == 1:
         args.moe_router_load_balancing_type = args.moe_router_load_balancing_type[0]
@@ -1835,7 +1838,17 @@ def validate_args(args, defaults={}):
     return args
 
 def validate_moe_args(args, defaults={}):
-    pass
+    if getattr(args, 'moe_token_dedup', False):
+        if args.moe_token_dispatcher_type != 'alltoall':
+            raise ValueError(
+                "--moe-token-dedup currently only supports "
+                "--moe-token-dispatcher-type alltoall, got "
+                f"'{args.moe_token_dispatcher_type}'.")
+        if args.moe_expert_capacity_factor is not None or \
+                args.moe_pad_expert_input_to_capacity:
+            raise ValueError(
+                "--moe-token-dedup supports dropless routing only; remove "
+                "--moe-expert-capacity-factor and --moe-pad-expert-input-to-capacity.")
 
 def _print_args(title, args):
     """Print arguments."""
