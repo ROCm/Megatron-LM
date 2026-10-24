@@ -1,4 +1,5 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Literal, Optional
@@ -7,6 +8,7 @@ import torch
 from torch import Tensor
 
 from megatron.core import tensor_parallel
+from megatron.core.capture import get_capturer
 from megatron.core.config_logger import has_config_logger_enabled, log_config_to_disk
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.extensions.transformer_engine import TELMHeadColumnParallelLinear
@@ -559,6 +561,10 @@ class GPTModel(LanguageModule):
 
         rotary_pos_cos_sin = preproc_output[6] if len(preproc_output) == 7 else None
 
+        # Expert-affinity / route capture (env-var gated; no-op when disabled).
+        capturer = get_capturer()
+        capturer.begin_step(token_ids=input_ids, input_embeddings=decoder_input)
+
         # Run decoder.
         hidden_states = self.decoder(
             hidden_states=decoder_input,
@@ -573,6 +579,9 @@ class GPTModel(LanguageModule):
             padding_mask=padding_mask,
             **(extra_block_kwargs or {}),
         )
+
+        # Flush this micro-batch's captured routing to disk (no-op when disabled).
+        capturer.end_step()
 
         return self._postprocess(
             hidden_states=hidden_states,

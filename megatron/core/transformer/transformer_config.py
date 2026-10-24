@@ -860,6 +860,25 @@ class TransformerConfig(ModelParallelConfig):
     moe_latent_size: Optional[int] = None
     """Latent projection dimension for MoE. If None, MoE latent projections are not used."""
 
+    moe_expert_placement: Optional[dict] = None
+    """Custom global-expert-to-EP-rank placement, replacing the default contiguous placement.
+    A dict of the form {'default': list|None, 'layers': {int: list}} where each list is a
+    permutation of range(num_moe_experts) in rank-major slot order. None means contiguous
+    placement. Currently only supported with the 'alltoall' token dispatcher."""
+
+    moe_token_dedup: bool = False
+    """For all-to-all dispatch, send one hidden row per unique (token, destination
+    expert-parallel rank), then fan it out to all selected experts on that rank. The combine
+    direction is deduplicated symmetrically. The default dispatcher is unchanged when this
+    option is disabled."""
+
+    moe_token_dedup_weighted_combine: bool = True
+    """With moe_token_dedup, apply the routing probabilities in the combine's reduce kernel
+    (one weighted sum per wire row) instead of inside the experts, which then skip their
+    per-row multiply. Numerically equivalent; faster on the TE grouped-GEMM path, but keeps
+    each expert output for the backward. Ignored (experts-side weighting is used) with
+    moe_apply_probs_on_input, the TE op fuser, or a fused weighted activation."""
+
     moe_deepep_num_sms: int = 20
     """Number of SMs to use for DeepEP."""
 
@@ -1409,6 +1428,13 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.num_moe_experts is not None and self.num_moe_experts <= 0:
             raise ValueError("num_moe_experts must be non-negative.")
+
+        if self.moe_expert_placement is not None and self.moe_token_dispatcher_type != "alltoall":
+            raise ValueError("moe_expert_placement only works with alltoall token dispatcher.")
+
+        if self.moe_token_dedup and self.moe_token_dispatcher_type != "alltoall":
+            raise ValueError("moe_token_dedup only works with alltoall token dispatcher.")
+
 
         if self.num_moe_experts is not None and self.moe_ffn_hidden_size is None:
             self.moe_ffn_hidden_size = self.ffn_hidden_size
@@ -2686,4 +2712,3 @@ class MLATransformerConfig(TransformerConfig):
             assert (
                 self.apply_rope_fusion is False
             ), "Rope Fusion is not compatible with caching latents"
-

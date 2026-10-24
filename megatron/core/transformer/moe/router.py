@@ -1,4 +1,5 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 
 from abc import ABC, abstractmethod
 from typing import Optional, Union
@@ -6,6 +7,7 @@ from typing import Optional, Union
 import torch
 
 from megatron.core.inference.utils import InferenceMode
+from megatron.core.capture import get_capturer
 from megatron.core.jit import jit_fuser
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_logging import get_moe_metrics_tracker
@@ -134,6 +136,18 @@ class Router(ABC, MegatronModule):
     def set_layer_number(self, layer_number: int):
         """Set the layer number for the router."""
         self.layer_number = layer_number
+
+    def _capture_layer_number(self) -> int:
+        """Layer key used by the expert-affinity capture.
+
+        MTP routers reuse the decoder layer numbering, so they are offset past the
+        decoder layers (the same convention as the aux-loss tracker) to keep the
+        captured ``moe_layer_indices`` unique within a forward pass.
+        """
+        layer_number = self.layer_number if self.layer_number is not None else 0
+        if self.is_mtp_layer:
+            layer_number = layer_number + self.config.num_layers
+        return int(layer_number)
 
 
 class TopKRouter(Router):
@@ -608,11 +622,17 @@ class TopKRouter(Router):
         # Apply Z-Loss
         logits = self.apply_z_loss(logits, padding_mask=padding_mask)
 
+        # Expert-affinity capture (env-var gated; no-op unless CMOE_CAPTURE=1 and this
+        # forward falls inside the capture window). Sinkhorn routing is not captured.
+        capturer = get_capturer()
+        capture_router_choices = capturer.wants_router and self.routing_type != "sinkhorn"
+        expose_topk = capture_router_choices
+
         # Calculate probs and routing_map for token dispatching
         if self.routing_type == "sinkhorn":
             probs, routing_map = self.sinkhorn_load_balancing(logits)
         else:
-            probs, routing_map = topk_routing_with_score_function(
+            routing_output = topk_routing_with_score_function(
                 logits,
                 self.topk,
                 use_pre_softmax=self.config.moe_router_pre_softmax,
@@ -623,7 +643,23 @@ class TopKRouter(Router):
                 expert_bias=self.expert_bias,
                 fused=self.config.moe_router_fusion,
                 router_replay=self.router_replay,
+                return_topk=expose_topk,
             )
+            if expose_topk:
+                probs, routing_map, top_indices, top_probs = routing_output
+            if capture_router_choices:
+                # top_indices / top_probs are [num_tokens, topk] over logits' flattened
+                # [s, b] token axis; the capture format is [b, s, topk]. Recorded here,
+                # before padding-masking and token dropping, so it reflects the router's
+                # own decision -- padded tokens therefore still carry an expert choice
+                # even though they are dropped from the dispatch below.
+                capturer.record_router(
+                    self._capture_layer_number(),
+                    top_indices.view(seq_length, bsz, self.topk).transpose(0, 1),
+                    top_probs.view(seq_length, bsz, self.topk).transpose(0, 1),
+                )
+            elif not expose_topk:
+                probs, routing_map = routing_output
 
         # Zero padding tokens' probs only; do NOT mask `routing_map` (the dropless
         # argsort permute needs `routing_map.sum() == num_tokens * topk`).

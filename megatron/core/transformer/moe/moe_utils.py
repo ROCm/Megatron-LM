@@ -1,4 +1,5 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 
 import functools
 import math
@@ -748,7 +749,8 @@ def topk_routing_with_score_function(
     fused: bool = False,
     router_replay: Optional['RouterReplay'] = None,
     dense_output: bool = False,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+    return_topk: bool = False,
+) -> Tuple[torch.Tensor, ...]:
     """Compute the routing probabilities and map for top-k selection with score function.
 
     Args:
@@ -773,6 +775,13 @@ def topk_routing_with_score_function(
         dense_output (bool, optional): If True, return dense tensors [num_tokens, topk] instead of
                                        sparse tensors [num_tokens, num_experts]. Defaults to False.
 
+        return_topk (bool, optional): Additionally return the dense top-k selection
+                                      (indices and their probabilities) alongside the scattered
+                                      routing_probs / routing_map. Used by the expert-affinity
+                                      capture (see megatron/core/capture.py); forces the unfused
+                                      path since the fused kernel does not expose the top-k
+                                      indices. Defaults to False.
+
     Returns:
         Tuple[torch.Tensor, torch.Tensor]:
             When dense_output=False (default):
@@ -787,10 +796,15 @@ def topk_routing_with_score_function(
                   probabilities for each token's top-k selected experts.
                 - top_indices (torch.Tensor): Shape [num_tokens, topk]. The expert indices
                   selected for each token.
+        When ``return_topk`` is set, two extra tensors of shape [num_tokens, topk] follow:
+            - top_indices (torch.Tensor): The selected expert ids, ordered by score (slot 0 is
+              the top-1 expert).
+            - probs (torch.Tensor): The gate weight of the expert in the matching slot of
+              ``top_indices``.
     """
     assert logits.dim() == 2, f"Expected 2D logits [num_tokens, num_experts], got {logits.dim()}."
     num_tokens, num_experts = logits.shape
-    if fused:
+    if fused and not return_topk:
         if not HAVE_TE or fused_topk_with_score_function is None:
             raise ValueError(
                 "fused_topk_with_score_function is not available. Please install TE >= 2.6.0."
@@ -903,6 +917,8 @@ def topk_routing_with_score_function(
         routing_probs = torch.zeros_like(logits).scatter(1, top_indices, probs)
         routing_map = torch.zeros_like(logits).int().scatter(1, top_indices, 1).bool()
 
+    if return_topk:
+        return routing_probs, routing_map, top_indices, probs
     return routing_probs, routing_map
 
 

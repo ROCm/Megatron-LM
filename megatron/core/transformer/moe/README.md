@@ -433,8 +433,37 @@ EP All-to-All can consume 30-40% of training time without optimization. These fe
 |--------------|-------------|--------|
 | **EP A2A Overlap** | Overlaps All-to-All with computation by merging FWD-BWD passes of adjacent microbatches | `--overlap-moe-expert-parallel-comm --delay-wgrad-compute` |
 | **Shared Expert Overlap** | Runs shared expert computation concurrently with EP token transfer | `--moe-shared-expert-overlap` |
+| **Token Dedup** | Sends one All-to-All row per unique (token, destination EP rank) instead of one per (token, expert) | `--moe-token-dedup` |
 
 > **Requirements for EP A2A Overlap**: `expert_model_parallel_size > 1`, CUDA_DEVICE_MAX_CONNECTIONS > 1.
+
+#### Token Dedup (`--moe-token-dedup`)
+
+With the `alltoall` dispatcher a token is sent once per selected expert, even when several of its experts live on the
+same EP rank. `--moe-token-dedup` sends one row per unique (token, destination rank); the row carries the token's local
+expert ids and routing weights, the receiver expands it into expert-major order for the grouped GEMM, and the combine
+is deduplicated the same way. Routing and the rows each expert computes are unchanged; the routing weights travel in
+the activation dtype and the summation order of a token's expert outputs differs (both at bf16 rounding level).
+The combine applies the routing weights while it sums a wire row's expert outputs (`moe_token_dedup_weighted_combine`,
+default True), so the experts skip their per-row multiply; with `--moe-apply-probs-on-input` the weights are applied on
+the expert inputs as usual.
+
+> **Requirements**: `--moe-token-dispatcher-type alltoall`, `expert_model_parallel_size > 1`,
+> `--expert-tensor-parallel-size 1`, dropless routing (no capacity factor).
+
+#### Co-activation Expert Placement (`--moe-expert-placement`)
+
+`--moe-expert-placement <json>` reorders which global expert lives on which EP rank (a global or per-layer permutation
+in rank-major slot order), so that experts often selected together for the same token share a rank and dedup reaches
+them with fewer All-to-All rows. Checkpoints stay keyed by global expert id, so any placement loads from any checkpoint
+(`--no-load-optim` if the optimizer state was saved under a different placement). The placement is built offline from
+a route capture:
+
+```bash
+CMOE_CAPTURE=1 CMOE_CAPTURE_DIR=/path/routes CMOE_CAPTURE_START=<iter> CMOE_CAPTURE_CONS_ITERS=8 <training command>   # capture routes
+python tools/build_expert_placement.py /path/routes --iters <a>-<b> --num-experts <N> --ep-size <EP> [--nodes <n>] --out placement.json
+<training command> --moe-token-dedup --moe-expert-placement placement.json
+```
 
 ### Compute Optimization
 
@@ -554,6 +583,8 @@ For MoE models, certain configurations may prevent CUDA Graph capture of MoE lay
 | --moe-pad-expert-input-to-capacity | Pad to capacity | False |
 | --moe-token-drop-policy | Drop policy: probs, position | probs |
 | --moe-permute-fusion | Fuse permutation ops | False |
+| --moe-token-dedup | One All-to-All row per unique (token, destination EP rank) with the alltoall dispatcher | False |
+| --moe-expert-placement | Path to a per-layer expert placement JSON (from `tools/build_expert_placement.py`) | None |
 
 ### Performance Optimization
 | Argument | Description | Default |

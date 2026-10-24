@@ -1,4 +1,5 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, Zyphra Technologies Inc. All rights reserved.
 
 """Input/output checkpointing."""
 
@@ -412,6 +413,36 @@ class CheckpointType(Enum):
     GLOBAL = auto()
     TORCH_DCP = auto()
     FSDP_DTENSOR = auto()
+
+
+def _check_legacy_checkpoint_expert_placement(state_dict, ckpt_type, args):
+    """Prevent remapping rank-local expert tensors from legacy torch checkpoints."""
+    if ckpt_type != CheckpointType.LEGACY:
+        return
+
+    requested_path = getattr(args, 'moe_expert_placement_path', None)
+    checkpoint_args = state_dict.get('args', None)
+    saved_path = getattr(checkpoint_args, 'moe_expert_placement_path', None)
+    saved_placement = getattr(checkpoint_args, 'moe_expert_placement', None)
+    requested_placement = getattr(args, 'moe_expert_placement', None)
+
+    if saved_placement is None and saved_path is not None:
+        if requested_path and os.path.abspath(saved_path) == os.path.abspath(requested_path):
+            return
+    elif saved_placement == requested_placement:
+        return
+
+    saved_desc = saved_path if saved_path is not None else '<none>'
+    raise RuntimeError(
+        "Cannot safely load a legacy torch checkpoint with a different "
+        "--moe-expert-placement. Legacy torch checkpoints store expert "
+        "weights by local EP rank/slot, so changing placement at load time "
+        "assigns those tensors to different global experts and can diverge loss. "
+        "Load this checkpoint with its original placement, then save a new "
+        "checkpoint with --ckpt-format torch_dist before changing expert "
+        f"placement. Checkpoint placement: {saved_desc}; requested placement: "
+        f"{requested_path}."
+    )
 
 
 def _build_sharded_state_dict_metadata(args: Namespace, dp_cp_group: Optional[torch.distributed.ProcessGroup] = None) -> dict:
@@ -1828,6 +1859,16 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
             if not args.no_load_optim:
                 gen_sd_optim = optimizer
                 gen_sd_opt_param_scheduler = opt_param_scheduler
+                if getattr(args, 'moe_expert_placement', None) and args.use_distributed_optimizer:
+                    print_rank_0(
+                        'WARNING: loading distributed-optimizer state with a custom '
+                        '--moe-expert-placement. Positional optimizer formats (e.g. '
+                        'fully_reshardable) restore fp32 main params and Adam moments by '
+                        'buffer position, NOT by global expert id -- correct ONLY if this '
+                        'checkpoint was saved with the SAME placement. Resuming a '
+                        'differently-placed checkpoint corrupts the model on the first '
+                        'step; use --no-load-optim in that case.'
+                    )
 
         optim_sd_kwargs = dict(metadata=_build_sharded_state_dict_metadata(args), is_loading=True)
 
@@ -1853,6 +1894,8 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
     if state_dict is None:
         # Iteration and num_floating_point_operations_so_far default to 0.
         return 0, 0
+
+    _check_legacy_checkpoint_expert_placement(state_dict, ckpt_type, args)
 
     # Set checkpoint version.
     set_checkpoint_version(state_dict.get('checkpoint_version', 0))

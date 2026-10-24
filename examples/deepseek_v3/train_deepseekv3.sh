@@ -387,6 +387,29 @@ else
     fi
 fi
 
+# MoE communication: MOE_VARIANT=baseline (stock alltoall dispatcher), dedup
+# (--moe-token-dedup: one wire row per unique (token, destination EP rank); alltoall dispatcher, EP > 1, ETP = 1),
+# coactive (--moe-expert-placement $EXPERT_PLACEMENT_JSON: co-activation expert placement) or dedup_coactive (both).
+MOE_VARIANT="${MOE_VARIANT:-baseline}"
+case "$MOE_VARIANT" in
+    baseline)
+        ;;
+    dedup)
+        moe_options="${moe_options} --moe-token-dedup"
+        echo "[INFO] MoE variant dedup: --moe-token-dedup"
+        ;;
+    coactive|dedup_coactive)
+        [[ -n "${EXPERT_PLACEMENT_JSON:-}" ]] || { echo "[ERROR] MOE_VARIANT=${MOE_VARIANT} needs EXPERT_PLACEMENT_JSON"; exit 1; }
+        [[ "$MOE_VARIANT" != dedup_coactive ]] || moe_options="${moe_options} --moe-token-dedup"
+        moe_options="${moe_options} --moe-expert-placement ${EXPERT_PLACEMENT_JSON}"
+        echo "[INFO] MoE variant ${MOE_VARIANT}: ${moe_options##*--moe-}"
+        ;;
+    *)
+        echo "[ERROR] Unknown MOE_VARIANT '${MOE_VARIANT}' (baseline|dedup|coactive|dedup_coactive)"
+        exit 1
+        ;;
+esac
+
 # MXFP8: pad per-expert token counts for FP8 grouped GEMM (requires FP8 + non-allgather dispatcher).
 if [ "$PR" = fp8 ] && [ "${FP8_RECIPE:-delayed}" = mxfp8 ]; then
     moe_options="${moe_options} --moe-router-padding-for-quantization"
