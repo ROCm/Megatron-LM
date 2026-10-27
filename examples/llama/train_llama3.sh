@@ -242,7 +242,6 @@ GPT_ARGS="
     --micro-batch-size $MBS \
     --global-batch-size $BS \
     --train-iters $TOTAL_ITERS \
-    --no-async-tensor-model-parallel-allreduce \
     --bf16 \
     --no-masked-softmax-fusion \
 "
@@ -417,6 +416,12 @@ if [ "$TE_FP8" -eq 1 ]; then
     else
         echo "$TE_FP8_RECIPE is not supported"
         exit
+    fi
+
+    # FP8 amax reduction scope. Default on: restrict amax reduction to the TP (or TP-CP) group
+    TP_ONLY_AMAX_RED="${TP_ONLY_AMAX_RED:-1}"
+    if [ "$TP_ONLY_AMAX_RED" -eq 1 ]; then
+        EXTRA_ARGS="$EXTRA_ARGS --tp-only-amax-red"
     fi
 
     if [ "$FP8_PARAM_GATHER" -eq 1 ]; then

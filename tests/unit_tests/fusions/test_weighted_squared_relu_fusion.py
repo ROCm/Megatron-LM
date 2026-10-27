@@ -48,5 +48,8 @@ def test_weighted_squared_relu_fusion(input_dtype):
     # Grad accuracy w.r.t weights
     assert weights_fused.grad.dtype == weights.grad.dtype
     if input_dtype == torch.float32:
-        # For bf16 baseline weight grad computed in fp32 then cast may lose precision.
-        assert torch.allclose(weights_fused.grad, weights.grad, **tols)
+        # The weight grad reduces squared_relu(x) * grad_output over the hidden dim.
+        # The fused (jit) path reorders this fp32 summation relative to eager autograd,
+        # so use a looser tolerance than the (exact) forward/input-grad checks.
+        weight_tols = dict(rtol=1.0e-4, atol=1.0e-4)
+        assert torch.allclose(weights_fused.grad, weights.grad, **weight_tols)

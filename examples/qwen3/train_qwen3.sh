@@ -128,7 +128,14 @@ EVAL_ITERS=${EVAL_ITERS:--1}
 
 GEMM_TUNING="${GEMM_TUNING:-1}"
 USE_GROUPED_GEMM="${USE_GROUPED_GEMM:-true}"
-MOE_USE_LEGACY_GROUPED_GEMM="${MOE_USE_LEGACY_GROUPED_GEMM:-true}"
+# Grouped-GEMM backend for MoE experts: CK grouped GEMM is faster for bf16,
+# so enable it for bf16 and keep the default multi-stream (hipBLASLt) grouped GEMM for fp8.
+# Override NVTE_USE_CK_GROUPED_GEMM to force a specific backend.
+if [ "${PR}" = bf16 ]; then
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-1}"
+else
+    export NVTE_USE_CK_GROUPED_GEMM="${NVTE_USE_CK_GROUPED_GEMM:-0}"
+fi
 MOE_PERMUTE_FUSION="${MOE_PERMUTE_FUSION:-true}"
 NVTE_CK_USES_BWD_V3="${NVTE_CK_USES_BWD_V3:-1}"
 GPT_LAYER_IN_TE="${GPT_LAYER_IN_TE:-true}"
@@ -397,14 +404,6 @@ if [ "${USE_PRECISION_AWARE_OPTIMIZER:-false}" = true ] || [ "${USE_PRECISION_AW
     pao_options=" --use-precision-aware-optimizer --main-grads-dtype ${MAIN_GRADS_DTYPE} --exp-avg-dtype ${EXP_AVG_DTYPE} --exp-avg-sq-dtype ${EXP_AVG_SQ_DTYPE}"
 fi
 
-# FP8 MoE requires TE grouped GEMM; legacy grouped_gemm does not implement FP8 expert matmuls.
-if [ "$PR" = fp8 ]; then
-    if [ "${MOE_USE_LEGACY_GROUPED_GEMM:-false}" = true ]; then
-        echo "[INFO] PR=fp8: disabling legacy grouped GEMM (TE grouped GEMM required for FP8 MoE)."
-    fi
-    MOE_USE_LEGACY_GROUPED_GEMM=false
-fi
-
 # MoE options (Qwen3 MoE; DeepSeek-specific MLA flags are not used)
 if [ "$IS_MOE" -eq 1 ]; then
     if [ "$MOE_PERMUTE_FUSION" != false ]; then
@@ -425,10 +424,6 @@ if [ "$IS_MOE" -eq 1 ]; then
     "
     if [ "$USE_GROUPED_GEMM" = true ]; then
         moe_options="${moe_options} --moe-grouped-gemm"
-    fi
-    if [ $MOE_USE_LEGACY_GROUPED_GEMM = true ]; then
-        moe_options="${moe_options} --moe-use-legacy-grouped-gemm"
-    else
         # disable gemm tuning when using TE Group GEMM.
         GEMM_TUNING=0
         echo "[WARN] GEMM tuning is disabled when using TransformerEngine Group GEMM."
@@ -533,6 +528,11 @@ elif [ "$PR" = fp8 ]; then
         exit 1
         ;;
     esac
+    # FP8 amax reduction scope. Default on: restrict amax reduction to the TP (or TP-CP) group
+    TP_ONLY_AMAX_RED="${TP_ONLY_AMAX_RED:-1}"
+    if [ "$TP_ONLY_AMAX_RED" -eq 1 ]; then
+        pr_options="$pr_options --tp-only-amax-red"
+    fi
 fi
 
 if [ "$DO" = true ]; then
@@ -623,7 +623,6 @@ qwen_base_options=" \
 
 megatron_options=" \
     --log-throughput \
-    --no-async-tensor-model-parallel-allreduce \
     ${ga_fusion_opt} \
     ${data_args} \
     --lr ${LR} \
