@@ -69,7 +69,7 @@ export USE_GROUPED_GEMM=true
 export FORCE_BALANCE=true
 
 # --- cross-entropy fusion ---
-export CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
+export CE_FUSION_ARGS="--cross-entropy-fusion-impl native --cross-entropy-loss-fusion"
 
 # --- distributed optimizer ---
 export DO=true

@@ -3,6 +3,7 @@ from contextlib import nullcontext
 
 import pytest
 import torch
+import torch.nn.functional as F
 
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.enums import Fp8Recipe
@@ -17,19 +18,42 @@ from megatron.core.pipeline_parallel.utils import get_comm_stream, get_comp_stre
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
     DummyState,
-    apply_dispatcher_extra_kwargs,
+    apply_flex_backend_kwargs,
     build_data,
     compare_captures,
     deterministic_mode,
-    get_compare_tolerances,
     get_test_config,
-    get_valid_flex_dispatcher_backend,
+    get_valid_dispatcher_configs,
     get_valid_fp8_flags,
-    get_valid_token_dispatcher_types,
-    reinitialize_model_parallel_for_mori,
     reset_model,
 )
 from tests.unit_tests.test_utilities import Utils
+
+# Transformer Engine 2.17 aborts in the A2A overlap suite with a pybind11 GIL dec_ref failure.
+pytestmark = pytest.mark.flaky_in_dev
+
+
+def is_nccl_ep_zero_copy_available():
+    """Zero-copy needs the newer TE symm-mem APIs (symm_mem_alloc/is_symm_backed), absent in a plain
+    NCCL-EP build."""
+    from megatron.core.transformer.moe.fused_a2a import HAVE_TE_EP
+
+    if not HAVE_TE_EP:
+        return False
+    try:
+        from transformer_engine.pytorch.ep import is_symm_backed, symm_mem_alloc  # noqa: F401
+    except ImportError:
+        return False
+    return True
+
+
+def is_op_fuser_available():
+    """The static-shape/zero-copy path runs the TE op-fuser grouped GEMM (needs TE>=2.14 ops)."""
+    try:
+        from transformer_engine.pytorch.ops import GroupedLinear, ScaledSwiGLU  # noqa: F401
+    except ImportError:
+        return False
+    return is_te_min_version("2.14.0")
 
 
 def run_transformer_layer_ref_with_capture(model, input_tensors, iterations):
@@ -259,18 +283,7 @@ class TestA2AOverlap:
         )
 
     def teardown_method(self, method):
-        # MORI symmetric memory cannot be finalized and reinitialized safely in the
-        # same process. Drop the per-case op, but keep shmem alive until the class ends.
-        from megatron.core.transformer.moe.fused_a2a import reset_mori_op
-
-        reset_mori_op()
         Utils.destroy_model_parallel()
-
-    @classmethod
-    def teardown_class(cls):
-        from megatron.core.transformer.moe.fused_a2a import finalize_mori_shmem
-
-        finalize_mori_shmem()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     def test_transformer_layer_overlap_dense(self):
@@ -415,17 +428,15 @@ class TestA2AOverlap:
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
-    def test_transformer_layer_overlap(self, dispatcher_type, fp8_flag):
+    def test_transformer_layer_overlap(self, dispatcher_type, flex_backend, fp8_flag):
         """
         Verifies all-to-all overlap optimization in transformer layer produces
         the same results as the reference implementation.
         """
-
-        extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
+        extra_kwargs = {}
+        apply_flex_backend_kwargs(extra_kwargs, dispatcher_type, flex_backend)
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
@@ -463,71 +474,92 @@ class TestA2AOverlap:
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.skipif(
-        get_valid_flex_dispatcher_backend() != "mori", reason="MORI is not available"
+        not is_nccl_ep_zero_copy_available(), reason="NCCL EP zero-copy TE API is not available"
     )
-    def test_transformer_layer_overlap_mori(self):
-        """
-        MORI variant of ``test_transformer_layer_overlap``.
+    @pytest.mark.skipif(
+        not is_op_fuser_available(), reason="op-fuser (static-shape/zero-copy) needs TE>=2.14"
+    )
+    def test_transformer_layer_overlap_zero_copy(self):
+        """ncclEP zero-copy under 1F1B a2a overlap must match the non-overlap reference.
 
-        Kept as a dedicated test (rather than in the shared parametrization) because MORI's
-        ``EpDispatchCombineHandle`` requires the expert (ETPxEP) communicator to span whole
-        nodes. This test re-initializes a full-node expert-parallel layout that it fully
-        owns; interleaving that re-init with the sub-node parametrized cases corrupts the
-        shared process-group state and desyncs collectives. Skipped when the node's GPU
-        count is not a power of two.
+        Zero-copy stays enabled in both runs, so this isolates the overlap schedule. It also
+        compares the two ways zero-copy makes the dispatch-backward gradient symm-mem-backed:
+        the reference gets it from the op-fuser's ``grad_input_buffer``, the overlap run from
+        ``StageDispatchBwdGrad`` staging into the same buffer (plus the free_input symm guard).
+        bf16 op-fuser (SwiGLU, tp=1) -- no fp8/Blackwell dependency.
         """
-        ep_size = reinitialize_model_parallel_for_mori()
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", "mori")
-        extra_kwargs["expert_model_parallel_size"] = ep_size
+        extra_kwargs = {}
+        apply_flex_backend_kwargs(extra_kwargs, "flex", "ncclep")
+        extra_kwargs.update(
+            moe_ncclep_zero_copy=True,
+            moe_ncclep_static_shape=True,
+            use_transformer_engine_op_fuser=True,
+            gated_linear_unit=True,
+            activation_func=F.silu,
+            overlap_moe_expert_parallel_comm=True,
+        )
         config = get_test_config(extra_kwargs=extra_kwargs)
-        atol, rtol = get_compare_tolerances("mori")
         microbatches = 4
-        with deterministic_mode():
-            transformer_layer_spec = get_gpt_decoder_block_spec(
-                config=config, use_transformer_engine=True
-            )
-            gpt_model = GPTModel(
-                config=config,
-                transformer_layer_spec=transformer_layer_spec,
-                vocab_size=100,
-                pre_process=True,
-                post_process=True,
-                max_sequence_length=300,
-            )
+        from megatron.core.transformer.moe.fused_a2a import nccl_ep_finalize
+        from megatron.core.transformer.moe.token_dispatcher import _NCCLEPManager
 
-            params = reset_model(gpt_model)
-            input_tensors = [build_data() for _ in range(microbatches)]
+        try:
+            with deterministic_mode():
+                transformer_layer_spec = get_gpt_decoder_block_spec(
+                    config=config, use_transformer_engine=True
+                )
+                gpt_model = GPTModel(
+                    config=config,
+                    transformer_layer_spec=transformer_layer_spec,
+                    vocab_size=100,
+                    pre_process=True,
+                    post_process=True,
+                    max_sequence_length=300,
+                )
+                params = reset_model(gpt_model)
+                input_tensors = [build_data() for _ in range(microbatches)]
 
-            fp8_context = get_fp8_context(config, 0) if config.fp8 else nullcontext()
-            with fp8_context:
+                # The reference runs the layer directly instead of through the 1F1B schedule, so it
+                # must declare overlap=False: that is what makes get_expert_zero_copy_buffers hand
+                # the op-fuser the symm grad_input_buffer for the fc1 dgrad. Under overlap=True the
+                # buffer is withheld (the schedule detaches the dispatch output, so autograd would
+                # discard it) and StageDispatchBwdGrad supplies the symm gradient instead.
+                config.overlap_moe_expert_parallel_comm = False
                 capture_ref = run_transformer_layer_ref_with_capture(
                     gpt_model, input_tensors, microbatches
                 )
-            reset_model(gpt_model, params)
-            capture_a2a_overlap = run_transformer_layer_a2a_overlap_with_capture(
-                gpt_model, input_tensors, microbatches
-            )
-            comp_res = compare_captures(
-                capture_ref, capture_a2a_overlap, True, atol=atol, rtol=rtol
-            )
-            assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
+                config.overlap_moe_expert_parallel_comm = True
+
+                reset_model(gpt_model, params)
+                capture_a2a_overlap = run_transformer_layer_a2a_overlap_with_capture(
+                    gpt_model, input_tensors, microbatches
+                )
+                comp_res = compare_captures(capture_ref, capture_a2a_overlap, True)
+                assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
+        finally:
+            # zero-copy sets process-global ncclEP state (ep bootstrap mode + shared symm
+            # classvars). Reset in a finally: on failure the leaked classvars would otherwise make
+            # every later ncclEP test in this process fail too, hiding the real error.
+            nccl_ep_finalize()
+            _NCCLEPManager._zc_fwd_token_buf = None
+            _NCCLEPManager._zc_bwd_token_buf = None
+            _NCCLEPManager._zc_recv_topk_weights_buf = None
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
-    def test_mtp_layer_overlap(self, dispatcher_type, fp8_flag):
+    def test_mtp_layer_overlap(self, dispatcher_type, flex_backend, fp8_flag):
         """
         Verifies all-to-all overlap optimization in MTP layer produces
         the same results as the reference implementation.
         """
-
+        qk_layernorm = True
         extra_kwargs = {
-            "moe_token_dispatcher_type": dispatcher_type,
             "mtp_num_layers": 1,
             "mtp_loss_scaling_factor": 1.1,
+            "qk_layernorm": qk_layernorm,
         }
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
+        apply_flex_backend_kwargs(extra_kwargs, dispatcher_type, flex_backend)
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
@@ -541,7 +573,7 @@ class TestA2AOverlap:
             transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
                 num_experts=16,
                 moe_grouped_gemm=True,
-                qk_layernorm=True,
+                qk_layernorm=qk_layernorm,
                 multi_latent_attention=True,
             )
             mtp_block_spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, True)
@@ -605,93 +637,3 @@ class TestA2AOverlap:
             comp_res = compare_captures(capture_ref, capture_a2a_overlap, True, True)
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
-    @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.skipif(
-        get_valid_flex_dispatcher_backend() != "mori", reason="MORI is not available"
-    )
-    def test_mtp_layer_overlap_mori(self):
-        """
-        MORI variant of ``test_mtp_layer_overlap``. Kept as a dedicated test for the same
-        reason as ``test_transformer_layer_overlap_mori``: MORI needs a node-spanning
-        expert communicator, so it owns its full-node re-initialization here instead of
-        being interleaved into the sub-node parametrization.
-        """
-        ep_size = reinitialize_model_parallel_for_mori()
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", "mori")
-        extra_kwargs["expert_model_parallel_size"] = ep_size
-        extra_kwargs["mtp_num_layers"] = 1
-        extra_kwargs["mtp_loss_scaling_factor"] = 1.1
-        config = get_test_config(extra_kwargs=extra_kwargs)
-        atol, rtol = get_compare_tolerances("mori")
-        microbatches = 1
-        seq_len = 32
-        with deterministic_mode():
-            # init models
-            transformer_layer_spec = get_gpt_layer_with_transformer_engine_spec(
-                num_experts=16,
-                moe_grouped_gemm=True,
-                qk_layernorm=True,
-                multi_latent_attention=True,
-            )
-            mtp_block_spec = get_gpt_mtp_block_spec(config, transformer_layer_spec, True)
-            if mtp_block_spec is None:
-                # only last rank has mtp block
-                assert True
-                return
-            gpt_model = GPTModel(
-                config=config,
-                transformer_layer_spec=transformer_layer_spec,
-                mtp_block_spec=mtp_block_spec,
-                vocab_size=100,
-                pre_process=True,
-                post_process=True,
-                max_sequence_length=300,
-            )
-            gpt_model.decoder.final_layernorm = None
-            gpt_model.cuda()
-            params = reset_model(gpt_model)
-
-            # build input data
-            data = list(range(seq_len))
-            hidden_states = [build_data(seq_len) for _ in range(microbatches)]
-            input_ids = torch.tensor(data, dtype=torch.int64).repeat((1, 1)).cuda()
-            labels = torch.tensor(data, dtype=torch.int64).repeat((1, 1)).cuda()
-            position_ids = torch.tensor(data, dtype=torch.int64).repeat((1, 1)).cuda()
-            attention_mask = torch.ones((1, 1, seq_len, seq_len), dtype=bool).cuda()
-            # get rotary pos emb
-            _, rotary_pos_emb, rotary_pos_cos, rotary_pos_sin, _, _padding_mask = (
-                gpt_model._preprocess(input_ids, position_ids)
-            )
-            # reset model
-            params = reset_model(gpt_model)
-
-            # run reference implementation
-            capture_ref = run_mtp_layer_ref_with_capture(
-                model=gpt_model,
-                hidden_states=hidden_states,
-                input_ids=input_ids,
-                position_ids=position_ids,
-                labels=labels,
-                attention_mask=attention_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                microbatches=microbatches,
-            )
-            reset_model(gpt_model, params)
-            capture_a2a_overlap = run_mtp_layer_a2a_overlap_with_capture(
-                model=gpt_model,
-                hidden_states=hidden_states,
-                input_ids=input_ids,
-                position_ids=position_ids,
-                labels=labels,
-                attention_mask=attention_mask,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                microbatches=microbatches,
-            )
-            comp_res = compare_captures(
-                capture_ref, capture_a2a_overlap, True, True, atol=atol, rtol=rtol
-            )
-            assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
