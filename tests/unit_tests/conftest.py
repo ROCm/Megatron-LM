@@ -41,7 +41,13 @@ def _set_nccl_defaults():
     CI launch script and into pytest. Individual buckets that want
     production-like NCCL settings (e.g. MFSDP v2) can pop these in their own
     conftest before initializing their process group.
+
+    Skipped on ROCm: with RCCL <= 2.27.7 (ROCm 7.2.x), a low NCCL_MAX_NCHANNELS
+    leaves fewer P2P channels than P2P parts per peer, which silently corrupts
+    send/recv messages larger than ~32 MB (fixed upstream in ROCm/rocm-systems#6307).
     """
+    if torch.version.hip:
+        return
     os.environ.setdefault("NCCL_MAX_NCHANNELS", "1")
     os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
 
