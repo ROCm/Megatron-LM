@@ -138,8 +138,36 @@ class Utils:
             return
         Utils._destroy_model_parallel_process_groups()
         ps.destroy_model_parallel()
+        Utils._clear_dtensor_sharding_caches()
         Utils.inited = False
         torch.cuda.memory.empty_cache()
+
+    @staticmethod
+    def _clear_dtensor_sharding_caches():
+        """Drop DTensor sharding-propagation caches after process groups are destroyed.
+
+        DeviceMesh equality ignores process-group names, so a mesh rebuilt over new
+        groups hits cache entries holding the old mesh. DTensors created afterwards
+        (e.g. Megatron-FSDP params) then reference destroyed groups.
+
+        Upstream PyTorch bug, still open: https://github.com/pytorch/pytorch/issues/169814
+        PyTorch's own DTensor tests clear the cache the same way:
+        https://github.com/pytorch/pytorch/pull/172504
+        The id-based DeviceMesh redesign that would fix it was not merged:
+        https://github.com/pytorch/pytorch/pull/167753
+        """
+        try:
+            from torch.distributed.tensor import DTensor
+        except ImportError:
+            return
+        propagator = DTensor._op_dispatcher.sharding_propagator
+        for name in ("propagate_op_sharding", "_propagate_tensor_meta"):
+            cache_clear = getattr(getattr(propagator, name, None), "cache_clear", None)
+            if cache_clear is not None:
+                cache_clear()
+        clear_native_cache = getattr(torch._C, "_clear_DTensor_sharding_propagator_cache", None)
+        if clear_native_cache is not None:
+            clear_native_cache()
 
     @staticmethod
     def initialize_model_parallel(
