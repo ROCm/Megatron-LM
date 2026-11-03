@@ -256,7 +256,7 @@ case $MODEL_SIZE in
     GA_FUSION=false
     AC=${AC:-full}
     RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-64}
-    CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
+    CE_FUSION_ARGS="--cross-entropy-fusion-impl native --cross-entropy-loss-fusion"
     PAD_LEN=$SEQ_LEN
     ;;
 4B)
@@ -282,7 +282,7 @@ case $MODEL_SIZE in
     USE_FSDP2=false
     CKPT_FORMAT=${CKPT_FORMAT:-torch}
     GA_FUSION=false
-    CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
+    CE_FUSION_ARGS="--cross-entropy-fusion-impl native --cross-entropy-loss-fusion"
     PAD_LEN=$SEQ_LEN
     ;;
 8B)
@@ -333,7 +333,7 @@ case $MODEL_SIZE in
     USE_FSDP2=false
     CKPT_FORMAT=${CKPT_FORMAT:-torch}
     GA_FUSION=false
-    CE_FUSION_ARGS="--cross-entropy-fusion-impl te --cross-entropy-loss-fusion"
+    CE_FUSION_ARGS="--cross-entropy-fusion-impl native --cross-entropy-loss-fusion"
     PAD_LEN=$SEQ_LEN
     ;;
 *)

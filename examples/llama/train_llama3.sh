@@ -92,7 +92,7 @@ FP4_BF16_END="${FP4_BF16_END:-8}"        # Number of layers at end in BF16 (pape
 GRADIENT_ACCUMULATION_FUSION="${GRADIENT_ACCUMULATION_FUSION:-1}"  # fuse wgrad accumulation into the GEMM
 DDP_AVERAGE_IN_COLLECTIVE="${DDP_AVERAGE_IN_COLLECTIVE:-1}"        # fold gradient averaging into the DP collective
 CROSS_ENTROPY_LOSS_FUSION="${CROSS_ENTROPY_LOSS_FUSION:-1}"        # fused cross-entropy loss
-CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-te}"       # native | te (TE fused vocab-parallel cross-entropy)
+CROSS_ENTROPY_FUSION_IMPL="${CROSS_ENTROPY_FUSION_IMPL:-native}"   # native | te (TE fused CE rejected by args validation, stability issues)
 FUSED_SINGLE_QKV_ROPE="${FUSED_SINGLE_QKV_ROPE:-1}"               # fused QKV+RoPE kernel (TE; asserts if config unsupported, e.g. QK-layernorm)
 # NOTE: GRAD_REDUCE_IN_BF16 all-reduces gradients in BF16 instead of the FP32 default, halving DP-reduce
 # bandwidth at the cost of some gradient-comm precision. Convergence-neutral: a controlled 2x2 on C4
