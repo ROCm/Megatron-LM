@@ -146,7 +146,7 @@ class GatedDeltaNet(MegatronModule):
             fp8_align_size = get_fp8_align_size(self.config.fp8_recipe)
             assert self.in_proj_dim % fp8_align_size == 0, (
                 "For FP8, the innermost dimension of the GDN layer "
-                "input projection output tensor must be a multiple of 16."
+                f"input projection output tensor must be a multiple of {fp8_align_size}."
             )
         self.in_proj = build_module(
             submodules.in_proj,
