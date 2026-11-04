@@ -1,4 +1,4 @@
-# Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright (c) 2025, Songlin Yang, Jan Kautz, Ali Hatamizadeh.
 
 # Some of this code was adopted from https://github.com/huggingface/transformers
@@ -31,7 +31,7 @@ from megatron.core.ssm.utils import _split_tensor_factory
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.identity_op import IdentityOp
-from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.module import MegatronModule, TwoStageAttentionLayer
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.utils import (
     ensure_metadata_has_dp_cp_group,
@@ -56,6 +56,37 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+class _TorchL2Norm(torch.autograd.Function):
+    """Match FLA's saved-output gradient without its timing-based autotuning."""
+
+    @staticmethod
+    def forward(ctx, x, eps):
+        """Normalize in FP32 and save the rounded output used by FLA's backward."""
+        x_float = x.float()
+        rstd = 1.0 / torch.sqrt((x_float * x_float).sum(dim=-1, keepdim=True) + eps)
+        y = (x_float * rstd).to(x.dtype)
+        ctx.save_for_backward(y, rstd)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        """Apply the saved-output gradient formula in FP32."""
+        y, rstd = ctx.saved_tensors
+        y_float, dy_float = y.float(), dy.float()
+        dx = dy_float * rstd - (dy_float * y_float).sum(dim=-1, keepdim=True) * y_float * rstd
+        return dx.to(y.dtype), None
+
+
+def torch_l2norm(x: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
+    """Normalize the last dimension with FLA-compatible epsilon and dtype semantics.
+
+    Both passes compute in FP32. Backward uses the normalized output rounded to
+    the input dtype, matching FLA rather than differentiating an unrounded norm.
+    This path avoids timing-selected reduction layouts in deterministic training.
+    """
+    return _TorchL2Norm.apply(x, eps)
+
+
 @dataclass
 class GatedDeltaNetSubmodules:
     """
@@ -69,7 +100,10 @@ class GatedDeltaNetSubmodules:
 
 class GatedDeltaRuleInterface(Protocol):
     """
-    Unified typing protocol for GDN core computation interfaces.
+    Unified typing protocol for linear attention interfaces, compliant to upstream FLA interfaces.
+
+    Only ``q``/``k``/``v``/``g`` are common to every kernel, and only as keywords: each
+    variant inserts its own gates after ``g`` (e.g., ``beta`` for GDN, ``b``/``w`` for GDN2).
     """
 
     def __call__(
@@ -78,6 +112,7 @@ class GatedDeltaRuleInterface(Protocol):
         k: torch.Tensor,
         v: torch.Tensor,
         g: torch.Tensor,
+        *,
         scale: float | None = None,
         initial_state: torch.Tensor | None = None,
         output_final_state: bool = False,
@@ -87,7 +122,7 @@ class GatedDeltaRuleInterface(Protocol):
     ) -> tuple[torch.Tensor, torch.Tensor | None]: ...
 
 
-class _GDNBase(MegatronModule):
+class _GDNBase(MegatronModule, TwoStageAttentionLayer):
     """Common base class for the Gated Delta Net (GDN) family of layers.
 
     Hosts everything the GDN variants share: the fused input projection, causal
@@ -118,8 +153,10 @@ class _GDNBase(MegatronModule):
         A_init_range: tuple[float, float] = (1, 16),
         pg_collection: ProcessGroupCollection = None,
         *,
+        is_mtp_layer: bool = False,
         name: str | None = None,
         cp_comm_type: str | None = None,
+        pp_layer_offset: int = 0,
     ):
         """
         Args:
@@ -133,11 +170,15 @@ class _GDNBase(MegatronModule):
             A_init_range: The initialization range for the attention weights.
             pg_collection: The required process groups to use for tensor model parallel and context
                 parallel.
+            is_mtp_layer: Accepted for TransformerLayer compatibility and ignored because GDN
+                does not have MTP-specific construction behavior.
             name (str | None): module instance name passed top-down from its paranet module
             cp_comm_type (Optional[str]): Accepted for TransformerLayer compatibility and
                 ignored; GDN implements context parallelism with its own all-to-alls rather
                 than the attention CP communication schemes.
+            pp_layer_offset: Offset of this pipeline stage's first global layer.
         """
+        del is_mtp_layer
         if not HAVE_FLA:
             raise ImportError(
                 "FLA is not installed. Please install it with "
@@ -148,6 +189,7 @@ class _GDNBase(MegatronModule):
 
         # Attributes from arguments
         self.layer_number = layer_number
+        self.pp_layer_offset = pp_layer_offset
         self.bias = bias
         self.conv_bias = conv_bias
         self.conv_init = conv_init
@@ -278,8 +320,24 @@ class _GDNBase(MegatronModule):
             tp_group=self.pg_collection.tp,
             name=(name + ".out_proj") if name is not None else None,
         )
-
         self.reset_parameters()
+
+    def supports_two_stage_attention(self) -> bool:
+        """Output-norm recomputation requires the original atomic forward path."""
+        return not self.recompute_norm_out
+
+    def forward_post_core_attn(
+        self, norm_out: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply a GDN variant's output projection to its normalized recurrence output."""
+        nvtx_range_push(suffix="out_proj")
+        out, out_bias = self.out_proj(norm_out)
+        nvtx_range_pop(suffix="out_proj")
+
+        if self.recompute_norm_out:
+            self.norm_out_checkpoint.discard_output_and_register_recompute(out)
+
+        return out, out_bias
 
     def _setup_variant_attrs(self):
         """Set variant specifics on the module. Called once from ``__init__``.
@@ -296,18 +354,26 @@ class _GDNBase(MegatronModule):
         """
         raise NotImplementedError
 
+    def _reset_dt_bias(self):
+        """Initialize ``dt_bias``. Called from ``reset_parameters`` under the RNG tracker.
+
+        Defaults to ones; variants whose kernel expects a different step-size
+        parametrization override this.
+        """
+        torch.ones(
+            self.dt_bias_dim,
+            dtype=self.config.params_dtype,
+            device=torch.cuda.current_device(),
+            out=self.dt_bias.data,
+        )
+
     def reset_parameters(self):
         """Reset the parameters."""
         if self.config.perform_initialization:
             with get_cuda_rng_tracker().fork():
                 if self.conv_init is not None:
                     nn.init.uniform_(self.conv1d.weight, -self.conv_init, self.conv_init)
-                torch.ones(
-                    self.dt_bias_dim,
-                    dtype=self.config.params_dtype,
-                    device=torch.cuda.current_device(),
-                    out=self.dt_bias.data,
-                )
+                self._reset_dt_bias()
                 A = torch.empty(
                     self.A_log.shape[0],
                     dtype=self.config.params_dtype,
@@ -325,9 +391,18 @@ class _GDNBase(MegatronModule):
         *,
         inference_params: Optional[BaseInferenceContext] = None,
         **kwargs,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        # pylint: disable=missing-function-docstring
-        raise NotImplementedError
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Run a GDN variant's recurrence followed by its output projection."""
+        norm_out = self.forward_pre_attn_and_core_attn(
+            hidden_states,
+            attention_mask,
+            inference_context=inference_context,
+            packed_seq_params=packed_seq_params,
+            sequence_len_offset=sequence_len_offset,
+            inference_params=inference_params,
+            **kwargs,
+        )
+        return self.forward_post_core_attn(norm_out)
 
     def _gated_norm_and_a2a(
         self,
@@ -348,23 +423,9 @@ class _GDNBase(MegatronModule):
         norm_out_hp = norm_out_hp.reshape(batch, seq_len, -1)
         norm_out_hp = norm_out_hp.transpose(0, 1).contiguous()
 
-        # CP all to all: HP to CP
-        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
-            if self.cp_size > 1:
-                norm_out_hp = norm_out_hp.index_select(0, thd_cp_a2a_inv)
-            norm_out = tensor_a2a_hp2cp(
-                norm_out_hp,
-                seq_dim=0,
-                head_dim=-1,
-                cp_group=self.pg_collection.cp,
-                redo_attention_load_balancing=False,
-            )
-        else:
-            norm_out = tensor_a2a_hp2cp(
-                norm_out_hp, seq_dim=0, head_dim=-1, cp_group=self.pg_collection.cp
-            )
-
-        return norm_out
+        return a2a_hp_to_cp(
+            norm_out_hp, self.cp_size, self.pg_collection.cp, packed_seq_params, thd_cp_a2a_inv
+        )
 
     @jit_fuser
     def _apply_gated_norm(self, x, gate):
@@ -383,17 +444,23 @@ class _GDNBase(MegatronModule):
         self,
         qkv: torch.Tensor,
         gate: torch.Tensor,
+        A_log_local_cp: torch.Tensor,
+        dt_bias_local_cp: torch.Tensor,
         batch: int,
         seq_len: int,
         *gate_feats: tuple[torch.Tensor],
-    ) -> tuple[torch.Tensor, ...]:
+    ) -> dict[str, torch.Tensor]:
         """
-        Prepare the query, key, value, gate, and variant gate-feature tensors for the
-        gated delta rule kernels.
+        Prepare all gated delta rule kernel inputs.
 
-        Fuses split, reshape, L2 norm, repeat_interleave, and contiguous operations.
-        ``gate_feats`` holds the variant-specific in_proj sections, which are returned
-        contiguous for the decay/gating computation in ``forward``.
+        Fuses split, reshape, L2 norm, decay/gate activations, repeat_interleave, and
+        contiguous operations. ``gate_feats`` holds the variant-specific in_proj
+        sections, which ``_compute_gates`` turns into the decay and gating tensors.
+
+        Returns:
+            (dict[str, Tensor]): Kernel inputs keyed by kernel argument name (``q``,
+            ``k``, ``v``, ``g``, plus the variant-specific gates), and the output
+            gate (z) tensor under the ``gate`` key, which is not a kernel input.
         """
         # Split qkv into query_key and value
         query_key, value = torch.split(
@@ -408,42 +475,57 @@ class _GDNBase(MegatronModule):
 
         # Apply L2 norm to query and key
         if self.use_qk_l2norm:
-            query_key = l2norm(query_key.contiguous())
+            normalize = torch_l2norm if self.config.deterministic_mode else l2norm
+            query_key = normalize(query_key.contiguous())
 
         # Split query and key
         split_size = self.qk_dim_local_tp // self.key_head_dim // self.cp_size
         query, key = torch.split(query_key, [split_size, split_size], dim=2)
 
         # Expand query and key if needed (grouped query attention)
-        if self.num_value_heads // self.num_key_heads > 1:
-            repeat_factor = self.num_value_heads // self.num_key_heads
+        repeat_factor = self.num_value_heads // self.num_key_heads
+        if repeat_factor > 1:
             query = query.repeat_interleave(repeat_factor, dim=2)
             key = key.repeat_interleave(repeat_factor, dim=2)
 
-        # Make all tensors contiguous
-        query = query.contiguous()
-        key = key.contiguous()
-        value = value.contiguous()
-        gate = gate.contiguous()
-        gate_feats = tuple(t.contiguous() for t in gate_feats)
+        g, variant_kernel_inputs = self._compute_gates(
+            A_log_local_cp, dt_bias_local_cp, batch, seq_len, *gate_feats
+        )
 
-        return query, key, value, gate, *gate_feats
+        kernel_inputs = {
+            "q": query.contiguous(),
+            "k": key.contiguous(),
+            "v": value.contiguous(),
+            "g": g.contiguous(),
+            "gate": gate.contiguous(),
+            **variant_kernel_inputs,
+        }
+        return kernel_inputs
 
-    @jit_fuser
-    def _compute_g_and_beta(
+    def _compute_gates(
         self,
         A_log_local_cp: torch.Tensor,
         dt_bias_local_cp: torch.Tensor,
-        alpha: torch.Tensor,
-        beta: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch: int,
+        seq_len: int,
+        *gate_feats: tuple[torch.Tensor],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
         """
-        Compute g (decay) and beta (sigmoid) for gated delta rule.
-        Fuses exp, softplus, mul, neg, and sigmoid operations.
+        Compute the log-decay ``g`` and the variant-specific kernel inputs.
+
+        Args:
+            A_log_local_cp: CP-local slice of ``A_log``.
+            dt_bias_local_cp: CP-local slice of ``dt_bias``.
+            batch: Batch size.
+            seq_len: Sequence length.
+            gate_feats: The variant-specific in_proj output sections (everything after
+                the qkv and output-gate sections, in ``feat_dim_split`` order).
+
+        Returns:
+            (tuple[Tensor, dict[str, Tensor]]): The log-decay ``g`` and a dict of the
+            remaining variant-specific kernel inputs keyed by kernel argument name.
         """
-        g = -A_log_local_cp.exp() * F.softplus(alpha.float() + dt_bias_local_cp)  # In fp32
-        beta = beta.sigmoid()
-        return g, beta
+        raise NotImplementedError
 
     def _resolve_cu_seqlens(
         self, cu_seqlens_padded, cu_seqlens_actual, total_seq_len, name, cp_size: int = 1
@@ -507,6 +589,12 @@ class _GDNBase(MegatronModule):
                     tp_group=tp_group,
                     dp_cp_group=metadata['dp_cp_group'],
                 )
+            elif name == "core_attention":
+                # The TE backend adds a parameter-free TEGatedDeltaNetAttention wrapper around
+                # GatedDeltaNetAttention solely as a kernel adapter. Its TE runtime/extra state is
+                # not part of the learned GDN state and has no FLA counterpart, so omit it to
+                # keep checkpoints portable between the TransformerEngine and FLA backends.
+                continue
             else:
                 module_sharded_sd = sharded_state_dict_default(
                     module, f"{prefix}{name}.", sharded_offsets, metadata, tp_group=tp_group
@@ -795,105 +883,85 @@ def tensor_a2a_hp2cp(
     return tensor
 
 
-####################
-# Torch native gated delta rule
-####################
-def torch_chunk_gated_delta_rule(
-    q,
-    k,
-    v,
-    g,
-    beta,
-    chunk_size=64,
-    initial_state=None,
-    output_final_state=False,
-    use_qk_l2norm_in_kernel=False,
-    cu_seqlens=None,
+def a2a_cp_to_hp(
+    qkvzba: torch.Tensor,
+    in_proj_split_sections: tuple[int, ...],
+    cp_size: int,
+    cp_group: torch.distributed.ProcessGroup,
+    cu_seqlens_q: torch.Tensor | None,
+    seq_len: int,
+    packed_seq_params: PackedSeqParams | None,
 ) -> tuple[torch.Tensor, torch.Tensor | None]:
-    # pylint: disable=line-too-long
-    '''
-    Torch-native implementation of chunked gated delta rule for deterministic mode.
-    Need this because FLA is not deterministic.
+    """Run GDN context-parallel to hidden-parallel A2A and return its inverse context.
 
-    Reference: https://github.com/huggingface/transformers/blob/144c8ce2809a2e21914017652700e1ecb450501e/src/transformers/models/qwen3_next/modeling_qwen3_next.py#L470-L547
-    '''
+    Args:
+        qkvzba: in_proj output in sbhd format, sharded along the sequence dim over CP.
+        in_proj_split_sections: per-section sizes of the in_proj output, local to this
+            TP rank, used to build the pre-a2a head permutation.
+        cp_size: context-parallel world size.
+        cp_group: context-parallel process group.
+        cu_seqlens_q: cumulative sequence lengths, required for the ``thd`` path.
+        seq_len: global (unsharded) sequence length.
+        packed_seq_params: packed-sequence params; the ``thd`` path is taken when its
+            ``qkv_format`` is ``'thd'``.
 
-    assert (
-        cu_seqlens is None
-    ), "cu_seqlens is not supported for torch_chunk_gated_delta_rule for now."
-
-    query, key, value = q, k, v
-    initial_dtype = query.dtype
-    if use_qk_l2norm_in_kernel:
-        query = l2norm(query, dim=-1, eps=1e-6)
-        key = l2norm(key, dim=-1, eps=1e-6)
-    query, key, value, beta, g = [
-        x.transpose(1, 2).contiguous().to(torch.float32) for x in (query, key, value, beta, g)
-    ]
-
-    batch_size, num_heads, sequence_length, k_head_dim = key.shape
-    v_head_dim = value.shape[-1]
-    pad_size = (chunk_size - sequence_length % chunk_size) % chunk_size
-    query = F.pad(query, (0, 0, 0, pad_size))
-    key = F.pad(key, (0, 0, 0, pad_size))
-    value = F.pad(value, (0, 0, 0, pad_size))
-    beta = F.pad(beta, (0, pad_size))
-    g = F.pad(g, (0, pad_size))
-    total_sequence_length = sequence_length + pad_size
-    scale = 1 / (query.shape[-1] ** 0.5)
-    query = query * scale
-
-    v_beta = value * beta.unsqueeze(-1)
-    k_beta = key * beta.unsqueeze(-1)
-    # reshape to chunks
-    query, key, value, k_beta, v_beta = [
-        x.reshape(x.shape[0], x.shape[1], -1, chunk_size, x.shape[-1])
-        for x in (query, key, value, k_beta, v_beta)
-    ]
-    g = g.reshape(g.shape[0], g.shape[1], -1, chunk_size)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=0
-    )
-
-    # chunk decay
-    g = g.cumsum(dim=-1)
-    decay_mask = ((g.unsqueeze(-1) - g.unsqueeze(-2)).tril().exp().float()).tril()
-    attn = -((k_beta @ key.transpose(-1, -2)) * decay_mask).masked_fill(mask, 0)
-    for i in range(1, chunk_size):
-        row = attn[..., i, :i].clone()
-        sub = attn[..., :i, :i].clone()
-        attn[..., i, :i] = row + (row.unsqueeze(-1) * sub).sum(-2)
-    attn = attn + torch.eye(chunk_size, dtype=attn.dtype, device=attn.device)
-    value = attn @ v_beta
-    k_cumdecay = attn @ (k_beta * g.exp().unsqueeze(-1))
-    last_recurrent_state = (
-        torch.zeros(batch_size, num_heads, k_head_dim, v_head_dim).to(value)
-        if initial_state is None
-        else initial_state.to(value)
-    )
-    core_attn_out = torch.zeros_like(value)
-    mask = torch.triu(
-        torch.ones(chunk_size, chunk_size, dtype=torch.bool, device=query.device), diagonal=1
-    )
-
-    # for each chunk
-    for i in range(0, total_sequence_length // chunk_size):
-        q_i, k_i, v_i = query[:, :, i], key[:, :, i], value[:, :, i]
-        attn = (q_i @ k_i.transpose(-1, -2) * decay_mask[:, :, i]).masked_fill_(mask, 0)
-        v_prime = (k_cumdecay[:, :, i]) @ last_recurrent_state
-        v_new = v_i - v_prime
-        attn_inter = (q_i * g[:, :, i, :, None].exp()) @ last_recurrent_state
-        core_attn_out[:, :, i] = attn_inter + attn @ v_new
-        last_recurrent_state = (
-            last_recurrent_state * g[:, :, i, -1, None, None].exp()
-            + (k_i * (g[:, :, i, -1, None] - g[:, :, i]).exp()[..., None]).transpose(-1, -2) @ v_new
+    Returns:
+        The hidden-parallel tensor and the sequence-dim inverse permutation to hand to
+        :func:`a2a_hp_to_cp` (``None`` outside the ``thd`` + CP>1 case).
+    """
+    if cp_size > 1:
+        # Pre-permute head dim so a single unsectioned a2a is equivalent to per-section a2a.
+        head_perm = _build_head_perm_for_split_sections(
+            in_proj_split_sections, cp_size, qkvzba.device
         )
+        qkvzba = qkvzba.index_select(-1, head_perm)
 
-    if not output_final_state:
-        last_recurrent_state = None
-    core_attn_out = core_attn_out.reshape(
-        core_attn_out.shape[0], core_attn_out.shape[1], -1, core_attn_out.shape[-1]
-    )
-    core_attn_out = core_attn_out[:, :, :sequence_length]
-    core_attn_out = core_attn_out.transpose(1, 2).contiguous().to(initial_dtype)
-    return core_attn_out, last_recurrent_state
+    thd_cp_a2a_inv = None
+    if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
+        qkvzba = tensor_a2a_cp2hp(
+            qkvzba, seq_dim=0, head_dim=-1, cp_group=cp_group, undo_attention_load_balancing=False
+        )
+        if cp_size > 1:
+            # Permute at the seq dim so that a single unsectioned a2a
+            # is equivalent to per-sequence a2a.
+            # This also folds the ``_undo_attention_load_balancing`` step.
+            thd_cp_a2a_idx, thd_cp_a2a_inv = _build_thd_cp_a2a_perm(cu_seqlens_q, cp_size, seq_len)
+            qkvzba = qkvzba.index_select(0, thd_cp_a2a_idx)
+    else:
+        qkvzba = tensor_a2a_cp2hp(qkvzba, seq_dim=0, head_dim=-1, cp_group=cp_group)
+
+    return qkvzba, thd_cp_a2a_inv
+
+
+def a2a_hp_to_cp(
+    norm_out: torch.Tensor,
+    cp_size: int,
+    cp_group: torch.distributed.ProcessGroup,
+    packed_seq_params: PackedSeqParams | None,
+    thd_cp_a2a_inv: torch.Tensor | None,
+) -> torch.Tensor:
+    """Run GDN hidden-parallel to context-parallel A2A using CP-to-HP context.
+
+    Args:
+        norm_out: gated-norm output in sbhd format, sharded along the head dim over CP.
+        cp_size: context-parallel world size.
+        cp_group: context-parallel process group.
+        packed_seq_params: packed-sequence params; the ``thd`` path is taken when its
+            ``qkv_format`` is ``'thd'``.
+        thd_cp_a2a_inv: sequence-dim inverse permutation returned by
+            :func:`a2a_cp_to_hp`, required on the ``thd`` path when ``cp_size > 1``.
+
+    Returns:
+        The context-parallel tensor, matching the layout of the GDN module input.
+    """
+    if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
+        if cp_size > 1:
+            assert thd_cp_a2a_inv is not None
+            norm_out = norm_out.index_select(0, thd_cp_a2a_inv)
+        norm_out = tensor_a2a_hp2cp(
+            norm_out, seq_dim=0, head_dim=-1, cp_group=cp_group, redo_attention_load_balancing=False
+        )
+    else:
+        norm_out = tensor_a2a_hp2cp(norm_out, seq_dim=0, head_dim=-1, cp_group=cp_group)
+
+    return norm_out

@@ -49,9 +49,15 @@ from megatron.training import (
     print_rank_0,
 )
 from megatron.training.argument_utils import pretrain_cfg_container_from_args
+from megatron.training.argument_utils import resolve_tokenizer_vocab_size
 from megatron.training.arguments import core_transformer_config_from_args, parse_and_validate_args
 from megatron.training.datasets.sft_dataset import SFTDataset
 from megatron.training.utils import get_blend_and_blend_per_split, is_first_or_last_pipeline_stage
+from megatron.training.global_vars import (
+    get_run_config,
+    initialize_runtime_services,
+    set_run_config,
+)
 
 # modelopt distillation
 try:
@@ -134,6 +140,7 @@ def model_provider(pre_process=True, post_process=True, vp_stage: Optional[int] 
         hybrid_layer_pattern=args.hybrid_layer_pattern,
         post_process=post_process,
         fp16_lm_cross_entropy=args.fp16_lm_cross_entropy,
+        logit_dtype=getattr(args, 'logit_dtype', None),
         parallel_output=True,
         share_embeddings_and_output_weights=not args.untie_embeddings_and_output_weights,
         position_embedding_type=args.position_embedding_type,
@@ -455,6 +462,7 @@ def is_dataset_built_on_rank(vp_stage=None):
 
 
 def core_gpt_dataset_config_from_args(args):
+    cfg = get_run_config()
     tokenizer = get_tokenizer()
 
     # Sometimes --data-path is too long, instead we parse it from a file.
@@ -463,7 +471,7 @@ def core_gpt_dataset_config_from_args(args):
     blend, blend_per_split = get_blend_and_blend_per_split(args)
 
     return GPTDatasetConfig(
-        random_seed=args.seed,
+        random_seed=cfg.rng.seed,
         sequence_length=args.seq_length,
         blend=blend,
         blend_per_split=blend_per_split,
@@ -567,6 +575,9 @@ if __name__ == "__main__":
     )
 
     full_config = pretrain_cfg_container_from_args(args)
+    set_run_config(full_config)
+    initialize_runtime_services(args, training=True)
+    resolve_tokenizer_vocab_size(full_config, args.padded_vocab_size)
     pretrain(full_config,
              train_valid_test_datasets_provider,
              ModelType.encoder_or_decoder,

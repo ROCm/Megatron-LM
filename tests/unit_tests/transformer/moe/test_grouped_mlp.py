@@ -1,6 +1,7 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 import argparse
+import os
 import sys
 from types import ModuleType, SimpleNamespace
 
@@ -10,11 +11,13 @@ import torch.nn.functional as F
 
 import megatron.core.transformer.moe.experts as experts_module
 from megatron.core.activations import squared_relu
+from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.fusions.fused_bias_geglu import quick_gelu
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_local_submodules,
     get_gpt_layer_with_transformer_engine_submodules,
 )
+from megatron.core.quantization.quant_config import RecipeConfig
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer, MoESubmodules
@@ -31,11 +34,58 @@ def test_op_fuser_transformer_config_args_are_exposed():
     _add_network_size_args(parser)
 
     args = parser.parse_args(
-        ["--use-transformer-engine-op-fuser", "--moe-mlp-glu-interleave-size", "16"]
+        [
+            "--use-transformer-engine-op-fuser",
+            "--moe-mlp-glu-interleave-size",
+            "16",
+            "--moe-use-grouped-tensor",
+        ]
     )
 
     assert args.use_transformer_engine_op_fuser is True
     assert args.moe_mlp_glu_interleave_size == 16
+    assert args.moe_use_grouped_tensor is True
+
+
+def test_op_fuser_enables_grouped_tensor():
+    config = TransformerConfig(
+        num_layers=1,
+        hidden_size=128,
+        num_attention_heads=4,
+        num_moe_experts=2,
+        moe_grouped_gemm=True,
+        use_transformer_engine_op_fuser=True,
+    )
+
+    assert config.moe_use_grouped_tensor is True
+
+
+def test_grouped_tensor_requires_grouped_gemm():
+    with pytest.raises(ValueError, match="requires moe_grouped_gemm=True"):
+        TransformerConfig(
+            num_layers=1,
+            hidden_size=128,
+            num_attention_heads=4,
+            num_moe_experts=2,
+            moe_use_grouped_tensor=True,
+        )
+
+
+def test_clamped_swiglu_allows_te_op_fuser():
+    config = TransformerConfig(
+        num_layers=1,
+        hidden_size=16,
+        num_attention_heads=4,
+        num_moe_experts=4,
+        moe_grouped_gemm=True,
+        gated_linear_unit=True,
+        activation_func=F.silu,
+        activation_func_clamp_value=10.0,
+        use_transformer_engine_op_fuser=True,
+    )
+
+    assert config.activation_func_clamp_value == 10.0
+    assert config.use_transformer_engine_op_fuser is True
 
 
 def test_remove_glu_interleaving_restores_contiguous_gate_and_linear_halves():
@@ -171,8 +221,12 @@ def test_fused_forward_caches_ops_and_forwards_expected_arguments(fc2_bias):
         moe_router_padding_for_quantization=False,
         moe_token_dispatcher_type=None,
         moe_flex_dispatcher_backend=None,
+        moe_use_grouped_tensor=True,
         moe_paged_stash=False,
     )
+    module._use_grouped_tensor = True
+    module.quantization_padding = lambda tensor, token_counts: (tensor, token_counts)
+    module.quantization_unpadding = lambda tensor, token_counts: tensor
     module._fused_ops = None
     module.linear_fc2 = SimpleNamespace(use_bias=fc2_bias)
     fused_ops = FakeFusedOps()
@@ -186,11 +240,11 @@ def test_fused_forward_caches_ops_and_forwards_expected_arguments(fc2_bias):
     torch.testing.assert_close(output, torch.ones_like(hidden_states))
     assert module._fused_ops[0] is fused_ops
     assert fused_ops.args[0] is hidden_states
-    assert fused_ops.args[1] is tokens_per_expert
-    assert fused_ops.args[2] is probs
-    assert fused_ops.args[3] is tokens_per_expert
+    torch.testing.assert_close(fused_ops.args[1], tokens_per_expert)
+    torch.testing.assert_close(fused_ops.args[2], probs)
+    torch.testing.assert_close(fused_ops.args[3], tokens_per_expert)
     if fc2_bias:
-        assert fused_ops.args[4] is probs
+        torch.testing.assert_close(fused_ops.args[4], probs)
     else:
         assert len(fused_ops.args) == 4
 
@@ -218,6 +272,20 @@ def test_apply_bias_combines_per_expert_bias_and_probs():
 
     torch.testing.assert_close(output, expected)
     assert output.dtype == intermediate.dtype
+
+
+def test_apply_bias_combines_packed_grouped_bias_and_accumulates_gradient():
+    intermediate = torch.tensor([[1.0, 2.0], [3.0, 4.0], [5.0, 6.0]])
+    packed_bias = torch.tensor([[10.0, 20.0], [100.0, 200.0]], requires_grad=True)
+    tokens_per_expert = torch.tensor([2, 1], dtype=torch.int64)
+    permuted_probs = torch.tensor([0.25, 0.5, 1.5])
+    expected = torch.tensor([[3.5, 7.0], [8.0, 14.0], [155.0, 306.0]])
+
+    output = TEGroupedMLP._apply_bias(intermediate, packed_bias, tokens_per_expert, permuted_probs)
+    output.sum().backward()
+
+    torch.testing.assert_close(output, expected)
+    torch.testing.assert_close(packed_bias.grad, torch.tensor([[0.75, 0.75], [1.5, 1.5]]))
 
 
 def test_make_fused_impl_pre_forward_hook_dispatches_submodule_hooks():
@@ -452,15 +520,31 @@ def _make_fake_te_namespace():
             self.activation_recompute_in_mlp = activation_recompute_in_mlp
 
     class FakeScaledClampedQGeGLU(torch.nn.Module):
-        def __init__(self, glu_interleave_size, *, activation_recompute_in_mlp=False, limit=None):
+        def __init__(
+            self,
+            glu_interleave_size,
+            *,
+            activation_recompute_in_mlp=False,
+            limit=None,
+            alpha=1.702,
+            glu_linear_offset=1.0,
+        ):
             super().__init__()
             self.glu_interleave_size = glu_interleave_size
             self.activation_recompute_in_mlp = activation_recompute_in_mlp
             self.limit = limit
+            self.alpha = alpha
+            self.glu_linear_offset = glu_linear_offset
 
     class FakeScaledSReLU(torch.nn.Module):
         def __init__(self, *, activation_recompute_in_mlp=False):
             super().__init__()
+            self.activation_recompute_in_mlp = activation_recompute_in_mlp
+
+    class FakeScaledTanhSReLU(torch.nn.Module):
+        def __init__(self, *, tanh_clamp_scale, activation_recompute_in_mlp=False):
+            super().__init__()
+            self.tanh_clamp_scale = tanh_clamp_scale
             self.activation_recompute_in_mlp = activation_recompute_in_mlp
 
     class FakeSequential(list):
@@ -476,6 +560,7 @@ def _make_fake_te_namespace():
                     ScaledSwiGLU=FakeScaledSwiGLU,
                     ScaledClampedQGeGLU=FakeScaledClampedQGeGLU,
                     ScaledSReLU=FakeScaledSReLU,
+                    ScaledTanhSReLU=FakeScaledTanhSReLU,
                     Sequential=FakeSequential,
                 ),
             )
@@ -484,8 +569,15 @@ def _make_fake_te_namespace():
     )
 
 
-def test_make_fused_ops_uses_clamped_qgeglu_for_quick_gelu(monkeypatch):
-    """quick_gelu + clamp value → ScaledClampedQGeGLU(limit=clamp)."""
+@pytest.mark.parametrize(
+    ("activation_func", "expected_alpha", "expected_offset"),
+    [(quick_gelu, 1.702, 1.0), (F.silu, 1.0, 0.0)],
+    ids=("quick-geglu", "clamped-swiglu"),
+)
+def test_make_fused_ops_uses_clamped_qgeglu(
+    monkeypatch, activation_func, expected_alpha, expected_offset
+):
+    """Clamped quick GeGLU and SwiGLU use the appropriate TE parameters."""
     fake_te, FakeGroupedLinear = _make_fake_te_namespace()
     monkeypatch.setattr(experts_module, "te", fake_te)
 
@@ -495,10 +587,10 @@ def test_make_fused_ops_uses_clamped_qgeglu_for_quick_gelu(monkeypatch):
         moe_mlp_glu_interleave_size=4,
         delay_wgrad_compute=False,
         activation_func_clamp_value=7.0,
-        activation_func=quick_gelu,
+        activation_func=activation_func,
         gated_linear_unit=True,
     )
-    module.activation_func = quick_gelu
+    module.activation_func = activation_func
     module.activation_recompute = True
     common = dict(
         device="cuda",
@@ -520,6 +612,8 @@ def test_make_fused_ops_uses_clamped_qgeglu_for_quick_gelu(monkeypatch):
     assert activation.glu_interleave_size == 4
     assert activation.activation_recompute_in_mlp is True
     assert activation.limit == 7.0
+    assert activation.alpha == expected_alpha
+    assert activation.glu_linear_offset == expected_offset
 
 
 def test_make_fused_ops_uses_scaled_srelu_for_weighted_squared_relu(monkeypatch):
@@ -533,6 +627,7 @@ def test_make_fused_ops_uses_scaled_srelu_for_weighted_squared_relu(monkeypatch)
         moe_mlp_glu_interleave_size=None,
         delay_wgrad_compute=False,
         activation_func_clamp_value=None,
+        activation_func_tanh_clamp_scale=None,
         activation_func=squared_relu,
         gated_linear_unit=False,
         use_fused_weighted_squared_relu=True,
@@ -555,6 +650,44 @@ def test_make_fused_ops_uses_scaled_srelu_for_weighted_squared_relu(monkeypatch)
     ops = module._make_fused_ops()
 
     assert type(ops[1]).__name__ == "FakeScaledSReLU"
+    assert ops[1].activation_recompute_in_mlp is True
+
+
+def test_make_fused_ops_uses_scaled_tanh_srelu_when_clamp_is_set(monkeypatch):
+    """A clamp scale selects ScaledTanhSReLU and is passed through to it."""
+    fake_te, FakeGroupedLinear = _make_fake_te_namespace()
+    monkeypatch.setattr(experts_module, "te", fake_te)
+
+    module = TEGroupedMLP.__new__(TEGroupedMLP)
+    torch.nn.Module.__init__(module)
+    module.config = SimpleNamespace(
+        moe_mlp_glu_interleave_size=None,
+        delay_wgrad_compute=False,
+        activation_func_clamp_value=None,
+        activation_func_tanh_clamp_scale=16.0,
+        activation_func=squared_relu,
+        gated_linear_unit=False,
+        use_fused_weighted_squared_relu=True,
+    )
+    module.activation_func = squared_relu
+    module.activation_recompute = True
+    common = dict(
+        device="cuda",
+        dtype=torch.bfloat16,
+        accumulate_into_main_grad=False,
+        single_grouped_weight=False,
+    )
+    module.linear_fc1 = FakeGroupedLinear(2, 4, 8, bias=False, **common)
+    module.linear_fc2 = FakeGroupedLinear(2, 8, 4, bias=False, **common)
+    module.linear_fc1.weight0 = torch.nn.Parameter(torch.ones(8, 4))
+    module.linear_fc1.weight1 = torch.nn.Parameter(torch.ones(8, 4))
+    module.linear_fc2.weight0 = torch.nn.Parameter(torch.ones(4, 8))
+    module.linear_fc2.weight1 = torch.nn.Parameter(torch.ones(4, 8))
+
+    ops = module._make_fused_ops()
+
+    assert type(ops[1]).__name__ == "FakeScaledTanhSReLU"
+    assert ops[1].tanh_clamp_scale == 16.0
     assert ops[1].activation_recompute_in_mlp is True
 
 
@@ -591,7 +724,12 @@ def test_make_fused_ops_rejects_scaled_srelu_with_gated_linear_unit(monkeypatch)
 
 
 def _install_fake_te_ops_modules(
-    monkeypatch, fake_te, *, include_clamped_qgeglu=True, include_scaled_srelu=True
+    monkeypatch,
+    fake_te,
+    *,
+    include_clamped_qgeglu=True,
+    include_scaled_srelu=True,
+    include_scaled_tanh_srelu=False,
 ):
     transformer_engine = ModuleType("transformer_engine")
     pytorch = ModuleType("transformer_engine.pytorch")
@@ -602,6 +740,8 @@ def _install_fake_te_ops_modules(
         ops.ScaledClampedQGeGLU = fake_te.pytorch.ops.ScaledClampedQGeGLU
     if include_scaled_srelu:
         ops.ScaledSReLU = fake_te.pytorch.ops.ScaledSReLU
+    if include_scaled_tanh_srelu:
+        ops.ScaledTanhSReLU = fake_te.pytorch.ops.ScaledTanhSReLU
     pytorch.ops = ops
     transformer_engine.pytorch = pytorch
     monkeypatch.setitem(sys.modules, "transformer_engine", transformer_engine)
@@ -610,12 +750,20 @@ def _install_fake_te_ops_modules(
 
 
 def _make_fused_impl_support_module(
-    FakeGroupedLinear, *, activation_func, gated_linear_unit, use_fused_weighted_squared_relu=False
+    FakeGroupedLinear,
+    *,
+    activation_func,
+    gated_linear_unit,
+    use_fused_weighted_squared_relu=False,
+    activation_func_clamp_value=None,
+    activation_func_tanh_clamp_scale=None,
 ):
     module = TEGroupedMLP.__new__(TEGroupedMLP)
     torch.nn.Module.__init__(module)
     module.config = SimpleNamespace(
         activation_func=activation_func,
+        activation_func_clamp_value=activation_func_clamp_value,
+        activation_func_tanh_clamp_scale=activation_func_tanh_clamp_scale,
         gated_linear_unit=gated_linear_unit,
         use_fused_weighted_squared_relu=use_fused_weighted_squared_relu,
         moe_apply_probs_on_input=False,
@@ -672,6 +820,33 @@ def test_is_fused_impl_supported_requires_scaled_fc2_bias(monkeypatch):
 
 
 @pytest.mark.parametrize(
+    ("te_217_or_later", "include_clamped_qgeglu", "expected"),
+    [(True, True, True), (False, True, False), (True, False, False)],
+)
+def test_is_fused_impl_supported_gates_clamped_swiglu(
+    monkeypatch, te_217_or_later, include_clamped_qgeglu, expected
+):
+    fake_te, FakeGroupedLinear = _make_fake_te_namespace()
+    monkeypatch.setattr(experts_module, "te", fake_te)
+    monkeypatch.setattr(experts_module, "HAVE_TE", True)
+    monkeypatch.setattr(
+        experts_module, "is_te_min_version", lambda version: version == "2.14.0" or te_217_or_later
+    )
+    _install_fake_te_ops_modules(
+        monkeypatch, fake_te, include_clamped_qgeglu=include_clamped_qgeglu
+    )
+
+    module = _make_fused_impl_support_module(
+        FakeGroupedLinear,
+        activation_func=F.silu,
+        gated_linear_unit=True,
+        activation_func_clamp_value=10.0,
+    )
+
+    assert module._is_fused_impl_supported() is expected
+
+
+@pytest.mark.parametrize(
     ("use_fused_weighted_squared_relu", "gated_linear_unit", "expected"),
     [(True, False, True), (False, False, False), (True, True, False)],
 )
@@ -692,6 +867,54 @@ def test_is_fused_impl_supported_gates_scaled_srelu_on_weighted_flag_and_non_glu
     )
 
     assert module._is_fused_impl_supported() is expected
+
+
+@pytest.mark.parametrize(
+    ("activation_func", "gated_linear_unit", "te_has_tanh_srelu", "expected"),
+    [
+        (squared_relu, False, True, True),
+        (squared_relu, False, False, False),
+        (F.silu, True, True, False),
+    ],
+    ids=["srelu-te-has-op", "srelu-te-lacks-op", "gated-clamp-is-situ-glu"],
+)
+def test_is_fused_impl_supported_gates_tanh_clamp_on_te_capability(
+    monkeypatch, activation_func, gated_linear_unit, te_has_tanh_srelu, expected
+):
+    fake_te, FakeGroupedLinear = _make_fake_te_namespace()
+    monkeypatch.setattr(experts_module, "te", fake_te)
+    monkeypatch.setattr(experts_module, "HAVE_TE", True)
+    monkeypatch.setattr(experts_module, "is_te_min_version", lambda _: True)
+    _install_fake_te_ops_modules(monkeypatch, fake_te, include_scaled_tanh_srelu=te_has_tanh_srelu)
+
+    module = _make_fused_impl_support_module(
+        FakeGroupedLinear,
+        activation_func=activation_func,
+        gated_linear_unit=gated_linear_unit,
+        use_fused_weighted_squared_relu=not gated_linear_unit,
+        activation_func_tanh_clamp_scale=16.0,
+    )
+
+    assert module._is_fused_impl_supported() is expected
+
+
+@pytest.mark.parametrize(
+    ("tanh_clamp_scale", "te_has_tanh_srelu", "raises"),
+    [(16.0, False, True), (16.0, True, False), (None, False, False)],
+    ids=["clamp-te-lacks-op", "clamp-te-has-op", "unclamped"],
+)
+def test_require_te_tanh_clamp_support(monkeypatch, tanh_clamp_scale, te_has_tanh_srelu, raises):
+    fake_te, _ = _make_fake_te_namespace()
+    monkeypatch.setattr(experts_module, "te", fake_te)
+    monkeypatch.setattr(experts_module, "HAVE_TE", True)
+    _install_fake_te_ops_modules(monkeypatch, fake_te, include_scaled_tanh_srelu=te_has_tanh_srelu)
+
+    config = SimpleNamespace(activation_func_tanh_clamp_scale=tanh_clamp_scale)
+    if raises:
+        with pytest.raises(RuntimeError, match="ScaledTanhSReLU"):
+            experts_module._require_te_tanh_clamp_support(config)
+    else:
+        experts_module._require_te_tanh_clamp_support(config)
 
 
 def test_is_fused_impl_supported_requires_scaled_srelu_op(monkeypatch):
@@ -1084,7 +1307,88 @@ class TestTEGroupedMLP:
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.internal
-    def test_gpu_fused_path_scales_fc2_bias(self):
+    @pytest.mark.parametrize("override_pattern", (None, "*experts*", "*linear_fc1", "*linear_fc2"))
+    def test_gpu_precision_override_keeps_experts_unfused(self, override_pattern):
+        """A per-module precision override must keep these experts off the op-fuser path.
+
+        The fused grouped-MLP kernels are FP8/NVFP4-only and select their recipe from the
+        global autocast state, not from the module's own quantization config. So a module the
+        precision config forces to high precision has to run unfused: otherwise it is silently
+        quantized anyway, and with GTP weight sharding its backward pass is handed an
+        unquantized weight the kernel cannot consume (AttributeError on `_columnwise_data`).
+
+        The fused op covers fc1 and fc2 jointly, so an override matching either one alone must
+        still disable it -- matching only fc2 is what the original GTP crash hit.
+        """
+        try:
+            from transformer_engine.pytorch.ops import GroupedLinear
+        except ImportError:
+            pytest.skip("TE op fuser API not available")
+
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(1, 1)
+
+        quant_recipe = None
+        if override_pattern is not None:
+            quant_recipe = RecipeConfig.from_config_dict(
+                {
+                    "configs": {
+                        "high_precision": {
+                            "transformer_engine_config_type": "TEQuantizationParams",
+                            "training_recipe": {},
+                        }
+                    },
+                    "matchers": {
+                        "experts_high_precision": {
+                            "type": "glob",
+                            "enabled": True,
+                            "pattern": override_pattern,
+                            "config": "high_precision",
+                        }
+                    },
+                }
+            )
+
+        tf_config = TransformerConfig(
+            num_layers=1,
+            hidden_size=self.hidden_size,
+            num_attention_heads=4,
+            num_moe_experts=self.num_experts,
+            use_cpu_initialization=False,
+            add_bias_linear=False,
+            gated_linear_unit=True,
+            activation_func=F.silu,
+            bias_activation_fusion=False,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+            moe_router_load_balancing_type="sinkhorn",
+            moe_router_topk=1,
+            moe_grouped_gemm=True,
+            use_transformer_engine_op_fuser=True,
+            quant_recipe=quant_recipe,
+        )
+        _set_random_seed(seed_=123, data_parallel_random_init=False)
+        submodules = get_submodules(
+            get_gpt_layer_with_transformer_engine_submodules(
+                self.num_experts, moe_grouped_gemm=True
+            ).mlp
+        )
+        # The override is resolved by module path, so the layer needs its name populated.
+        layer = MoELayer(tf_config, submodules, name="mlp")
+        layer = Float16Module(layer.config, layer).module
+        layer.cuda()
+        experts = layer.experts
+        assert isinstance(experts, TEGroupedMLP)
+
+        if override_pattern is None:
+            assert experts._with_fused_impl
+        else:
+            assert not experts._with_fused_impl
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.internal
+    @pytest.mark.parametrize("single_grouped_bias", (False, True))
+    def test_gpu_fused_path_scales_fc2_bias(self, monkeypatch, single_grouped_bias):
         """FC2 bias and its gradients must use the per-token router probability."""
         try:
             from transformer_engine.pytorch.ops import GroupedLinear
@@ -1094,6 +1398,8 @@ class TestTEGroupedMLP:
 
         if "scale_bias" not in inspect.signature(GroupedLinear.__init__).parameters:
             pytest.skip("Installed TE op fuser GroupedLinear lacks `scale_bias` support")
+        if single_grouped_bias:
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
 
         Utils.destroy_model_parallel()
         Utils.initialize_model_parallel(1, 1)
@@ -1115,6 +1421,7 @@ class TestTEGroupedMLP:
             moe_router_topk=1,
             moe_grouped_gemm=True,
             use_transformer_engine_op_fuser=True,
+            moe_single_grouped_bias=single_grouped_bias,
         )
         _set_random_seed(seed_=123, data_parallel_random_init=False)
         submodules = get_submodules(
@@ -1132,9 +1439,19 @@ class TestTEGroupedMLP:
             for linear in (experts.linear_fc1, experts.linear_fc2):
                 for expert_idx in range(self.num_experts):
                     getattr(linear, f"weight{expert_idx}").zero_()
-                    getattr(linear, f"bias{expert_idx}").zero_()
-            experts.linear_fc2.bias0.fill_(2.0)
-            experts.linear_fc2.bias1.fill_(4.0)
+                    if not single_grouped_bias:
+                        getattr(linear, f"bias{expert_idx}").zero_()
+                if single_grouped_bias:
+                    linear.bias.rowwise_data.zero_()
+            if single_grouped_bias:
+                packed_fc2_bias = experts.linear_fc2.bias.rowwise_data.view(
+                    self.num_experts, self.hidden_size
+                )
+                packed_fc2_bias[0].fill_(2.0)
+                packed_fc2_bias[1].fill_(4.0)
+            else:
+                experts.linear_fc2.bias0.fill_(2.0)
+                experts.linear_fc2.bias1.fill_(4.0)
 
         hidden_states = torch.zeros(
             3, self.hidden_size, dtype=torch.bfloat16, device="cuda", requires_grad=True
@@ -1158,14 +1475,200 @@ class TestTEGroupedMLP:
             torch.tensor([2.0, 2.0, 4.0], dtype=torch.bfloat16, device="cuda") * self.hidden_size
         )
         torch.testing.assert_close(probs.grad, expected_prob_grad)
-        torch.testing.assert_close(
-            experts.linear_fc2.bias0.grad,
-            torch.ones_like(experts.linear_fc2.bias0) * probs[:2].detach().sum(),
+        if single_grouped_bias:
+            assert experts.linear_fc2.bias.grad is not None
+            packed_dbias = experts.linear_fc2.bias.grad.view(self.num_experts, self.hidden_size)
+            torch.testing.assert_close(
+                packed_dbias[0], torch.ones_like(packed_dbias[0]) * probs[:2].detach().sum()
+            )
+            torch.testing.assert_close(
+                packed_dbias[1], torch.ones_like(packed_dbias[1]) * probs[2:].detach().sum()
+            )
+            assert experts._fused_ops[0][2].bias is experts.linear_fc2.bias
+        else:
+            torch.testing.assert_close(
+                experts.linear_fc2.bias0.grad,
+                torch.ones_like(experts.linear_fc2.bias0) * probs[:2].detach().sum(),
+            )
+            torch.testing.assert_close(
+                experts.linear_fc2.bias1.grad,
+                torch.ones_like(experts.linear_fc2.bias1) * probs[2:].detach().sum(),
+            )
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.internal
+    @pytest.mark.parametrize("use_op_fuser", (False, True), ids=("module", "op-fuser"))
+    @pytest.mark.parametrize(
+        "single_grouped_weight,single_grouped_bias",
+        ((True, False), (False, True), (True, True)),
+        ids=("single-weight", "single-bias", "single-weight-and-bias"),
+    )
+    def test_gpu_single_grouped_parent_gradient_parity(
+        self, monkeypatch, use_op_fuser, single_grouped_weight, single_grouped_bias
+    ):
+        """Single grouped parents must receive the same gradients as discrete parameters.
+
+        This is an integration test over the real MCore TEGroupedMLP wrapper. It covers both
+        gradient ownership mechanisms:
+
+        * the module path returns the packed FC2 bias to ``_apply_packed_bias``, where normal
+          PyTorch autograd must update the registered grouped parent;
+        * the op-fuser path reattaches the same wrapper parameters to TE op shells, whose custom
+          backward must return packed wgrad/dbias in the corresponding parent slots.
+
+        Comparing gradients directly is intentional. A forward or dgrad-only check would not
+        catch a disconnected grouped parent that the optimizer can never update.
+        """
+        try:
+            from transformer_engine.pytorch.module import GroupedLinear as ModuleGroupedLinear
+            from transformer_engine.pytorch.ops import GroupedLinear as OpGroupedLinear
+        except ImportError:
+            pytest.skip("Required TE GroupedLinear APIs are not available")
+        import inspect
+
+        module_parameters = inspect.signature(ModuleGroupedLinear.__init__).parameters
+        op_parameters = inspect.signature(OpGroupedLinear.__init__).parameters
+        if (
+            "use_grouped_tensor" not in module_parameters
+            or "single_grouped_bias" not in module_parameters
+            or "single_grouped_bias" not in op_parameters
+        ):
+            pytest.skip("Installed TE lacks native single grouped bias support")
+
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+
+        def build_experts(single_weight, single_bias):
+            config = TransformerConfig(
+                num_layers=1,
+                hidden_size=self.hidden_size,
+                num_attention_heads=4,
+                num_moe_experts=self.num_experts,
+                use_cpu_initialization=False,
+                add_bias_linear=True,
+                gated_linear_unit=True,
+                activation_func=F.silu,
+                bias_activation_fusion=False,
+                bias_dropout_fusion=False,
+                bf16=True,
+                params_dtype=torch.bfloat16,
+                moe_router_load_balancing_type="sinkhorn",
+                moe_router_topk=1,
+                moe_grouped_gemm=True,
+                moe_use_grouped_tensor=True,
+                use_transformer_engine_op_fuser=use_op_fuser,
+                moe_single_grouped_weight=single_weight,
+                moe_single_grouped_bias=single_bias,
+            )
+            submodules = get_submodules(
+                get_gpt_layer_with_transformer_engine_submodules(
+                    self.num_experts, moe_grouped_gemm=True
+                ).mlp
+            )
+            assert isinstance(submodules, MoESubmodules)
+            layer = MoELayer(config, submodules)
+            layer = Float16Module(layer.config, layer).module
+            layer.cuda()
+            assert isinstance(layer.experts, TEGroupedMLP)
+            return layer.experts
+
+        def copy_linear_params(reference_linear, target_linear):
+            reference_weights = torch.stack(
+                [
+                    getattr(reference_linear, f"weight{idx}").detach()
+                    for idx in range(self.num_experts)
+                ]
+            )
+            reference_biases = torch.stack(
+                [
+                    getattr(reference_linear, f"bias{idx}").detach()
+                    for idx in range(self.num_experts)
+                ]
+            )
+            with torch.no_grad():
+                if target_linear.single_grouped_weight:
+                    target_linear.weight.rowwise_data.view_as(reference_weights).copy_(
+                        reference_weights
+                    )
+                else:
+                    for idx in range(self.num_experts):
+                        getattr(target_linear, f"weight{idx}").copy_(reference_weights[idx])
+
+                if target_linear.single_grouped_bias:
+                    target_linear.bias.rowwise_data.view_as(reference_biases).copy_(
+                        reference_biases
+                    )
+                else:
+                    for idx in range(self.num_experts):
+                        getattr(target_linear, f"bias{idx}").copy_(reference_biases[idx])
+
+        def packed_grad(linear, name):
+            if getattr(linear, f"single_grouped_{name}"):
+                grad = getattr(linear, name).grad
+                assert grad is not None, f"Grouped {name} parent did not receive a gradient"
+                return grad.float()
+            grads = [getattr(linear, f"{name}{idx}").grad for idx in range(self.num_experts)]
+            assert all(grad is not None for grad in grads)
+            return torch.stack(grads).float()
+
+        torch.manual_seed(1234)
+        reference = build_experts(False, False)
+        torch.manual_seed(5678)
+        target = build_experts(single_grouped_weight, single_grouped_bias)
+        copy_linear_params(reference.linear_fc1, target.linear_fc1)
+        copy_linear_params(reference.linear_fc2, target.linear_fc2)
+
+        tokens_per_expert = torch.tensor([256, 256], dtype=torch.int64, device="cuda")
+        num_tokens = int(tokens_per_expert.sum().item())
+        base_input = 0.1 * torch.randn(
+            num_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda"
         )
-        torch.testing.assert_close(
-            experts.linear_fc2.bias1.grad,
-            torch.ones_like(experts.linear_fc2.bias1) * probs[2:].detach().sum(),
+        base_probs = torch.rand(num_tokens, dtype=torch.bfloat16, device="cuda")
+        grad_output = 0.1 * torch.randn(
+            num_tokens, self.hidden_size, dtype=torch.bfloat16, device="cuda"
         )
+
+        reference_input = base_input.detach().clone().requires_grad_(True)
+        reference_probs = base_probs.detach().clone().requires_grad_(True)
+        reference_output, _ = reference(reference_input, tokens_per_expert, reference_probs)
+        reference_output.backward(grad_output)
+
+        target_input = base_input.detach().clone().requires_grad_(True)
+        target_probs = base_probs.detach().clone().requires_grad_(True)
+        target_output, _ = target(target_input, tokens_per_expert, target_probs)
+        target_output.backward(grad_output)
+
+        tolerances = {"rtol": 1e-2, "atol": 1e-2}
+        torch.testing.assert_close(target_output, reference_output, **tolerances)
+        torch.testing.assert_close(target_input.grad, reference_input.grad, **tolerances)
+        torch.testing.assert_close(target_probs.grad, reference_probs.grad, **tolerances)
+
+        for target_linear, reference_linear in (
+            (target.linear_fc1, reference.linear_fc1),
+            (target.linear_fc2, reference.linear_fc2),
+        ):
+            torch.testing.assert_close(
+                packed_grad(target_linear, "weight"),
+                packed_grad(reference_linear, "weight"),
+                **tolerances,
+            )
+            torch.testing.assert_close(
+                packed_grad(target_linear, "bias"),
+                packed_grad(reference_linear, "bias"),
+                **tolerances,
+            )
+
+        if use_op_fuser:
+            ops = target._fused_ops[0]
+            fc1_op = ops[0]
+            fc2_op = ops[2]
+            # The fused-op shells must register MCore's original parent parameters, not
+            # detached copies or member views, so autograd and the optimizer update the same objects.
+            if single_grouped_weight:
+                assert fc1_op.weight is target.linear_fc1.weight
+                assert fc2_op.weight is target.linear_fc2.weight
+            if single_grouped_bias:
+                assert fc1_op.bias is target.linear_fc1.bias
+                assert fc2_op.bias is target.linear_fc2.bias
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.internal
@@ -1272,3 +1775,292 @@ class TestTEGroupedMLP:
             f"Fused-path training did not reduce loss enough: "
             f"initial={losses[0]:.6f}, final={losses[-1]:.6f}, full={losses}"
         )
+
+    # MXFP8 needs every dimension and the per-expert token count to be multiples of 32, and TE
+    # only fuses under a quantized recipe.
+    CLAMP_HIDDEN, CLAMP_FFN, CLAMP_EXPERTS, CLAMP_PER_EXPERT = 128, 256, 2, 32
+
+    @staticmethod
+    def _skip_unless_clamped_fusion_available(tanh_clamp_scale):
+        if torch.cuda.get_device_capability()[0] < 10:
+            pytest.skip("Fused cuDSL grouped MLP requires SM100+")
+        if int(os.environ.get("NVTE_CUTEDSL_FUSED_GROUPED_MLP", "0")) <= 0:
+            pytest.skip("NVTE_CUTEDSL_FUSED_GROUPED_MLP is unset")
+        try:
+            from transformer_engine.pytorch.ops.fused import grouped_mlp as te_grouped_mlp
+        except ImportError:
+            pytest.skip("TE fused grouped MLP module not available")
+        fused_cls = getattr(te_grouped_mlp, "GroupedMLP_CuTeGEMMUnary", None)
+        if fused_cls is None or not fused_cls.is_supported():
+            pytest.skip("TE fused unary grouped MLP unsupported here")
+        if tanh_clamp_scale is not None and not experts_module._te_supports_scaled_tanh_srelu():
+            pytest.skip("Installed TE has no ScaledTanhSReLU")
+
+    def _build_clamp_experts(self, tanh_clamp_scale, use_op_fuser):
+        tf_config = TransformerConfig(
+            num_layers=1,
+            hidden_size=self.CLAMP_HIDDEN,
+            ffn_hidden_size=self.CLAMP_FFN,
+            num_attention_heads=4,
+            num_moe_experts=self.CLAMP_EXPERTS,
+            use_cpu_initialization=False,
+            add_bias_linear=False,
+            gated_linear_unit=False,
+            activation_func=squared_relu,
+            use_fused_weighted_squared_relu=True,
+            activation_func_tanh_clamp_scale=tanh_clamp_scale,
+            bias_activation_fusion=False,
+            use_transformer_engine_op_fuser=use_op_fuser,
+            moe_grouped_gemm=True,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+            moe_router_load_balancing_type="sinkhorn",
+            moe_router_topk=1,
+            fp8="e4m3",
+            fp8_recipe="mxfp8",
+        )
+        submodules = get_submodules(
+            get_gpt_layer_with_transformer_engine_submodules(
+                self.CLAMP_EXPERTS, moe_grouped_gemm=True
+            ).mlp
+        )
+        with get_fp8_context(tf_config, is_init=True):
+            layer = MoELayer(tf_config, submodules)
+        experts = layer.experts.cuda()
+        assert experts._with_fused_impl is use_op_fuser
+        return experts
+
+    @staticmethod
+    def _copy_params(dst, src):
+        with torch.no_grad():
+            for (_, d), (_, s) in zip(dst.named_parameters(), src.named_parameters()):
+                d.copy_(s)
+
+    @staticmethod
+    def _mxfp8_autocast():
+        import transformer_engine.pytorch as te
+        from transformer_engine.common.recipe import MXFP8BlockScaling
+
+        return te.fp8_autocast(enabled=True, fp8_recipe=MXFP8BlockScaling())
+
+    def _clamp_inputs(self, fill=None):
+        tokens = self.CLAMP_PER_EXPERT * self.CLAMP_EXPERTS
+        shape = (tokens, self.CLAMP_HIDDEN)
+        if fill is None:
+            hidden = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+        else:
+            hidden = torch.full(shape, fill, device="cuda", dtype=torch.bfloat16)
+        probs = torch.rand(tokens, device="cuda", dtype=torch.bfloat16)
+        tokens_per_expert = torch.tensor(
+            [self.CLAMP_PER_EXPERT] * self.CLAMP_EXPERTS, dtype=torch.long
+        )
+        return hidden, probs, tokens_per_expert
+
+    @staticmethod
+    def _assert_fused_op_selected(experts):
+        """When the cuDSL kernel is unavailable TE computes the same numbers on its basic-op
+        path, so the op type has to be checked directly (after the lazy first forward)."""
+        (sequential,) = experts._fused_ops
+        selected = [
+            type(entry[0] if isinstance(entry, (tuple, list)) else entry).__name__
+            for group in sequential._module_groups
+            for entry in group._forward_ops
+        ]
+        assert "GroupedMLP_CuTeGEMMUnary" in selected, selected
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.internal
+    @pytest.mark.launch_on_gb200
+    @pytest.mark.parametrize("tanh_clamp_scale", [None, 2.0])
+    def test_gpu_fused_clamp_matches_unfused_reference(self, tanh_clamp_scale):
+        """Fused cuDNN epilogue vs MCore's unfused path: forward and both gradients, MXFP8."""
+        self._skip_unless_clamped_fusion_available(tanh_clamp_scale)
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(1, 1)
+
+        fused = self._build_clamp_experts(tanh_clamp_scale, use_op_fuser=True)
+        unfused = self._build_clamp_experts(tanh_clamp_scale, use_op_fuser=False)
+        self._copy_params(dst=unfused, src=fused)
+        torch.manual_seed(1234)
+        hidden, probs, tokens_per_expert = self._clamp_inputs()
+
+        def run(experts):
+            x = hidden.clone().requires_grad_(True)
+            p = probs.clone().requires_grad_(True)
+            with self._mxfp8_autocast():
+                out, _ = experts(x, tokens_per_expert, p)
+            out.sum().backward()
+            return out.detach(), x.grad, p.grad
+
+        fused_results = run(fused)
+        unfused_results = run(unfused)
+        self._assert_fused_op_selected(fused)
+
+        # The fused path quantizes the fp32 activation once; the unfused path materialises a bf16
+        # activation and quantizes it again into fc2. Bounded by the reference's own RMS; measured
+        # ~21% of RMS on GB300, clamped and unclamped alike.
+        for got, want in zip(fused_results, unfused_results):
+            scale = want.float().pow(2).mean().sqrt()
+            assert (got.float() - want.float()).abs().max() <= 0.5 * scale
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.internal
+    @pytest.mark.launch_on_gb200
+    def test_gpu_clamp_scale_reaches_the_kernel(self):
+        """Saturated, the output scales as s^2: s=8 vs s=1 gives ~64x. An ignored scale gives
+        ~1x and a scale applied without the square ~8x."""
+        self._skip_unless_clamped_fusion_available(2.0)
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(1, 1)
+
+        _, probs, tokens_per_expert = self._clamp_inputs()
+        hidden, _, _ = self._clamp_inputs(fill=400.0)
+        loose = self._build_clamp_experts(1.0, use_op_fuser=True)
+        tight = self._build_clamp_experts(8.0, use_op_fuser=True)
+        self._copy_params(dst=tight, src=loose)
+
+        def peak(experts):
+            with self._mxfp8_autocast():
+                out, _ = experts(hidden.clone().requires_grad_(True), tokens_per_expert, probs)
+            return out.float().abs().max()
+
+        ratio = (peak(tight) / peak(loose).clamp_min(1e-6)).item()
+        assert 16.0 < ratio < 256.0, ratio
+
+
+class _RecordingCheckpoint:
+    """Stand-in for tensor_parallel.CheckpointWithoutOutput that records its use.
+
+    checkpoint() runs the function eagerly so the forward still produces real
+    outputs, while construction and discard calls are counted so a test can assert
+    whether the moe_act checkpoint path was taken at all.
+    """
+
+    instances: list = []
+
+    def __init__(self, *args, **kwargs):
+        self.discard_calls = 0
+        type(self).instances.append(self)
+
+    def checkpoint(self, run_function, *args):
+        return run_function(*args)
+
+    def discard_output_and_register_recompute(self, hook_tensor):
+        self.discard_calls += 1
+
+
+class _DoublingGroupedLinear(torch.nn.Module):
+    """Minimal stand-in for TEGroupedLinear returning (output, bias)."""
+
+    def forward(self, hidden_states, tokens_per_expert):
+        return hidden_states * 2.0, None
+
+
+def _build_moe_act_recompute_module():
+    """TEGroupedMLP wired for the unfused moe_act path with recompute enabled.
+
+    Built via __new__ to skip TEGroupedMLP.__init__, which would require TE, CUDA and
+    an initialized distributed group. nn.Module.__init__ still has to run so that
+    submodules can be assigned and so that module.training is set to True, which the
+    grad-disabled test relies on.
+    """
+    module = TEGroupedMLP.__new__(TEGroupedMLP)
+    torch.nn.Module.__init__(module)
+    module._with_fused_impl = False
+    module._use_grouped_tensor = False
+    module.offload_expert_fc1 = False
+    module.offload_moe_act = False
+    # The flag under test: moe_act selective recompute is configured on.
+    module.activation_recompute = True
+    module.activation_func = F.gelu
+    module.linear_fc1 = _DoublingGroupedLinear()
+    module.linear_fc2 = _DoublingGroupedLinear()
+    module.config = SimpleNamespace(
+        fp8=False,
+        fp4=False,
+        moe_router_padding_for_quantization=False,
+        moe_token_dispatcher_type=None,
+        moe_flex_dispatcher_backend=None,
+        moe_use_grouped_tensor=False,
+        moe_permute_fusion=False,
+        moe_apply_probs_on_input=False,
+        moe_mlp_glu_interleave_size=None,
+        moe_router_topk=1,
+        delay_offload_until_cuda_graph=False,
+        gated_linear_unit=False,
+        use_te_activation_func=False,
+        bias_activation_fusion=False,
+        use_fused_weighted_squared_relu=False,
+        # Every activation_func_* field read by bias_act_func is defined here, including
+        # ones only reached on branches this stub does not take, so that a future edit to
+        # a neighbouring branch fails on the assertion rather than on AttributeError.
+        activation_func=F.gelu,
+        activation_func_clamp_value=None,
+        activation_func_fp8_input_store=False,
+        activation_func_tanh_clamp_scale=None,
+        activation_func_tanh_clamp_scale_linear=None,
+        glu_linear_offset=0.0,
+    )
+    return module
+
+
+def _run_moe_act_forward(monkeypatch):
+    """Run TEGroupedMLP.forward with CheckpointWithoutOutput swapped for a spy."""
+    _RecordingCheckpoint.instances = []
+    monkeypatch.setattr(
+        experts_module.tensor_parallel, "CheckpointWithoutOutput", _RecordingCheckpoint
+    )
+    module = _build_moe_act_recompute_module()
+    hidden_states = torch.ones(4, 8, requires_grad=True)
+    tokens_per_expert = torch.tensor([2, 2])
+    permuted_probs = torch.ones(4)
+
+    output, _ = module.forward(hidden_states, tokens_per_expert, permuted_probs)
+    return output, _RecordingCheckpoint.instances, module
+
+
+def test_moe_act_recompute_is_set_up_when_grad_enabled(monkeypatch):
+    """With grad enabled, the moe_act checkpoint is created and its recompute registered."""
+    with torch.enable_grad():
+        output, instances, _ = _run_moe_act_forward(monkeypatch)
+
+    assert len(instances) == 1, "expected exactly one CheckpointWithoutOutput to be constructed"
+    assert instances[0].discard_calls == 1, (
+        "discard_output_and_register_recompute must be called so the discarded "
+        "activation has a recompute hook"
+    )
+    assert output.requires_grad
+
+
+def test_moe_act_recompute_is_skipped_when_grad_disabled(monkeypatch):
+    """Under torch.no_grad() the checkpoint must not be set up.
+
+    CheckpointWithoutOutput discards the activation and relies on a grad hook to
+    recompute it. With grad disabled the output does not require grad, so the hook is
+    never registered and the discard is left without its counterpart. Guarding on
+    self.training is not enough: when "moe" is also in recompute_modules,
+    CheckpointFunction invokes this same forward once under no_grad and again under
+    enable_grad during backward, and self.training is True in both cases.
+    """
+    with torch.no_grad():
+        output, instances, module = _run_moe_act_forward(monkeypatch)
+
+    assert instances == [], (
+        "CheckpointWithoutOutput must not be constructed under torch.no_grad(); "
+        "its recompute hook cannot be registered and the discard would be orphaned"
+    )
+    assert not output.requires_grad
+    # The module is still in train mode here, so a `self.training` guard would have
+    # taken the checkpoint path. Only torch.is_grad_enabled() separates the two passes.
+    assert module.training is True
+    assert module.activation_recompute is True
+
+
+def test_moe_act_recompute_paths_are_numerically_equivalent(monkeypatch):
+    """Skipping the checkpoint under no_grad must not change the forward result."""
+    with torch.enable_grad():
+        grad_output, _, _ = _run_moe_act_forward(monkeypatch)
+    with torch.no_grad():
+        nograd_output, _, _ = _run_moe_act_forward(monkeypatch)
+
+    torch.testing.assert_close(grad_output.detach(), nograd_output)

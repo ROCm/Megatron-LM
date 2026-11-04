@@ -8,6 +8,7 @@ from contextlib import nullcontext
 from copy import deepcopy
 from itertools import product
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -28,6 +29,11 @@ from megatron.core.distributed.fsdp.src.megatron_fsdp.fully_shard import (
     fully_shard,
     fully_shard_model,
     fully_shard_optimizer,
+)
+from megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer import (
+    AllGatherPipeline,
+    BucketStatus,
+    PrefetchOrder,
 )
 from tests.unit_tests.test_utilities import Utils
 from megatron.core.utils import is_te_min_version
@@ -58,6 +64,100 @@ MXFP8_BLOCKWISE_RECIPE = "mxfp8_blockwise"
 # Needed for `torch.distributed.checkpoint.{save,load}` because
 # multiple processes need to write to the same directory.
 SHARED_TMP_DIR = "/tmp/pytest-shared-tmp"
+
+
+def test_all_gather_pipeline_prefetch_size():
+    """The extracted prefetch heuristic stops after reaching the requested size."""
+    pipeline = AllGatherPipeline.__new__(AllGatherPipeline)
+    pipeline.buffer = SimpleNamespace(
+        num_buckets=4,
+        ddp_config=SimpleNamespace(fsdp_double_buffer=False),
+        parameter_groups=[
+            SimpleNamespace(
+                fsdp_unit_id=bucket_id,
+                model_weight_buffer=SimpleNamespace(bucket_index=SimpleNamespace(size=6)),
+            )
+            for bucket_id in range(4)
+        ],
+        bucket_to_bucket_group={bucket_id: [bucket_id] for bucket_id in range(4)},
+    )
+
+    actual = pipeline._extend_by_prefetch_size(
+        [0], PrefetchOrder.FORWARD_PASS_ORDER, suggested_prefetch_size=10, double_buffer_units=set()
+    )
+
+    assert actual == [0, 1, 2]
+
+
+@pytest.mark.parametrize(
+    ("order", "start_buckets", "expected_buckets"),
+    [
+        (PrefetchOrder.FORWARD_PASS_ORDER, [0, 1], [0, 1, 2, 3, 4, 5]),
+        (PrefetchOrder.BACKWARD_PASS_ORDER, [6, 7], [2, 3, 4, 5, 6, 7]),
+    ],
+)
+def test_all_gather_pipeline_prefetch_units(order, start_buckets, expected_buckets):
+    """Unit-depth prefetch includes intervening non-unit buckets in both directions."""
+    unit_ids = [0, 0, None, 1, 1, None, 2, 2, 3, 3]
+    pipeline = AllGatherPipeline.__new__(AllGatherPipeline)
+    pipeline.buffer = SimpleNamespace(
+        num_buckets=len(unit_ids),
+        parameter_groups=[SimpleNamespace(fsdp_unit_id=unit_id) for unit_id in unit_ids],
+        bucket_to_bucket_group={bucket_id: [bucket_id] for bucket_id in range(len(unit_ids))},
+    )
+
+    actual = pipeline._extend_by_fsdp_units(start_buckets, order, num_units=1)
+
+    assert actual == expected_buckets
+
+
+def test_hfsdp_pipeline_preserves_inner_prefetch_size_policy():
+    """HFSDP overlap extends DP-Outer beyond the byte-budgeted DP-Inner frontier."""
+    param = object()
+    pipeline = AllGatherPipeline.__new__(AllGatherPipeline)
+    pipeline.buffer = SimpleNamespace(
+        param_to_param_group={param: 0},
+        parameter_groups=[
+            SimpleNamespace(fsdp_unit_id=unit_id, transpose_weight_buffer=None)
+            for unit_id in range(2)
+        ],
+        ddp_config=SimpleNamespace(
+            fsdp_double_buffer=False,
+            hfsdp_param_gather_overlap=True,
+            outer_dp_sharding_strategy="optim",
+        ),
+        dist_index=SimpleNamespace(use_hybrid_fsdp=True),
+    )
+    pipeline.bucket_can_be_released = {(0, False): False, (1, False): False}
+    pipeline.bucket_status = {
+        (0, False): BucketStatus.READY_TO_USE,
+        (1, False): BucketStatus.READY_TO_USE,
+    }
+    calls = []
+
+    def extend_by_size(bucket_ids, order, suggested_size, double_buffer_units):
+        calls.append(("inner", bucket_ids, order, suggested_size, double_buffer_units))
+        return [0, 1]
+
+    def extend_by_units(bucket_ids, order, num_units):
+        calls.append(("outer", bucket_ids, order, num_units))
+        return [0, 1, 2]
+
+    pipeline._extend_by_prefetch_size = extend_by_size
+    pipeline._extend_by_fsdp_units = extend_by_units
+    pipeline._launch_outer_prefetches = lambda bucket_ids, bwd: calls.append(
+        ("launch_outer", bucket_ids, bwd)
+    )
+
+    pipeline.all_gather_params(
+        [param], prefetch=True, suggested_AG_prefetch_size=123, outer_fsdp_group_param_gather=True
+    )
+
+    assert calls == [
+        ("inner", [0], PrefetchOrder.FORWARD_PASS_ORDER, 123, set()),
+        ("outer", [0, 1], PrefetchOrder.FORWARD_PASS_ORDER, 1),
+        ("launch_outer", [0, 1, 2], False),
+    ]
 
 
 def destroy_device_mesh(device_mesh):
@@ -320,6 +420,61 @@ class TestMegatronFsdpFullyShard:
 
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse('2.4.0'),
+        reason="Requires DTensor and DeviceMesh support in PyTorch 2.4.0 or later.",
+    )
+    def test_hfsdp_param_gather_overlap(self):
+        """HFSDP stages DP-Outer beyond the size-budgeted DP-Inner frontier."""
+        if Utils.world_size != 8:
+            pytest.skip("Requires 8 GPUs for a 2x4 HFSDP mesh.")
+
+        device_mesh = build_distributed_environment((2, 4, 1, 1))
+        model = ToyCNN(height=DIM_SIZE, width=DIM_SIZE, num_layers=4).cuda()
+        fsdp_model = fully_shard_model(
+            module=model,
+            device_mesh=device_mesh,
+            dp_shard_dim=DP_SHARD,
+            dp_outer_dim=DP_OUTER,
+            tp_dim=TP,
+            hybrid_fsdp_group=device_mesh[HSDP].get_group(),
+            fsdp_unit_modules=[torch.nn.Conv2d, torch.nn.Linear],
+            zero_dp_strategy=OPTIM_GRADS_PARAMS,
+            outer_dp_sharding_strategy=OPTIM,
+            hfsdp_param_gather_overlap=True,
+        )
+        optimizer = fully_shard_optimizer(Adam(fsdp_model.parameters(), lr=0.01))
+
+        # Keep DP-Inner at the current unit and verify that DP-Outer stages one
+        # additional unit beyond that byte-budgeted frontier.
+        fsdp_model.suggested_AG_prefetch_size = 0
+        fsdp_model.synchronize_param_gather()
+        fsdp_model.start_param_sync()
+        pipeline = fsdp_model.all_gather_pipeline
+        parameter_groups = fsdp_model.param_and_grad_buffer.parameter_groups
+        inner_units = {
+            parameter_groups[bucket_id].fsdp_unit_id
+            for (bucket_id, _), status in pipeline.bucket_status.items()
+            if status == BucketStatus.COMMUNICATING
+            and parameter_groups[bucket_id].fsdp_unit_id is not None
+        }
+        outer_units = {
+            parameter_groups[bucket_id].fsdp_unit_id
+            for bucket_id, _ in pipeline.outer_bucket_ready_events
+            if parameter_groups[bucket_id].fsdp_unit_id is not None
+        }
+        assert len(inner_units) == 1
+        assert len(outer_units) == 2
+
+        inputs = torch.randn(1, 3, DIM_SIZE, DIM_SIZE, device="cuda")
+        loss = fsdp_model(inputs).square().mean()
+        loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+        assert torch.isfinite(loss)
+
+        destroy_device_mesh(device_mesh)
+
+    @pytest.mark.skipif(
+        version.parse(torch.__version__) < version.parse('2.4.0'),
         reason="Requires DTensor and DeviceMesh support in (approximately) PyTorch 2.4.0 or later. Should not be run on 2.2.0a0+81ea7a4 (LTS).",
     )
     @pytest.mark.parametrize("model_type", [CNN, TRANSFORMER, TE_TRANSFORMER])
@@ -394,11 +549,12 @@ class TestMegatronFsdpFullyShard:
                 "lerp on a Replicate() DTensor, which is unsupported by the DTensor "
                 "dispatcher in PyTorch 26.06+."
             )
-        elif dp_outer_strategy == OPTIM and dp_shard_strategy != OPTIM_GRADS_PARAMS:
-            # TODO(@shjwudp, @cspades): Requires various modifications to support.
+        elif dp_outer_strategy == OPTIM and dp_shard_strategy in (NO_SHARD, OPTIM):
+            # DP-Outer sharding reduce-scatters the DP-Shard gradient shard into the DP-wide
+            # shard, so a DP-Shard strategy that replicates gradients has none to feed it.
             pytest.skip(
-                f"dp_outer sharding strategy {dp_outer_strategy} requires "
-                "zero_dp_strategy to be full-sharded ('optim_grads_params', 3)."
+                f"dp_outer sharding strategy {dp_outer_strategy} requires a zero_dp_strategy "
+                "that shards gradients ('optim_grads', 2 or 'optim_grads_params', 3)."
             )
 
         # Construct device mesh.
@@ -497,6 +653,262 @@ class TestMegatronFsdpFullyShard:
         # Required to reset the parallelism environment.
         destroy_device_mesh(device_mesh)
 
+    @pytest.mark.skipif(
+        version.parse(torch.__version__) < version.parse('2.4.0'),
+        reason="Requires DTensor and DeviceMesh support in (approximately) PyTorch 2.4.0 or later. Should not be run on 2.2.0a0+81ea7a4 (LTS).",
+    )
+    @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
+    @pytest.mark.parametrize("outer_shard_strategy", [NO_SHARD, OPTIM])
+    @pytest.mark.parametrize("model_type", [CNN, TRANSFORMER, TE_TRANSFORMER])
+    @pytest.mark.parametrize("mesh_dim_config", [(1, 4, 2, 1), (2, 2, 2, 1)])
+    def test_dcp_checkpoint_save_and_load(
+        self, mesh_dim_config, shard_strategy, outer_shard_strategy, model_type
+    ):
+        """
+        Test that an Megatron-FSDP model checkpoint can be saved and loaded accurately.
+        """
+        from torch.distributed.tensor import DTensor
+
+        # Skip tests.
+        if outer_shard_strategy == OPTIM and shard_strategy in (NO_SHARD, OPTIM):
+            # DP-Outer sharding reduce-scatters the DP-Shard gradient shard into the DP-wide
+            # shard, so a DP-Shard strategy that replicates gradients has none to feed it.
+            pytest.skip(
+                f"dp_outer sharding strategy {outer_shard_strategy} requires a zero_dp_strategy "
+                "that shards gradients ('optim_grads', 2 or 'optim_grads_params', 3)."
+            )
+        if shard_strategy == NO_SHARD:
+            # NOTE: Just directly checkpoint the MegatronFSDP.module.state_dict() using torch.save().
+            # Beyond the scope of this unit test.
+            pytest.xfail(reason="Megatron-FSDP does not support NO_SHARD for checkpointing yet.")
+
+        """
+        DISTRIBUTED ENVIRONMENT INIT
+        """
+        # Construct device mesh.
+        device_mesh = build_distributed_environment(mesh_dim_config)
+
+        """
+        MODEL TRAINING
+
+        Run through a single training step to update the model weights so the checkpoint
+        accuracy tests are non-trivial, i.e. don't just use the initialized weights.
+        """
+        # Test model.
+        toy_model, fsdp_unit_modules = build_toy_model(model_type, False, seed=0)
+        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
+
+        # Wrap in fully_shard.
+        model, optimizer = fully_shard(
+            module=toy_model,
+            optimizer=toy_adam,
+            device_mesh=device_mesh,
+            dp_shard_dim=DP_SHARD_CP if mesh_dim_config[2] > 1 else DP_SHARD,
+            dp_outer_dim=DP_OUTER,
+            tp_dim=TP,
+            hybrid_fsdp_group=device_mesh[HSDP].get_group(),
+            fsdp_unit_modules=fsdp_unit_modules,
+            zero_dp_strategy=shard_strategy,
+            outer_dp_sharding_strategy=outer_shard_strategy,
+            mixed_precision_policy=MixedPrecisionPolicy(
+                main_params_dtype=torch.float32, main_grads_dtype=torch.float32
+            ),
+            init_model_with_meta_device=False,
+            sync_model_each_microbatch=True,
+        )
+
+        # Mock input and target.
+        toy_input = torch.randn(1, DIM_SIZE, DIM_SIZE).to("cuda")
+        toy_target = torch.randn(1, DIM_SIZE, DIM_SIZE).to("cuda")
+
+        # Forward pass.
+        if model_type == CNN or model_type == TE_TRANSFORMER:
+            output = model(toy_input)
+        elif model_type == TRANSFORMER:
+            output = model(toy_input, toy_input)
+
+        # Loss.
+        loss = mse_loss(output, toy_target)
+
+        # Backward pass.
+        loss.backward()
+
+        # Optimizer step.
+        optimizer.step()
+        optimizer.zero_grad()
+
+        """
+        MODEL PRE-SAVE CHECKPOINT VALUES
+        """
+        # Compute one more forward pass using the optimized model
+        # weights to get a pre-save checkpoint validation loss.
+        model.eval()
+        if model_type == CNN or model_type == TE_TRANSFORMER:
+            pre_output = model(toy_input)
+        elif model_type == TRANSFORMER:
+            pre_output = model(toy_input, toy_input)
+        pre_save_loss = mse_loss(pre_output, toy_target).item()
+
+        # Save deep copy of the model and optimizer state before checkpointing.
+        # NOTE(@cspades): deepcopy has issues with DTensors. Just clone().
+        s1 = {}
+        for key, val in model.state_dict().items():
+            s1[key] = val.clone()
+        optim_state_dict = optimizer.state_dict()
+        o1 = {"state": {}}
+        for idx, state in optim_state_dict["state"].items():
+            o1_state = o1["state"].setdefault(idx, {})
+            for key, val in state.items():
+                o1_state[key] = val.clone()
+        o1["param_groups"] = deepcopy(optim_state_dict["param_groups"])
+
+        """
+        MODEL CHECKPOINT SAVE
+        """
+        # Write model to checkpoint.
+        CKPT_DIR = (
+            Path(SHARED_TMP_DIR)
+            / TestMegatronFsdpFullyShard.__name__
+            / self.test_dcp_checkpoint_save_and_load.__name__
+            / f"checkpoint_shard-{shard_strategy}_outer-{outer_shard_strategy}_{model_type}"
+        )
+        CKPT_DIR.mkdir(parents=True, exist_ok=True, mode=0o777)
+        torch.distributed.checkpoint.save(
+            {"model": model.state_dict(), "optimizer": optimizer.state_dict()},
+            checkpoint_id=str(CKPT_DIR),
+        )
+
+        """
+        MODEL CHECKPOINT LOAD
+        """
+        # Initialize a new model for checkpoint loading. Set a different seed to force a different model init,
+        # to ensure the checkpoint loading is accurate and non-trivial.
+        toy_model, fsdp_unit_modules = build_toy_model(model_type, False, seed=1)
+        toy_adam = Adam(params=toy_model.parameters(), lr=0.01)
+
+        # Wrap in fully_shard.
+        model, optimizer = fully_shard(
+            module=toy_model,
+            optimizer=toy_adam,
+            device_mesh=device_mesh,
+            dp_shard_dim=DP_SHARD_CP if mesh_dim_config[2] > 1 else DP_SHARD,
+            dp_outer_dim=DP_OUTER,
+            tp_dim=TP,
+            hybrid_fsdp_group=device_mesh[HSDP].get_group(),
+            fsdp_unit_modules=fsdp_unit_modules,
+            zero_dp_strategy=shard_strategy,
+            outer_dp_sharding_strategy=outer_shard_strategy,
+            mixed_precision_policy=MixedPrecisionPolicy(
+                main_params_dtype=torch.float32, main_grads_dtype=torch.float32
+            ),
+            init_model_with_meta_device=False,
+            sync_model_each_microbatch=True,
+        )
+
+        # Load model from checkpoint.
+        ckpt_state_dict = {"model": model.state_dict(), "optimizer": optimizer.state_dict()}
+        torch.distributed.checkpoint.load(state_dict=ckpt_state_dict, checkpoint_id=str(CKPT_DIR))
+        model.load_state_dict(ckpt_state_dict["model"], strict=False)
+        optimizer.load_state_dict(ckpt_state_dict["optimizer"])
+
+        """
+        MODEL CHECKPOINT STATE DICT VALIDATION
+        """
+        # Compare pre-save and post-load model state dictionaries.
+        s2 = model.state_dict()
+        nonempty_model_state = False
+        for key in s1.keys() | s2.keys():
+            v1 = s1.get(key, None)
+            if isinstance(v1, DTensor):
+                v1 = v1.to_local()
+            v2 = s2.get(key, None)
+            if isinstance(v2, DTensor):
+                v2 = v2.to_local()
+            assert (
+                v1 is not None and v2 is not None
+            ), f"[{key} Not Found] Original Param: {v1} | Checkpoint Param: {v2}"
+            assert (
+                v1.shape == v2.shape
+            ), f"[Checkpoint Param {key} Shape Mismatch] {v1.shape} != {v2.shape}"
+            assert torch.allclose(v1, v2), f"[Checkpoint Param {key} Value Mismatch] {v1} != {v2}"
+            nonempty_model_state = True
+
+        # Compare pre-save and post-load optimizer state dictionaries.
+        o2 = optimizer.state_dict()
+        nonempty_optim_state = False
+        for param_id in o1["state"].keys() | o2["state"].keys():
+            param_state_1 = o1["state"].get(param_id, None)
+            param_state_2 = o2["state"].get(param_id, None)
+            assert (
+                param_state_1 is not None and param_state_2 is not None
+            ), f"[{param_id} Not Found] Original Optim State: {param_state_1} | Checkpoint Optim State: {param_state_2}"
+            for key in param_state_1.keys() | param_state_2.keys():
+                v1 = param_state_1.get(key, None)
+                if isinstance(v1, DTensor):
+                    v1 = v1.to_local()
+                v2 = param_state_2.get(key, None)
+                if isinstance(v2, DTensor):
+                    v2 = v2.to_local()
+                assert (
+                    v1 is not None and v2 is not None
+                ), f"[{param_id} {key} Not Found] Original Optim State: {v1} | Checkpoint Optim State: {v2}"
+                assert (
+                    v1.shape == v2.shape
+                ), f"[Optim State {param_id} {key} Shape Mismatch] {v1.shape} != {v2.shape}"
+                assert torch.allclose(
+                    v1, v2
+                ), f"[Optim State {param_id} {key} Value Mismatch] {v1} != {v2}"
+                nonempty_optim_state = True  # Optimizer state depends on wgrad, verify this!
+        assert len(o1["param_groups"]) == len(
+            o2["param_groups"]
+        ), f"[Optim State Param Groups Length Mismatch] {o1['param_groups']} != {o2['param_groups']}"
+        for i in range(len(o2["param_groups"])):
+            for key in o1["param_groups"][i].keys():
+                v1 = o1["param_groups"][i][key]
+                v2 = o2["param_groups"][i][key]
+                assert v1 == v2, f"[Optim State Param Group {i} {key} Value Mismatch] {v1} != {v2}"
+
+        # Validate that at least 1 rank has a non-empty model and optimizer state.
+        # It is very possible that some ranks have completely empty state!
+        global_nonempty_model_state = [False] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(global_nonempty_model_state, nonempty_model_state)
+        assert any(global_nonempty_model_state), "All ranks had an empty model state!"
+        global_nonempty_optim_state = [False] * torch.distributed.get_world_size()
+        torch.distributed.all_gather_object(global_nonempty_optim_state, nonempty_optim_state)
+        assert any(global_nonempty_optim_state), "All ranks had an empty optimizer state!"
+
+        """
+        MODEL CHECKPOINT FORWARD PASS VALIDATION
+        """
+        # Forward pass using the post-load checkpoint model weights.
+        model.eval()
+        if model_type == CNN or model_type == TE_TRANSFORMER:
+            post_output = model(toy_input)
+        elif model_type == TRANSFORMER:
+            post_output = model(toy_input, toy_input)
+        post_load_loss = mse_loss(post_output, toy_target)
+
+        # Validate the pre-save and post-load loss.
+        assert (
+            pre_save_loss == post_load_loss.item()
+        ), f"[Rank {torch.distributed.get_rank()}] Pre-Save Loss: {pre_save_loss} != Post-Load Loss: {post_load_loss}"
+
+        # Continue training.
+        post_load_loss.backward()
+        optimizer.step()
+        optimizer.zero_grad()
+
+        """
+        CLEANUP
+        """
+        # Clean up temporary checkpoint directory.
+        if torch.distributed.get_rank() == 0:
+            shutil.rmtree(CKPT_DIR)
+        torch.distributed.barrier()
+
+        # Destroy device mesh.
+        destroy_device_mesh(device_mesh)
+
     @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS_PARAMS, OPTIM_GRADS, OPTIM, NO_SHARD])
     def test_fully_shard_ez(self, shard_strategy):
         """
@@ -551,6 +963,59 @@ class TestMegatronFsdpFullyShard:
         device_mesh = resources.pop("device_mesh", None)
         if device_mesh is not None:
             destroy_device_mesh(device_mesh)
+    @pytest.mark.parametrize("shard_strategy", [OPTIM_GRADS, OPTIM_GRADS_PARAMS])
+    @pytest.mark.parametrize("optimizer_type", ["adam", "adamw", "fused_adam"])
+    def test_optimizer_loss_curve_matches_reference(self, shard_strategy, optimizer_type):
+        """Fully sharding an optimizer must not alter its loss curve."""
+        if optimizer_type == "fused_adam" and not HAVE_TE_FUSED_ADAM:
+            pytest.skip("Transformer Engine FusedAdam is not available")
+
+        torch.manual_seed(1234)
+        reference_model = RootParamModel().cuda()
+        model = RootParamModel().cuda()
+        model.load_state_dict(reference_model.state_dict())
+
+        model = fully_shard_model(
+            module=model, fsdp_unit_modules=[RootParamModel], zero_dp_strategy=shard_strategy
+        )
+        if optimizer_type == "adam":
+            optimizer_cls = torch.optim.Adam
+        elif optimizer_type == "adamw":
+            optimizer_cls = torch.optim.AdamW
+        else:
+            optimizer_cls = FusedAdam
+        reference_optimizer = optimizer_cls(reference_model.parameters(), lr=0.01, weight_decay=0.1)
+        optimizer = fully_shard_optimizer(
+            optimizer_cls(model.parameters(), lr=0.01, weight_decay=0.1)
+        )
+
+        data_generator = torch.Generator(device="cuda").manual_seed(
+            91011 + torch.distributed.get_rank()
+        )
+        model_input = torch.randn(DIM_SIZE, DIM_SIZE, device="cuda", generator=data_generator)
+        target = torch.randn(DIM_SIZE, DIM_SIZE, device="cuda", generator=data_generator)
+
+        reference_losses = []
+        losses = []
+        for _ in range(NUM_STEPS):
+            reference_optimizer.zero_grad()
+            optimizer.zero_grad()
+            reference_loss = mse_loss(reference_model(model_input), target)
+            loss = mse_loss(model(model_input), target)
+            reference_losses.append(reference_loss.detach())
+            losses.append(loss.detach())
+
+            reference_loss.backward()
+            loss.backward()
+            # The reference model is not wrapped in DDP, so explicitly average its
+            # rank-local gradients to match MFSDP's automatic DP synchronization.
+            for param in reference_model.parameters():
+                torch.distributed.all_reduce(param.grad, op=torch.distributed.ReduceOp.AVG)
+
+            reference_optimizer.step()
+            optimizer.step()
+
+        torch.testing.assert_close(torch.stack(losses), torch.stack(reference_losses))
 
     def test_root_module_forward_uses_gathered_parameters(self):
         """
@@ -950,10 +1415,12 @@ class TestMegatronFsdpFullyShard:
         Test custom data-types for gather and reduce communications.
         """
 
-        if dp_outer_strategy == OPTIM and dp_shard_strategy != OPTIM_GRADS_PARAMS:
+        if dp_outer_strategy == OPTIM and dp_shard_strategy == OPTIM:
+            # DP-Outer sharding reduce-scatters the DP-Shard gradient shard into the DP-wide
+            # shard, so a DP-Shard strategy that replicates gradients has none to feed it.
             pytest.skip(
-                f"dp_outer sharding strategy {dp_outer_strategy} requires "
-                "zero_dp_strategy to be full-sharded ('optim_grads_params', 3)."
+                f"dp_outer sharding strategy {dp_outer_strategy} requires a zero_dp_strategy "
+                "that shards gradients ('optim_grads', 2 or 'optim_grads_params', 3)."
             )
         if model_type == TE_TRANSFORMER and custom_main_params_dtype is None:
             pytest.skip(

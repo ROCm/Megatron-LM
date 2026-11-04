@@ -30,6 +30,8 @@ class TestSafeGlobals:
         Utils.destroy_model_parallel()
 
     def test_safe_globals(self, tmp_path_dist_ckpt):
+        if Utils.world_size > 1:
+            Utils.initialize_distributed()
         # create dummy checkpoint
         ckpt_path = tmp_path_dist_ckpt / "test_safe_globals.pt"
         dummy_obj = Namespace(dummy_value=0)
@@ -41,6 +43,8 @@ class TestSafeGlobals:
 
     @pytest.mark.skipif(not is_torch_min_version("2.6a0"), reason="PyTorch 2.6 is required")
     def test_unsafe_globals(self, tmp_path_dist_ckpt):
+        if Utils.world_size > 1:
+            Utils.initialize_distributed()
         # create dummy checkpoint
         ckpt_path = tmp_path_dist_ckpt / "test_unsafe_globals.pt"
         dummy_obj = UnsafeClass(123)
