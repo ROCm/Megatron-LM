@@ -9,6 +9,7 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.models.common.embeddings.rope_utils import (
     get_pos_emb_on_this_cp_rank as get_tensor_on_this_cp_rank,
 )
@@ -1894,3 +1895,77 @@ class TestFusedMLARequiresQLora:
                 layer_number=1,
                 attn_mask_type=AttnMaskType.causal,
             )
+
+
+try:
+    from transformer_engine.pytorch import is_fp8_block_scaling_available, is_mxfp8_available
+
+    FP8_RECIPE_SUPPORT = {
+        "blockwise": is_fp8_block_scaling_available(return_reason=True),
+        "mxfp8": is_mxfp8_available(return_reason=True),
+    }
+except ImportError:
+    FP8_RECIPE_SUPPORT = {}
+
+
+@pytest.mark.parametrize("fused", [False, True])
+@pytest.mark.parametrize("fp8_recipe", ["mxfp8", "blockwise"])
+class TestMLAKVDownProjFP8Padding:
+    """kv_down_proj out_features (its dgrad K) are padded to the FP8 GEMM alignment."""
+
+    @pytest.fixture(scope='function', autouse=True)
+    def setup_and_teardown(self, fp8_recipe, fused):
+        Utils.initialize_model_parallel(1, 1)
+        model_parallel_cuda_manual_seed(123)
+        self.config = MLATransformerConfig(
+            num_layers=1,
+            hidden_size=256,
+            num_attention_heads=4,
+            q_lora_rank=256,
+            kv_lora_rank=512,
+            qk_head_dim=128,
+            v_head_dim=128,
+            qk_pos_emb_head_dim=64,
+            rope_type="rope",
+            rotary_base=10000,
+            original_max_position_embeddings=128,
+            fp8="e4m3",
+            fp8_recipe=fp8_recipe,
+        )
+        if fused:
+            attention_cls, submodules = FusedMLASelfAttention, get_fused_mla_submodules()
+        else:
+            attention_cls, submodules = MLASelfAttention, get_mla_self_attn_submodules()
+        self.attention = attention_cls(
+            self.config, submodules, layer_number=1, attn_mask_type=AttnMaskType.causal
+        ).cuda()
+
+    def teardown_method(self, method):
+        Utils.destroy_model_parallel()
+
+    def test_padded_weight_shape(self, fp8_recipe, fused):
+        # kv_lora_rank + qk_pos_emb_head_dim = 576 becomes 640 where K % 128 is required.
+        padding = 64 if fp8_recipe == "mxfp8" or torch.version.hip is not None else 0
+        assert self.attention.kv_down_proj_mxfp8_padding == padding
+        if fused:
+            weight = self.attention.linear_qkv_down_proj.weight
+            assert weight.shape[0] == self.config.q_lora_rank + 576 + padding
+        else:
+            assert self.attention.linear_kv_down_proj.weight.shape[0] == 576 + padding
+
+    def test_gpu_forward_backward(self, fp8_recipe, fused):
+        supported, reason = FP8_RECIPE_SUPPORT.get(fp8_recipe, (False, "No TE support check"))
+        if not supported:
+            pytest.skip(reason)
+        # 128 tokens, so the wgrad K (the token count) is aligned too.
+        hidden = torch.randn(64, 2, self.config.hidden_size, device="cuda", requires_grad=True)
+        with get_fp8_context(self.config):
+            query, key, value, _, _ = self.attention.get_query_key_value_tensors(hidden)
+        (query.sum() + key.sum() + value.sum()).backward()
+        assert torch.isfinite(hidden.grad).all()
+        # The padded rows are sliced off in forward, so they get no gradient.
+        padding = self.attention.kv_down_proj_mxfp8_padding
+        if padding:
+            attention = self.attention
+            down = attention.linear_qkv_down_proj if fused else attention.linear_kv_down_proj
+            assert torch.count_nonzero(down.weight.grad[-padding:]) == 0

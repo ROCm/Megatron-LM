@@ -170,6 +170,9 @@ def get_fp8_align_size(fp8_recipe: Fp8Recipe) -> int:
     if fp8_recipe == Fp8Recipe.mxfp8:
         # HipblasLT requires 128 aligned Tensors for MXFP8.
         return 128
+    elif fp8_recipe == Fp8Recipe.blockwise and torch.version.hip is not None:
+        # ROCm TE blockwise FP8 GEMMs require K % 128 == 0.
+        return 128
     else:
         return 16
 

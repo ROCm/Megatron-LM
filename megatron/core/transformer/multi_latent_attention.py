@@ -667,8 +667,9 @@ class MLASelfAttention(MultiLatentAttention):
 
         kv_down_proj_out_size = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
         self.kv_down_proj_mxfp8_padding = 0
-        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.mxfp8:
-            align = get_fp8_align_size(Fp8Recipe.mxfp8)
+        # ROCm MXFP8 and blockwise FP8 GEMMs need K % 128; dgrad K here is out_features.
+        if self.config.fp8 and self.config.fp8_recipe in (Fp8Recipe.mxfp8, Fp8Recipe.blockwise):
+            align = get_fp8_align_size(self.config.fp8_recipe)
             remainder = kv_down_proj_out_size % align
             if remainder != 0:
                 self.kv_down_proj_mxfp8_padding = align - remainder
@@ -1379,8 +1380,9 @@ class FusedMLASelfAttention(MLASelfAttention):
         kv_down_proj_core_size = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
         self.kv_down_proj_mxfp8_padding = 0
         qkv_down_out = self.config.q_lora_rank + kv_down_proj_core_size
-        if self.config.fp8 and self.config.fp8_recipe == Fp8Recipe.mxfp8:
-            align = get_fp8_align_size(Fp8Recipe.mxfp8)
+        # Same kv padding as MLASelfAttention, so the kv split matches unfused checkpoints.
+        if self.config.fp8 and self.config.fp8_recipe in (Fp8Recipe.mxfp8, Fp8Recipe.blockwise):
+            align = get_fp8_align_size(self.config.fp8_recipe)
             remainder = kv_down_proj_core_size % align
             if remainder != 0:
                 self.kv_down_proj_mxfp8_padding = align - remainder
