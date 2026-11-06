@@ -30,6 +30,56 @@ of which exists in r0.19.
    Directly relevant to LumenRL, which saves and reloads checkpoints to the same
    path every step.
 
+## MUST FIX 5 -- ROCm's router padding patch contradicts an upstream test
+
+`megatron/core/transformer/moe/router.py` was never a conflict: it auto-merged and
+kept ROCm's 9-line addition, which **zeroes padding tokens' probs**
+
+    if padding_mask is not None:
+        valid_mask = (~padding_mask).unsqueeze(-1)
+        probs = probs * valid_mask
+
+while r0.20.0's new `test_router_with_padding_mask` asserts the opposite --
+"Padded rows stay routed (top-k routes with nonzero weights) like any other row":
+
+    assert torch.all(torch.count_nonzero(probs_with_mask[padding_rows], dim=-1) == topk)
+
+Git merged ROCm's code with upstream's test and they disagree, so
+`TestTop2Router::test_router_with_padding_mask[False|True]` passed before the merge
+and fails after it. This is the only test regression attributable to the IFU.
+
+ROCm's comment says the zeroing is load-bearing ("the dropless argsort permute needs
+`routing_map.sum() == num_tokens * topk`"), so it is not cosmetic. Decide: keep the
+ROCm behaviour and mark the upstream test `failing_on_rocm`, or drop the 9 lines if
+upstream's semantics now supersede. Needs the router patch's author.
+
+## Local test results (first execution of this merge)
+
+Image `zhangdanyangamd/lumen-rl:dapo-gfx950-rocm7.2.3-260921b`, same 5 test files
+that exist on both trees:
+
+| | baseline `ifu` | merged |
+|---|---|---|
+| failed | 26 | 34 |
+| errors | 27 | 36 |
+| passed | 125 | 207 |
+
+The suite is **not green on either tree**, so only the delta is meaningful. Per file:
+
+- `test_multi_latent_attention.py`: 26F/13E -> 25F/13E. One *fewer* failure, so
+  dropping ROCm's fused-padded-MLA block (MUST FIX 3) broke nothing here. The bulk
+  of these failures are ROCm TE refusing `return_max_logit`, which predates the IFU.
+- `test_routers.py`: 0F/14E -> 9F/23E. Seven are the new upstream
+  `test_padding_mask_never_changes_routes` (absent at baseline) failing on ROCm; two
+  are MUST FIX 5.
+
+**No failure traces to any of the 42 conflict resolutions.** Also verified: 19/19
+targeted module imports succeed, including the whole new DSv4/mHC surface.
+
+Not run: the MORI tests (`test_token_dispatcher_mori.py`,
+`test_token_dispatcher_cold_rank_mori.py`) need a node-spanning EP group, and they
+are the real check on the `token_dispatcher`/`moe_utils`/`experts` resolutions.
+
 ## Resolutions (42/42 -- merge complete)
 
 | file | resolution | why |
