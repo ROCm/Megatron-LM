@@ -30,7 +30,7 @@ of which exists in r0.19.
    Directly relevant to LumenRL, which saves and reloads checkpoints to the same
    path every step.
 
-## MUST FIX 5 -- ROCm's router padding patch contradicts an upstream test
+## ~~MUST FIX 5~~ -- RESOLVED: ROCm's router padding patch was redundant
 
 `megatron/core/transformer/moe/router.py` was never a conflict: it auto-merged and
 kept ROCm's 9-line addition, which **zeroes padding tokens' probs**
@@ -47,6 +47,42 @@ while r0.20.0's new `test_router_with_padding_mask` asserts the opposite --
 Git merged ROCm's code with upstream's test and they disagree, so
 `TestTop2Router::test_router_with_padding_mask[False|True]` passed before the merge
 and fails after it. This is the only test regression attributable to the IFU.
+
+**Resolved by removing ROCm's 8-line block.** Upstream r0.20 now does this in the
+dispatcher (`token_dispatcher.py:1126-1139`) and does it more completely -- masking
+both `probs` and `routing_map` for padded rows, gated on `dropless`:
+
+    dropless = self.capacity_factor is None and self.moe_expert_rank_capacity_factor is None
+    if padding_mask is not None and dropless:
+        padding_rows = padding_mask.transpose(0, 1).reshape(-1)
+        probs = probs.masked_fill(padding_rows.unsqueeze(-1), 0)
+        routing_map = routing_map.reshape(num_tokens, self.num_experts) & (~padding_rows).unsqueeze(-1)
+
+Four reasons removal beat marking the tests `failing_on_rocm`:
+
+1. Upstream's dispatcher subsumes it, and masks `routing_map` too.
+2. `git log -S` traces ROCm's block to `6f6bfd498 "IFU core_r0.17.0 Cleanup"` -- it
+   was a previous IFU's patch over this same area, not a deliberate ROCm feature.
+3. ROCm added **no** router tests; nothing asserts padded probs are zero.
+4. Its own rationale is now contradicted: the comment says "do NOT mask
+   `routing_map` (the dropless argsort permute needs
+   `routing_map.sum() == num_tokens * topk`)", but upstream masks `routing_map` in
+   exactly that dropless case, so the permute has evidently been adapted.
+
+**One real behaviour change:** ROCm's block was unconditional while upstream's is
+`dropless`-gated, so padded probs are no longer zeroed on the capacity-factor path.
+Upstream does not zero them there either, so this aligns us with upstream -- but it
+is a difference, not a no-op.
+
+Result: `test_routers.py` 9 failed/126 passed -> **135 passed, 0 failed**.
+`router.py` now differs from upstream only by one (unused) import.
+
+Verified clean afterwards with the same harness: `test_multi_latent_attention.py`
+47 passed, `test_moe_layer.py` 63 passed, `test_a2a_token_dispatcher.py` 41 passed
+(the path that now owns the masking), `test_router_replay.py` 6, `test_moe_unpermute.py`
+1, attention-variant specs 46. **Zero failures.**
+
+Superseded reasoning below, kept for history:
 
 ROCm's comment says the zeroing is load-bearing ("the dropless argsort permute needs
 `routing_map.sum() == num_tokens * topk`"), so it is not cosmetic. Decide: keep the
