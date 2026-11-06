@@ -89,6 +89,61 @@ ROCm's comment says the zeroing is load-bearing ("the dropless argsort permute n
 ROCm behaviour and mark the upstream test `failing_on_rocm`, or drop the 9 lines if
 upstream's semantics now supersede. Needs the router patch's author.
 
+## Full-suite triage (`run_unit_tests.sh`, 605 files)
+
+| | baseline `ifu` | merged |
+|---|---|---|
+| test files in tree | 372 | 605 (r0.20 adds 233) |
+| files failed | 50 | 116 |
+
+Of the 66 merged-only failures, **41 are test files that do not exist on the
+baseline** (new r0.20 coverage), leaving 26 candidates. Comparing file counts
+without intersecting the file sets is how the first attempt at this went wrong.
+
+Note the image: `lumenrl-megatron-ci:pytestcsv` (the LumenRL release image plus
+pytest-csv, Dockerfile in `/data/rl_data/img-pytestcsv/`). It is **not** ROCm's CI
+image and lacks MambaSSM, FLA, causal_conv1d, emerging-optimizers,
+`nvidia_resiliency_ext`, flash_mla and cudnn-frontend, so **54 of the 116 failures
+are missing-dependency noise**. The absent `nvidia_resiliency_ext` is incidentally
+hard evidence for MUST FIX 2.
+
+Of the clusters touching these resolutions:
+
+| file | cause | verdict |
+|---|---|---|
+| `dist_checkpointing/test_async_utils_shutdown.py` | `No module named 'nvidia_resiliency_ext'` | environmental |
+| `dist_checkpointing/test_serialization.py` | same | environmental |
+| `test_argument_utils.py` | `flash_mla`, `cudnn-frontend` absent | environmental |
+| `transformer/moe/test_paged_stashing.py` | `RuntimeError: PassManager::run failed` (Triton) | environmental |
+| `tokenizers/test_tokenizer.py` | `/opt/data/tokenizers` absent from the image | environmental (fails on baseline too; upstream added 13 more hardcoded paths, 7 -> 20) |
+| `transformer/moe/test_grouped_mlp.py` | two under-specified upstream test doubles | **fixed, see below** |
+
+### test_grouped_mlp.py: 10 failed -> 52 passed
+
+Two distinct causes, only one of which is about ROCm:
+
+1. `_DoublingGroupedLinear.forward(self, hidden_states, tokens_per_expert)` could not
+   accept ROCm's third argument. `tokens_per_expert_gpu` is **ROCm-only** (0 at the
+   merge base, 0 in r0.20) and comes from `8dd45f5a5 "TE AITER groupedgemm
+   optimizations in Megatron (#109)"` -- a real aiter performance feature, not IFU
+   cleanup, with no upstream equivalent. So unlike the router block (MUST FIX 5)
+   there is nothing upstream to defer to: removing the argument would undo the
+   optimization. Fixed on the stub instead (`tokens_per_expert_gpu=None`).
+2. **An upstream defect we merely inherited:** upstream's `experts.py:729` does
+   `op.wgrad_store = self.linear_fc2.wgrad_store`, but upstream's own
+   `FakeGroupedLinear` stubs never define `wgrad_store`. Nothing ROCm-specific --
+   this would fail on NVIDIA too wherever that path is hit. Added
+   `self.wgrad_store = None` to the four stubs. **Worth reporting upstream.**
+
+Both edits are confined to one upstream *test* file, with in-code comments. No
+`megatron/core` divergence, so the aiter grouped-GEMM path is untouched.
+
+Still untriaged: the other ~20 candidate regressions (mfsdp_v2, inference, mimo,
+test_attention, test_model_configs, test_param_norm, ...), and the MORI tests
+(`test_token_dispatcher_mori.py`, `test_token_dispatcher_cold_rank_mori.py`,
+`a2a_overlap/test_schedule_*_1f1b_mori.py`) which need a node-spanning EP group and
+remain the real check on the token_dispatcher/moe_utils/experts resolutions.
+
 ## Local test results
 
 Run with **`./run_unit_tests.sh`'s invocation** -- `torchrun --standalone

@@ -115,6 +115,7 @@ def test_make_fused_ops_reuses_grouped_linear_weights_on_meta_device(monkeypatch
             scale_bias=False,
         ):
             super().__init__()
+            self.wgrad_store = None
             self.num_gemms = num_gemms
             self.in_features = in_features
             self.out_features = out_features
@@ -335,6 +336,7 @@ def test_make_fused_impl_pre_forward_hook_exposes_fsdp_main_grad_for_fused_wgrad
     class FakeGroupedLinear(torch.nn.Module):
         def __init__(self, *, fuse_wgrad_accumulation):
             super().__init__()
+            self.wgrad_store = None
             self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
             self.weight = torch.nn.Parameter(torch.ones(2, 2))
             self.bias = torch.nn.Parameter(torch.zeros(2))
@@ -386,6 +388,7 @@ def test_make_fused_ops_handles_single_grouped_weight_for_fc1(monkeypatch):
             scale_bias=False,
         ):
             super().__init__()
+            self.wgrad_store = None
             self.num_gemms = num_gemms
             self.in_features = in_features
             self.out_features = out_features
@@ -498,6 +501,7 @@ def _make_fake_te_namespace():
             scale_bias=False,
         ):
             super().__init__()
+            self.wgrad_store = None
             self.num_gemms = num_gemms
             self.in_features = in_features
             self.out_features = out_features
@@ -1952,7 +1956,9 @@ class _RecordingCheckpoint:
 class _DoublingGroupedLinear(torch.nn.Module):
     """Minimal stand-in for TEGroupedLinear returning (output, bias)."""
 
-    def forward(self, hidden_states, tokens_per_expert):
+    def forward(self, hidden_states, tokens_per_expert, tokens_per_expert_gpu=None):
+        # tokens_per_expert_gpu is ROCm's device-resident expert-count extension
+        # (aiter grouped GEMM); accepted and ignored by this stub.
         return hidden_states * 2.0, None
 
 
