@@ -53,32 +53,44 @@ ROCm's comment says the zeroing is load-bearing ("the dropless argsort permute n
 ROCm behaviour and mark the upstream test `failing_on_rocm`, or drop the 9 lines if
 upstream's semantics now supersede. Needs the router patch's author.
 
-## Local test results (first execution of this merge)
+## Local test results
 
-Image `zhangdanyangamd/lumen-rl:dapo-gfx950-rocm7.2.3-260921b`, same 5 test files
-that exist on both trees:
+Run with **`./run_unit_tests.sh`'s invocation** -- `torchrun --standalone
+--nproc_per_node=8 -m pytest -m "(not flaky and not flaky_in_dev and not
+failing_on_rocm and not failing_on_upstream or test_on_rocm) and not
+experimental"` -- on image `zhangdanyangamd/lumen-rl:dapo-gfx950-rocm7.2.3-260921b`.
+Use that harness, not bare pytest: bare pytest ignores `failing_on_rocm` (so it
+runs tests ROCm already knows fail) and runs single-process (so distributed tests
+error instead of running). Measured the difference: bare pytest reported
+34 failed / 36 errors on code the real harness reports as 9 failed / 0 errors.
 
-| | baseline `ifu` | merged |
+| file | baseline `ifu` | merged |
 |---|---|---|
-| failed | 26 | 34 |
-| errors | 27 | 36 |
-| passed | 125 | 207 |
+| `transformer/moe/test_routers.py` | 49 passed, **0 failed** | **9 failed**, 126 passed, 14 skipped |
+| `transformer/test_multi_latent_attention.py` | 37 passed, 45 deselected | 47 passed, 2 skipped, 45 deselected |
+| `transformer/moe/test_router_replay.py` | 6 passed | 6 passed |
+| `transformer/moe/test_moe_unpermute.py` | 1 passed | 1 passed |
+| `models/test_experimental_attention_variant_module_specs.py` | 41 passed | 41 passed |
+| **total failures** | **0** | **9** |
 
-The suite is **not green on either tree**, so only the delta is meaningful. Per file:
+**The baseline is green, so the 9 failures are entirely introduced by this merge.**
+All are in `test_routers.py` and all are MUST FIX 5: two are
+`test_router_with_padding_mask[False|True]`, which passed pre-merge; seven are the
+new `test_padding_mask_never_changes_routes` (absent at baseline). Neither test
+carries `failing_on_rocm`, so ROCm CI will go red.
 
-- `test_multi_latent_attention.py`: 26F/13E -> 25F/13E. One *fewer* failure, so
-  dropping ROCm's fused-padded-MLA block (MUST FIX 3) broke nothing here. The bulk
-  of these failures are ROCm TE refusing `return_max_logit`, which predates the IFU.
-- `test_routers.py`: 0F/14E -> 9F/23E. Seven are the new upstream
-  `test_padding_mask_never_changes_routes` (absent at baseline) failing on ROCm; two
-  are MUST FIX 5.
+Everything else is clean. In particular `test_multi_latent_attention.py` is fully
+green and gained 10 passing tests, which establishes that dropping ROCm's
+fused-padded-MLA block (MUST FIX 3) broke nothing in these tests -- though the
+narrowed gate is still a behaviour change worth a decision.
 
-**No failure traces to any of the 42 conflict resolutions.** Also verified: 19/19
-targeted module imports succeed, including the whole new DSv4/mHC surface.
+Also verified: 19/19 targeted module imports succeed, including the new DSv4/mHC
+surface.
 
 Not run: the MORI tests (`test_token_dispatcher_mori.py`,
-`test_token_dispatcher_cold_rank_mori.py`) need a node-spanning EP group, and they
-are the real check on the `token_dispatcher`/`moe_utils`/`experts` resolutions.
+`test_token_dispatcher_cold_rank_mori.py`) need a node-spanning EP group and are
+the real check on the `token_dispatcher`/`moe_utils`/`experts` resolutions. Also
+not run: the other ~200 files `run_unit_tests.sh` covers.
 
 ## Resolutions (42/42 -- merge complete)
 
