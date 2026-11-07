@@ -89,6 +89,49 @@ ROCm's comment says the zeroing is load-bearing ("the dropless argsort permute n
 ROCm behaviour and mark the upstream test `failing_on_rocm`, or drop the 9 lines if
 upstream's semantics now supersede. Needs the router patch's author.
 
+## Resolved test failures (all attributable ones)
+
+Three real failures came out of the 116; the other 113 are missing optional
+packages, missing `/opt/data` fixtures, or test files absent from the baseline.
+
+| file | before | after | cause |
+|---|---|---|---|
+| `transformer/moe/test_routers.py` | 9 failed | 135 passed | MUST FIX 5 -- ROCm's router padding block, redundant with upstream's dispatcher |
+| `transformer/moe/test_grouped_mlp.py` | 10 failed | 52 passed | ROCm's `tokens_per_expert_gpu` vs upstream's 2-arg stubs; plus an upstream stub defect (`wgrad_store`) |
+| `distributed/test_param_and_grad_buffer.py` | 4 failed | 97 passed | my error: kept a `mock.patch` of `log_on_each_pipeline_stage`, which upstream deleted |
+| `distributed/mfsdp_v1/test_mfsdp_fully_shard.py` | DCP cases failed | 237 passed (30 DCP cases pass, 12 legitimately skipped) | stale DTensor sharding cache across parametrizations |
+
+### The DCP failure was not a ROCm support gap
+
+`test_dcp_checkpoint_save_and_load` (new in r0.20) failed with
+`RuntimeError: Could not resolve the process group registered under the name 4303`.
+Not a size-1 mesh-dim problem: a plain-torch 2.10 repro building the same
+`DeviceMesh((dp_outer=1, dp_shard_cp=8))` resolves both dims fine
+(`_dim_group_names = ['1', '0']`). The failing name was a high counter value on a
+*flattened* submesh -- a stale group.
+
+ROCm had already diagnosed this in `cf85e22cc`: "DeviceMesh equality ignores
+process-group names, so a mesh rebuilt over new groups hits cache entries holding
+the old mesh. DTensors created afterwards then reference destroyed groups." Open
+upstream bug: https://github.com/pytorch/pytorch/issues/169814. The mitigation,
+`Utils._clear_dtensor_sharding_caches()`, ran only from
+`Utils.destroy_model_parallel()` i.e. at `teardown_class` -- too coarse for a test
+with ~48 parametrizations that each build and destroy their own mesh.
+
+Fixed by adding a `teardown_method` to `TestMegatronFsdpFullyShard` that calls the
+existing helper per test. Test-file only; no new helper, no `megatron/core`
+divergence. **A `failing_on_rocm` marker would have been wrong** -- it would have
+permanently hidden a feature that works.
+
+### Upstream defects found, worth reporting
+
+1. `experts.py:729` reads `self.linear_fc2.wgrad_store` while upstream's own
+   `FakeGroupedLinear` stubs never define it. Not ROCm-specific.
+2. `apply_router_token_dropping` has no padding awareness, so with
+   `moe_expert_capacity_factor` set and a padding mask present, padded tokens
+   consume expert capacity (the dispatcher's masking is `dropless`-gated). Nothing
+   in-tree exercises the combination and LumenRL is always dropless.
+
 ## Full-suite triage (`run_unit_tests.sh`, 605 files)
 
 | | baseline `ifu` | merged |
