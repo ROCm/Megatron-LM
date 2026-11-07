@@ -804,9 +804,9 @@ class TestNVFP4IndexMaps:
             # construction; with current_device mocked to 'cpu' it would enter a CUDA device
             # guard and raise "invalid argument to exchangeDevice". Mock it out for CPU runs.
             mock.patch('torch.cuda.synchronize'),
-            mock.patch(
-                'megatron.core.distributed.param_and_grad_buffer.log_on_each_pipeline_stage'
-            ),
+            # r0.20.0 IFU: upstream removed log_on_each_pipeline_stage, replacing it with
+            # the is_buffer_log_rank attribute plus direct logger calls, so there is no
+            # longer a function to patch here.
         ):
             buffer = _ParamAndGradBuffer(
                 ddp_config=ddp_config,
