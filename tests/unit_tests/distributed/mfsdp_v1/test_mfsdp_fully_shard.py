@@ -418,6 +418,17 @@ class TestMegatronFsdpFullyShard:
     def teardown_class(cls):
         Utils.destroy_model_parallel()
 
+    def teardown_method(self, method):
+        # r0.20.0 IFU: the parametrized cases in this class (notably
+        # test_dcp_checkpoint_save_and_load) build and destroy their own device meshes.
+        # DeviceMesh.__eq__ ignores process-group names, so DTensor's
+        # sharding-propagation cache retains entries holding an already-destroyed mesh
+        # and the next case resolves a dead group -- "Could not resolve the process
+        # group registered under the name <n>". teardown_class is too coarse; the cache
+        # has to be dropped between parametrizations.
+        # Open upstream bug: https://github.com/pytorch/pytorch/issues/169814
+        Utils._clear_dtensor_sharding_caches()
+
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse('2.4.0'),
         reason="Requires DTensor and DeviceMesh support in PyTorch 2.4.0 or later.",
