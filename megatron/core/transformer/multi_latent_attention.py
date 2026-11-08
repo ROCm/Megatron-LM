@@ -526,12 +526,27 @@ class MultiLatentAttention(Attention):
             self.offload_core_attention and self.training, query, "core_attn"
         )
         needs_output_trim = False
+
+        # ROCm fused padded MLA attention: pad value up to q_head_dim so the fused kernel
+        # -- configured with v_channels == q_head_dim in __init__ -- receives matching head
+        # dims. The output is trimmed back to v_head_dim after core attention below.
+        #
+        # r0.20.0 IFU: upstream added its own value padding
+        # (_prepare_mla_core_attention_value / _trim_mla_core_attention_output), but it is
+        # reached only from the `cache_mla_latents` branch and gated on thd, so it does not
+        # cover this path. This block is restored because dropping it left the feature
+        # internally inconsistent: __init__ still sizes the kernel for q_head_dim and the
+        # trim below still fires, so the kernel would have been handed unpadded values.
+        # The shape test makes it idempotent, so it cannot double-pad if upstream's helper
+        # already padded on a path that reaches here.
+        if (
+            self.config.fused_padded_mla_attention
+            and value is not None
+            and value.shape[-1] != self.q_head_dim
+        ):
+            value = F.pad(value, (0, self.q_head_dim - value.shape[-1]))
+
         # Attention sink bias: (re)compute cached bias whenever the sequence length changes.
-        # NOTE (r0.20.0 IFU): ROCm's `fused_padded_mla_attention` value-padding block that
-        # used to sit here is dropped -- upstream now pads in
-        # _prepare_mla_core_attention_value() and trims in _trim_mla_core_attention_output().
-        # Upstream's gate is NARROWER (thd only, experimental_attention_variant is None), so
-        # the ROCm fused kernel no longer gets padding outside thd. See DSV4-IFU-NOTES.md.
         if self.attention_bias_seq_length != seq_length and self.config.attention_sink_k > 0:
             with torch.no_grad():
                 self.attention_bias = get_attention_sink_bias(
