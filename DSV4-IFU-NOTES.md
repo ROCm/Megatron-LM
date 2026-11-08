@@ -30,6 +30,50 @@ of which exists in r0.19.
    Directly relevant to LumenRL, which saves and reloads checkpoints to the same
    path every step.
 
+## MUST FIX 1-4: resolved
+
+**1. `fork` -> `spawn`: cannot be fixed in this repo, and still live.** Upstream moved
+async checkpointing wholesale into the external `nvidia_resiliency_ext` package
+(`serialization.py:50` imports `AsyncRequest` from it; `strategies/nvrx.py` imports the
+async core). The fork ROCm patched now lives at
+`nvidia_resiliency_ext/checkpointing/async_ckpt/core.py:243`, still
+`mp.get_context('fork')` in 0.4.1. The fix must go to NVIDIA or to a local pin of that
+package -- there is nothing to patch in Megatron. The one surviving in-tree `fork`
+(`training/checkpointing.py:1267`) is a different path: async checkpoint *deletion*,
+whose child is filesystem-only and documented as running without torch.distributed, so
+ROCm's GPU-context concern does not transfer.
+
+**2. Stale metadata cache: not applicable.** The package's
+`CachedMetadataFileSystemReader` caches **per instance** (`self._cached_metadata`), not
+in a class-level dict keyed by path, so the cross-checkpoint staleness ROCm fixed cannot
+occur. ROCm's `(abs_path, st_mtime_ns, st_size)` key was fixing Megatron's own
+class-level `_metadata_cache`, which no longer exists.
+
+**3. MLA padding: this was a real defect, now fixed.** Removing ROCm's pad left the
+feature internally inconsistent, not merely narrowed: `__init__` (`:330`) still sizes
+`core_attention` with `v_channels == q_head_dim`, and the trim (`:625`) still fires, so
+with `fused_padded_mla_attention=True` the kernel would have received `v_head_dim`-wide
+values while configured for `q_head_dim` and then had its output trimmed as though
+padded. Upstream's `_prepare_mla_core_attention_value` does not cover this path -- it is
+reached only from the `cache_mla_latents` branch and gated on thd. The pad is restored
+with a shape test (`value.shape[-1] != self.q_head_dim`) making it idempotent, so it
+cannot double-pad if upstream's helper ever reaches here. Verified:
+`test_multi_latent_attention.py` 47 passed, 0 failed.
+
+**4. Orphaned `chat_template_utils.py`: wrong call, no action.** It has a second
+consumer, `megatron/core/tokenizers/text/libraries/chat_template.py`. The earlier "0
+consumers" claim came from grepping only for `token_ids_from_chat_template_output`.
+
+### New upstream defect (3rd one found)
+
+Megatron r0.20 calls
+`CachedMetadataFileSystemReader(checkpoint_dir, cache_metadata=cache_metadata)`
+(`strategies/torch.py:837`), but the latest released `nvidia-resiliency-ext` (0.4.1) has
+`__init__(self, path)` -- no `cache_metadata`. That is a `TypeError` against every
+published version (0.1.3 .. 0.4.1), so `ckpt_assume_constant_structure=True` cannot
+work with a released package. Upstream is targeting an unreleased build. Relevant to
+LumenRL, which saves and reloads checkpoints every step.
+
 ## ~~MUST FIX 5~~ -- RESOLVED: ROCm's router padding patch was redundant
 
 `megatron/core/transformer/moe/router.py` was never a conflict: it auto-merged and
