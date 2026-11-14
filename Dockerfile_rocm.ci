@@ -137,12 +137,11 @@ RUN git clone https://github.com/NVIDIA/nvidia-resiliency-ext && \
     git checkout v0.6.0 && \
     STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install .
 
-WORKDIR $WORKSPACE_DIR
-COPY . Megatron-LM
+# Megatron-LM itself is not baked in: CI mounts the checkout at
+# $WORKSPACE_DIR/Megatron-LM and puts it on PYTHONPATH.
 WORKDIR $WORKSPACE_DIR/Megatron-LM
-RUN pip install -e .
 
-ENV PYTHONPATH=/var/lib/jenkins/triton/python
+ENV PYTHONPATH=$WORKSPACE_DIR/Megatron-LM:/var/lib/jenkins/triton/python
 
 # record configuration for posterity
 RUN pip list

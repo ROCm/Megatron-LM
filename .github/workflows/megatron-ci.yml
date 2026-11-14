@@ -9,20 +9,63 @@ on:
       - '**'
   workflow_dispatch:
     inputs:
-      gpu_arch:
-        description: 'GPU architecture to use for build/tests (e.g. gfx942)'
+      docker_image_override:
+        description: 'Docker image to test with (leave empty to use .github/ci_config.json)'
         required: false
-        default: 'gfx942'
+        type: string
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  select_image:
+    name: Select Docker image
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.select-image.outputs.image }}
+    steps:
+      - name: Checkout CI config
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: .github/ci_config.json
+          sparse-checkout-cone-mode: false
+
+      - name: Select Docker image
+        id: select-image
+        env:
+          BRANCH_NAME: ${{ github.base_ref || github.ref_name }}
+          OVERRIDE: ${{ inputs.docker_image_override }}
+        run: |
+          set -euo pipefail
+          # The image is prebuilt from Dockerfile_rocm.ci and published to the registry;
+          # CI only pulls it. Bump the tag in .github/ci_config.json to change it.
+          if jq -e --arg key "$BRANCH_NAME" '.docker_images[$key]' .github/ci_config.json > /dev/null; then
+            JSON_KEY="$BRANCH_NAME"
+          else
+            JSON_KEY="default"
+          fi
+          IMAGE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' .github/ci_config.json)
+
+          if [ -n "$OVERRIDE" ]; then
+            echo "::notice::Manual image override: $OVERRIDE"
+            IMAGE="$OVERRIDE"
+          fi
+
+          if [ -z "$IMAGE" ] || [ "$IMAGE" = "null" ]; then
+            echo "::error::No Docker image configured for '$JSON_KEY' in .github/ci_config.json"
+            exit 1
+          fi
+          echo "Using Docker image ($JSON_KEY): $IMAGE"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+
   build_and_test:
     name: Build and Test on GPU
+    needs: select_image
     timeout-minutes: 720
     runs-on: linux-megatron-mi325-8
+    env:
+      DOCKER_IMAGE: ${{ needs.select_image.outputs.image }}
 
     steps:
       - name: Checkout repository
@@ -44,78 +87,18 @@ jobs:
             echo "rocm-smi not found on runner"
           fi
 
-      - name: Determine GPU architecture via rocminfo
-        id: gpu-arch
+      - name: Pull Docker image
         run: |
-          set -e
-          DEFAULT_ARCH="${{ github.event.inputs.gpu_arch || 'gfx942' }}"
-          if command -v rocminfo >/dev/null 2>&1; then
-            ARCH=$(rocminfo | grep -m 1 -oP 'gfx[0-9a-fA-F]+') || true
-          else
-            echo "rocminfo not found on runner, falling back to default arch"
-            ARCH=""
-          fi
-
-          if [ -z "$ARCH" ]; then
-            echo "Could not detect GPU arch automatically, falling back to $DEFAULT_ARCH"
-            ARCH="$DEFAULT_ARCH"
-          fi
-
-          echo "Using GPU arch: $ARCH"
-          echo "arch=$ARCH" >> "$GITHUB_OUTPUT"
-
-      - name: Resolve TransformerEngine commit for branch
-        id: te-ref
-        run: |
-          set -e
-          BRANCH=release_v2.12_rocm
-          SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git "refs/heads/$BRANCH" | cut -f1)
-          if [ -z "$SHA" ]; then
-            echo "::error::Failed to resolve TransformerEngine commit for branch $BRANCH"
-            exit 1
-          fi
-          echo "Using TransformerEngine commit: $SHA"
-          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Determine whether to push image
-        id: push-image
-        run: |
-          # PR and workflow_dispatch jobs build locally only. Push (and cache export)
-          # runs on trusted branch pushes so registry tags stay branch-controlled.
-          if [ "${{ github.event_name }}" = "push" ] && [ "${{ github.ref }}" = "refs/heads/rocm_dev" ]; then
-            echo "should_push=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "should_push=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build Docker image with registry cache
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile_rocm.ci
-          push: ${{ steps.push-image.outputs.should_push == 'true' }}
-          # Write image to disk so `docker run` does not need registry pull (works for PR builds).
-          outputs: type=docker,dest=${{ runner.temp }}/megatron-ci-image.tar
-          tags: |
-            rocm/megatron-lm-private:${{ github.sha }}
-          build-args: |
-            PYTORCH_ROCM_ARCH_OVERRIDE=${{ steps.gpu-arch.outputs.arch }}
-            TE_COMMIT=${{ steps.te-ref.outputs.sha }}
-          cache-from: |
-            type=registry,ref=rocm/megatron-lm-private:cache
-          cache-to: ${{ steps.push-image.outputs.should_push == 'true' && 'type=registry,ref=rocm/megatron-lm-private:cache,mode=max' || '' }}
-
-      - name: Load image for docker run
-        run: docker load -i "${{ runner.temp }}/megatron-ci-image.tar"
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if docker pull "$DOCKER_IMAGE"; then
+              exit 0
+            fi
+            echo "::warning::docker pull failed (attempt $attempt), retrying in 30s"
+            sleep 30
+          done
+          echo "::error::Failed to pull $DOCKER_IMAGE"
+          exit 1
 
       - name: Run unit tests in container
         run: |
@@ -136,7 +119,7 @@ jobs:
             --workdir /workspace/Megatron-LM \
             --name megatron-lm-container \
             --entrypoint /workspace/Megatron-LM/run_unit_tests.sh \
-            rocm/megatron-lm-private:${{ github.sha }}
+            "$DOCKER_IMAGE"
 
       - name: Publish test report
         if: always()
@@ -167,9 +150,3 @@ jobs:
             output/junit_report_*.xml
           if-no-files-found: ignore
           retention-days: 7
-
-      - name: Cleanup Docker image
-        if: always()
-        run: |
-          docker image rm rocm/megatron-lm-private:${{ github.sha }} || true
-          rm -f "${{ runner.temp }}/megatron-ci-image.tar"
