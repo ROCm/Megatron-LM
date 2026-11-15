@@ -50,7 +50,8 @@ for file in $TEST_FILES; do
     file_timeout=$TEST_TIMEOUT
     case "$file" in
         tests/unit_tests/dist_checkpointing/models/test_moe_experts.py | \
-        tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py)
+        tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py | \
+        tests/unit_tests/inference/engines/test_dynamic_engine.py)
             # These heavily parametrized files exceed 30 minutes on MI325X.
             file_timeout=$LONG_TEST_TIMEOUT
             ;;

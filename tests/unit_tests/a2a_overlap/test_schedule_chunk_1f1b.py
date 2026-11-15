@@ -15,15 +15,18 @@ from megatron.core.pipeline_parallel.utils import set_streams
 from megatron.core.transformer.module import float16_to_fp32
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
-    apply_dispatcher_extra_kwargs,
+    apply_flex_backend_kwargs,
     compare_captures,
     deterministic_mode,
     get_compare_tolerances,
     get_test_config,
+    get_valid_dispatcher_configs,
     get_valid_fp8_flags,
-    get_valid_token_dispatcher_types,
 )
 from tests.unit_tests.test_utilities import Utils
+
+# Transformer Engine 2.17 aborts in the A2A overlap suite with a pybind11 GIL dec_ref failure.
+pytestmark = pytest.mark.flaky_in_dev
 
 
 def build_model(config, use_padding_mask=False):
@@ -87,10 +90,12 @@ class TestA2AOverlap:
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("mtp_layers", [0, 1])
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
     @pytest.mark.parametrize("layers", [[2, 1], [1, 2], [1, 1]])
-    def test_1f1b_schedule_model_chunk(self, mtp_layers, dispatcher_type, fp8_flag, layers):
+    def test_1f1b_schedule_model_chunk(
+        self, mtp_layers, dispatcher_type, flex_backend, fp8_flag, layers
+    ):
         """
         Verifies all-to-all overlap optimization in transformer layer produces
         the same results as the reference implementation.
@@ -103,10 +108,8 @@ class TestA2AOverlap:
         datas = []
 
         # create TransformerConfig
-        extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
-
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
+        extra_kwargs = {}
+        apply_flex_backend_kwargs(extra_kwargs, dispatcher_type, flex_backend)
         if fp8_flag is not None:
             if fp8_flag[1] == Fp8Recipe.blockwise:
                 pytest.skip("Blockwise FP8 is not supported in ROCm")
@@ -187,10 +190,12 @@ class TestA2AOverlap:
             torch.cuda.empty_cache()
 
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
-    @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
+    @pytest.mark.parametrize("dispatcher_type,flex_backend", get_valid_dispatcher_configs())
     @pytest.mark.parametrize("layers", [[2, 1], [1, 1]])
     @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])
-    def test_1f1b_schedule_model_chunk_with_padding_mask(self, dispatcher_type, layers, tp_size):
+    def test_1f1b_schedule_model_chunk_with_padding_mask(
+        self, dispatcher_type, flex_backend, layers, tp_size
+    ):
         """
         Verifies all-to-all overlap optimization with padding_mask produces
         the same results as the reference implementation with various TP/EP/CP combinations.
@@ -213,13 +218,8 @@ class TestA2AOverlap:
         datas = []
 
         # create TransformerConfig
-        extra_kwargs = {
-            "moe_token_dispatcher_type": dispatcher_type,
-            "tensor_model_parallel_size": tp_size,
-            "sequence_parallel": tp_size > 1,
-        }
-        if dispatcher_type == "flex":
-            extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
+        extra_kwargs = {"tensor_model_parallel_size": tp_size, "sequence_parallel": tp_size > 1}
+        apply_flex_backend_kwargs(extra_kwargs, dispatcher_type, flex_backend)
         with deterministic_mode():
             for layer_num in layers:
                 output_tensors = []
@@ -315,7 +315,7 @@ class TestA2AOverlap:
 
         # create TransformerConfig with a node-spanning MORI expert-parallel layout
         flex_backend = "mori"
-        extra_kwargs = apply_dispatcher_extra_kwargs({}, "flex", flex_backend)
+        extra_kwargs = apply_flex_backend_kwargs({}, "flex", flex_backend)
         extra_kwargs["expert_model_parallel_size"] = ep_size
         extra_kwargs["tensor_model_parallel_size"] = tp_size
         extra_kwargs["sequence_parallel"] = tp_size > 1
