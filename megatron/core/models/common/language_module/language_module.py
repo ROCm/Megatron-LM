@@ -141,6 +141,17 @@ class LanguageModule(MegatronModule):
             check_and_set_env_variable("NVTE_FUSED_ATTN", 1, AttnBackend.auto)
             check_and_set_env_variable("NVTE_UNFUSED_ATTN", 1, AttnBackend.auto)
 
+        # Pin the FlashAttention generation for TransformerEngine by disabling the
+        # other versions via NVTE_FLASH_ATTN_V2/V3/V4 (default 1). This keeps the
+        # training-side attention on the same kernel as the mcore inference path,
+        # which honors config.flash_attention_version directly.
+        if self.config.flash_attention_version is not None:
+            for version in (2, 3, 4):
+                if version != self.config.flash_attention_version:
+                    check_and_set_env_variable(
+                        f"NVTE_FLASH_ATTN_V{version}", 0, self.config.attention_backend
+                    )
+
     def compute_language_model_loss(self, labels: Tensor, logits: Tensor) -> Tensor:
         """Computes the language model loss (Cross entropy across vocabulary)
 
@@ -180,7 +191,9 @@ class LanguageModule(MegatronModule):
             elif self.config.cross_entropy_fusion_impl == 'native':
                 loss = fused_vocab_parallel_cross_entropy(logits, labels, self.pg_collection.tp)
         else:
-            loss = tensor_parallel.vocab_parallel_cross_entropy(logits, labels)
+            loss = tensor_parallel.vocab_parallel_cross_entropy(
+                logits, labels, tp_group=self.tp_group
+            )
 
         # [s b] => [b, s]
         loss = loss.transpose(0, 1).contiguous()
