@@ -49,9 +49,9 @@ export SAVE_INTERVAL=20000
 export CKPT_FORMAT=torch
 
 # --- activation checkpointing (recompute_granularity full, num_layers 3) ---
-export AC=full
+export AC=${AC:-full}
 export RECOMPUTE_METHOD=block
-export RECOMPUTE_NUM_LAYERS=3
+export RECOMPUTE_NUM_LAYERS=${RECOMPUTE_NUM_LAYERS:-3}
 
 # --- optimizer (use_precision_aware_optimizer + bf16 states) ---
 export USE_PRECISION_AWARE_OPTIMIZER=true

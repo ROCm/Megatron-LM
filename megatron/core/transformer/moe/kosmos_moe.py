@@ -2,8 +2,10 @@
 """MoE layer whose dispatch + experts + combine run as KOSMOS single-launch kernels (EP=8, bf16).
 
 The routed part (dispatch, GEMM1 + SwiGLU, GEMM2, combine, weighted sum) is one forward launch,
-which takes the routing in device memory and also stores the activations the backward needs, and
-its backward is one launch, which returns the bf16 input gradient and the fp32 probs gradient.
+which takes the routing in device memory and keeps what its backward needs in the workspace's
+saved-state pool, and its backward is one launch, which returns the bf16 input gradient and the
+fp32 probs gradient. The backward may read the forward's input again, so it is kept, unchanged,
+until then.
 
 Experts: bias-free SwiGLU, or DeepSeek-V4's clamped SwiGLU (activation_func_clamp_value=10:
 silu(min(g, 10)) * clamp(u, -10, 10), routed and shared experts; top-k 6, 8 or 10). Top-k 1, 2, 4
@@ -16,7 +18,7 @@ experts, then top-k), sigmoid and sqrtsoftplus (expert bias, group-limited; one 
 group_topk = groups, is plain top-k) score functions with aux_loss or seq_aux_loss, the fused router
 runs inside the same two launches, and Megatron's router module only holds the router weight and the
 expert bias. The aux-loss gradient is scaled by MoEAuxLossAutoScaler's scale, which Megatron rewrites
-every microbatch: it is read on the host whenever it was rewritten. Other router configs (and a
+every microbatch: the backward launch reads it on the device (no host sync). Other router configs (and a
 kosmos module without that score function), per-token loss, MTP layers, context parallelism, an
 expert capacity factor, a token count that is not a multiple of 256, and calls with a padding mask,
 keep Megatron's router; its routing is passed to the kernels as top-k ids and weights, so any router
@@ -51,21 +53,65 @@ otherwise the layer runs bf16 experts ("[KOSMOS] layer N: bf16 experts: ...").
 Each layer's decisions (precision, router, shared expert, and every feature left to Megatron with
 its reason) are printed once, at rank 0, at the layer's first forward.
 
-Every MoE layer has its own context (its arena and tables); all layers of one shape share one
-workspace (the per-call buffers), so any recompute pattern works. kosmos_gate.py keeps Megatron
-DDP communication out of the KOSMOS kernels.
+Every MoE layer has its own context (its tables); all layers of one shape share one workspace (the
+per-call buffers and the saved-state pool), so any recompute pattern works. kosmos_gate.py
+keeps Megatron DDP communication out of the KOSMOS kernels.
 
-Capacity: a call that routes more rows to one rank than the arena holds (capacity_rows, per rank,
-experts padded to 256 rows) gets the empty layout and undefined outputs, and sets a status bit on
-the device that stays set until read. At exit every layer's status is read once (one device sync)
-and each rank prints "[KOSMOS] plan status rank R: ..." (OVERFLOW if any call exceeded capacity).
+Capacity: capacity_rows per rank (experts padded to 256 rows) sizes the per-call buffers. A call
+that routes more rows to one rank runs in rounds inside its two launches. Pool: a bf16 forward
+keeps its whole block (Xp, G, A) while the pool has room, else Xp only (its backward then
+recomputes GEMM1); an MXFP8 forward keeps its whole block (G, the column-wise A, and with I < 1024
+the column-wise Xp) or nothing; a call with no room for its Xp (MXFP8: its block), or over
+capacity, runs in rounds inside its launches and keeps nothing (its backward re-sends X and
+recomputes GEMM1).
+Capacity (automatic unless KOSMOS_CAPACITY_FACTOR fixes it): each workspace (all its
+layers' calls share its buffers) starts at 1.5 T k + 256 E_loc rows. At a queried step boundary
+(below) the rows any call since the previous query needed (a running max each forward keeps on the
+device, read with the status words) are reduced over layers and ranks to the peak; the capacity
+grows to peak (1 + KOSMOS_CAPACITY_HEADROOM) when the peak exceeds capacity / (1 + headroom), and
+shrinks to it after 5 queries in a row with the peak below capacity / (1 + 2 headroom) while a
+storing pool holds less than all its calls (kosmos MoeWorkspace.set_capacity, collective over the
+EP group). A growth is limited to the memory the pools leave (as below), the ranks' least, and an
+allocation failure keeps the old capacity. With CUDA graphs the capacity adapts at the first two
+boundaries only.
+Step boundary: the optimizer step post-hook flags it, and the next MoE forward with no stored
+block alive acts on it (rank-identical). The first two boundaries, those within 5 of a capacity or
+pool change and those at Megatron's log interval are queried: one device sync, the capacity
+resizes, then the pool resizes (their reservations depend on the capacity), and one line on rank
+0: "[KOSMOS] iteration(s) N[-M]: rounds in R/L layers (C over capacity)" (the layers with a call
+in rounds since the previous query, and of those the ones over capacity; the others the pool
+forced into rounds, which never grows the capacity) followed by each capacity (old -> new rows,
+reason, peak) and pool (old -> new GiB) change. The others only restart the step's memory
+statistics (no host sync).
+Pool size (automatic unless KOSMOS_POOL_GB or KOSMOS_POOL_LAYERS fixes it): each workspace
+starts at one call's block (the first step's storing calls run in rounds, a one-time warm-up). At
+the top of the first MoE forward after each of the first two optimizer steps, with no stored block
+alive, the pools are re-allocated (kosmos MoeWorkspace.pool_resize, collective over the EP group)
+to what the rank can spare: free memory (after the old pools and PyTorch's cache are released) less
+what PyTorch will still reserve (the step's peak reserved plus its growth in allocated, less what
+it holds now) less KOSMOS_POOL_HEADROOM_GB, split over the workspaces whose calls store in
+proportion to, and at most, what keeps all their stored calls; the pools are re-allocated so again
+after a capacity change. CUDA graphs capture the pool's and the capacity's addresses: with TE
+graphs --cuda-graph-warmup-steps is raised to 3 so that capture follows both resizes; other graphs
+with fewer warmup steps get fixed sizes (capacity factor 4.1, a pool of every local layer's block
+and one more), with a warning.
+At exit every layer's status is read once (one device sync) and each rank prints
+"[KOSMOS] plan status rank R: ..." (OVERFLOW: bad routing, or a KOSMOS error).
 
 Environment:
   KOSMOS_PYTHON             directory of the kosmos module (KOSMOS `make python`: build/python);
                             unset: the module is found on PYTHONPATH
   KOSMOS_WGCAP              launch width (workgroups), default 256
-  KOSMOS_CAPACITY_FACTOR    arena rows reserved per layer and rank = factor * T * k
-                            + 256 E_loc (each local expert's rows padded to 256), default 1.5
+  KOSMOS_CAPACITY_FACTOR    a fixed capacity, per-call rows per rank = factor * T * k + 256 E_loc
+                            (each local expert's rows padded to 256; a larger call runs in rounds
+                            inside its launches, correct but slower; the pool's blocks scale with
+                            it); unset, empty or "auto": automatic (above)
+  KOSMOS_CAPACITY_HEADROOM  automatic capacity: the rows kept above the peak, default 0.125
+  KOSMOS_POOL_GB            a fixed saved-state pool of this size (no resize); a smaller pool
+                            keeps (bf16) Xp only for some layers (their backward recomputes GEMM1),
+                            and a call with no room for its Xp (MXFP8: its block) runs in rounds
+  KOSMOS_POOL_LAYERS        a fixed pool for this many whole blocks (no resize)
+  KOSMOS_POOL_HEADROOM_GB   automatic pool size: memory left free, default 8
   KOSMOS_ROUTER             1 (default): the fused router where supported; 0: Megatron's router
   KOSMOS_DDP_GATE           1 (default): the DDP gate (kosmos_gate.py); 0: off
   KOSMOS_SHARED             1 (default): the shared expert in the KOSMOS launches where supported;
@@ -82,6 +128,7 @@ from functools import partial
 
 import torch
 import torch.distributed as dist
+from torch.optim.optimizer import register_optimizer_step_post_hook
 
 from megatron.core.fp8_utils import is_first_last_bf16_layer, is_float8tensor
 from megatron.core.num_microbatches_calculator import get_num_microbatches
@@ -120,9 +167,11 @@ def _kosmos():
 
 
 def _ptr(t):
-    """Device address of a contiguous tensor; None -> 0 (null)."""
+    """Device address of a contiguous tensor; None -> 0 (null); an int (kosmos.MOE_SAVE) as is."""
     if t is None:
         return 0
+    if isinstance(t, int):
+        return t
     assert t.is_contiguous(), "KOSMOS takes contiguous tensors"
     return t.data_ptr()
 
@@ -144,12 +193,95 @@ def _host_allgather(ep_group):
     return allgather
 
 
+_CF_START = 1.5
+_CF_FIXED = 4.1
+_SHRINK_AFTER = 5
+_ROWS = 256
+
+
+def _cf():
+    """KOSMOS_CAPACITY_FACTOR, or None (unset, empty or "auto": automatic capacity)."""
+    v = os.environ.get("KOSMOS_CAPACITY_FACTOR", "auto")
+    return None if v in ("", "auto") else float(v)
+
+
+def _cap_headroom():
+    return float(os.environ.get("KOSMOS_CAPACITY_HEADROOM", "0.125"))
+
+
+def _pool_fixed(config, capacity_rows, mxfp8):
+    """The fixed pool size of KOSMOS_POOL_GB, or of KOSMOS_POOL_LAYERS whole blocks of capacity_rows
+    rows (KOSMOS moe_pool_bytes; KOSMOS takes the ranks' least); None: automatic."""
+    if os.environ.get("KOSMOS_POOL_GB") is not None:
+        return int(float(os.environ["KOSMOS_POOL_GB"]) * 2**30)
+    n = os.environ.get("KOSMOS_POOL_LAYERS")
+    if n is None:
+        return None
+    return _pool_bytes(config, capacity_rows, int(n), mxfp8)
+
+
+def _pool_bytes(config, capacity_rows, n, mxfp8):
+    """Pool bytes for n whole blocks of capacity_rows rows and one more call (moe_pool_bytes; MXFP8:
+    G, the column-wise A and with I < 1024 the column-wise Xp, with scales)."""
+    H, I = config.hidden_size, config.moe_ffn_hidden_size
+    if mxfp8:
+        row = I * 165 // 32 + (H * 33 // 32 if I < 1024 else 0)
+        return (n + 1) * ((capacity_rows + 512) * row + 2 * H)
+    return (n + 1) * (capacity_rows + 512) * (2 * H + 6 * I)
+
+
+def _local_layers(config):
+    """The transformer layers this pipeline stage holds (an upper bound on its MoE layers)."""
+    pp = getattr(config, "pipeline_model_parallel_size", 1) or 1
+    return -(-config.num_layers // pp)
+
+
+class _Pool:
+    """A training workspace's saved-state pool: its sizes so far (bytes per rank), its contexts,
+    and its stored blocks still awaiting their backward (now and at most); with an automatic
+    capacity (auto_cap) also the capacities so far (rows), the boundaries in a row below the shrink
+    threshold and the rows whose allocation failed."""
+
+    def __init__(self, ws, name, fixed, group, auto_cap, rows):
+        self.ws, self.name, self.fixed, self.group, self.auto_cap = ws, name, fixed, group, auto_cap
+        self.sizes = []
+        self.nctx = self.live = self.peak = 0
+        self.caps = [-(-rows // _ROWS) * _ROWS]
+        self.low = 0
+        self.cap_fail = None
+
+    def stored(self):
+        self.live += 1
+        self.peak = max(self.peak, self.live)
+
+    def released(self):
+        self.live -= 1
+
+    def size(self):
+        return self.ws.pool_info()["bytes"]
+
+    def keep_all(self):
+        """Bytes that keep every stored call in full: the peak's blocks, the next call's block and the
+        Xp KOSMOS reserves (bf16) for each context without a stored block (kosmos_moe_pool_info)."""
+        i = self.ws.pool_info()
+        return (self.peak + 1) * i["head_bytes"] + max(0, self.nctx - self.peak) * i["reserve_bytes"]
+
+
 def _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8):
+    """-> (workspace, its _Pool)."""
     kosmos = _kosmos()
     k = config.moe_router_topk
+    graphs_fixed = _graphs_fixed(config)
+    cf = _cf()
+    if cf is None and graphs_fixed:
+        cf = _CF_FIXED
+    auto_cap = cf is None
     # Each local expert's rows are padded to 256 in the arena: up to 255 more rows per expert.
-    factor = float(os.environ.get("KOSMOS_CAPACITY_FACTOR", "1.5"))
-    capacity_rows = int(factor * T * k) + num_local_experts * 256
+    capacity_rows = int((cf if cf is not None else _CF_START) * T * k) + num_local_experts * 256
+    fixed = _pool_fixed(config, capacity_rows, mxfp8)
+    if fixed is None and graphs_fixed:
+        fixed = _pool_bytes(config, capacity_rows, _local_layers(config), mxfp8)
+    _auto_setup(fixed is None, auto_cap)
     rcfg = None
     if router is not None:
         # router: (score, groups, group_topk, aux_groups, aux_coeff, scale, force)
@@ -158,7 +290,7 @@ def _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8
     extra = {} if act is None else {"act": act}
     if config.moe_apply_probs_on_input:
         extra["probs_in"] = True
-    return kosmos.MoeWorkspace(
+    ws = kosmos.MoeWorkspace(
         config.hidden_size,
         config.moe_ffn_hidden_size,
         num_local_experts,
@@ -171,17 +303,22 @@ def _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8
         router=rcfg,
         shared=shared,
         mxfp8=mxfp8,
+        pool_bytes=fixed or 0,
         **extra,
     )
+    name = f"T={T} H={config.hidden_size} I={config.moe_ffn_hidden_size}" + (" router" if router else "")
+    name += " shared" if shared else ""
+    name += " mxfp8" if mxfp8 else ""
+    return ws, _Pool(ws, name, fixed is not None, ep_group, auto_cap, capacity_rows)
 
 
 def _new_context(ws):
     return _kosmos().MoeContext(ws)
 
 
-def _new_g(K, x, need_g):
-    """The forward's stored activations for the backward (K.g_bytes bytes), or None."""
-    return torch.empty((K.g_bytes + 1) // 2, dtype=x.dtype, device=x.device) if need_g else None
+def _new_g(need_g):
+    """kosmos.MOE_SAVE (the forward saves into the workspace's pool), or None."""
+    return _kosmos().MOE_SAVE if need_g else None
 
 
 def _topk(probs, routing_map, k):
@@ -208,7 +345,7 @@ def _quantize_mxfp8(w, col):
 
 # MXFP8 (KosmosExperts.mxfp8_row / mxfp8_col): mxw = (W1, W1_scale, W2, W2_scale) row-wise, mxc the
 # same column-wise, each followed by (Ws1, Ws1_scale, Ws2, Ws2_scale) with the fused shared expert;
-# None: bf16. The MXFP8 forwards always store G (and Gs), and the MXFP8 backwards read the forward's X.
+# None: bf16. The MXFP8 forwards always write Gs, and the MXFP8 backwards read the forward's X.
 
 
 def _new_dprobs(dout, w1):
@@ -220,7 +357,7 @@ def _new_dprobs(dout, w1):
 def _forward(K, x, w1, w2, idx, w, need_g, mxw=None):
     """-> (out, G or None)."""
     out = torch.empty_like(x)
-    G = _new_g(K, x, need_g or mxw is not None)
+    G = _new_g(need_g)
     if mxw is None:
         K.forward(*map(_ptr, (x, w1, w2, idx, w, out, G)), _stream())
     else:
@@ -242,7 +379,7 @@ def _backward(K, dout, G, w1, w2, x=None, mxc=None):
 def _forward_router(K, x, wr, bias, w1, w2, seed, need_g, mxw=None):
     """-> (out, G or None, aux loss, tokens per expert)."""
     out = torch.empty_like(x)
-    G = _new_g(K, x, need_g or mxw is not None)
+    G = _new_g(need_g)
     aux = torch.empty(1, dtype=torch.float32, device=x.device)
     tpe = torch.empty(wr.shape[0], dtype=torch.int32, device=x.device)
     outs = (out, G, aux, tpe, seed)
@@ -260,10 +397,10 @@ def _backward_router(K, dout, G, x, w1, w2, wr, aux_scale, mxc=None):
     outs = map(_ptr, (dX, dW1, dW2, dWr))
     if mxc is None:
         ins = map(_ptr, (dout, G, x, w1, w2, wr))
-        K.backward_router(*ins, aux_scale, *outs, _stream())
+        K.backward_router(*ins, _ptr(aux_scale), *outs, _stream())
     else:
         ins = map(_ptr, (dout, G, x, *mxc[:4], wr))
-        K.backward_router_mxfp8(*ins, aux_scale, *outs, _stream())
+        K.backward_router_mxfp8(*ins, _ptr(aux_scale), *outs, _stream())
     return dX, dW1, dW2, dWr
 
 
@@ -291,8 +428,7 @@ def _dsgate(sgate):
 def _forward_shared(K, x, w1, w2, ws1, ws2, idx, w, need_g, sgate, mxw=None):
     """-> (out, G or None, Gs or None)."""
     out = torch.empty_like(x)
-    need_g = need_g or mxw is not None
-    G, Gs = _new_g(K, x, need_g), _new_gs(x, ws1, need_g)
+    G, Gs = _new_g(need_g), _new_gs(x, ws1, need_g or mxw is not None)
     if mxw is None:
         ins = map(_ptr, (x, w1, w2, ws1, ws2, idx, w, out, G, Gs))
         K.forward_shared(*ins, _stream(), **_sgate_kw(sgate))
@@ -306,8 +442,7 @@ def _forward_shared(K, x, w1, w2, ws1, ws2, idx, w, need_g, sgate, mxw=None):
 def _forward_router_shared(K, x, wr, bias, w1, w2, ws1, ws2, seed, need_g, sgate, mxw=None):
     """-> (out, G or None, Gs or None, aux loss, tokens per expert)."""
     out = torch.empty_like(x)
-    need_g = need_g or mxw is not None
-    G, Gs = _new_g(K, x, need_g), _new_gs(x, ws1, need_g)
+    G, Gs = _new_g(need_g), _new_gs(x, ws1, need_g or mxw is not None)
     aux = torch.empty(1, dtype=torch.float32, device=x.device)
     tpe = torch.empty(wr.shape[0], dtype=torch.int32, device=x.device)
     outs = (out, G, Gs, aux, tpe, seed)
@@ -397,11 +532,11 @@ def _backward_router_shared(
     outs = map(_ptr, (dX, dW1, dW2, dWr, dWs1, dWs2))
     if mxc is None:
         ins = map(_ptr, (dout, G, Gs, x, w1, w2, ws1, ws2, wr))
-        K.backward_router_shared(*ins, aux_scale, *outs, acc, _stream(), **kw)
+        K.backward_router_shared(*ins, _ptr(aux_scale), *outs, acc, _stream(), **kw)
     else:
         assert len(mxc) == 8, "MXFP8 shared expert without its quantized weights"
         ins = map(_ptr, (dout, G, Gs, x, *mxc, wr))
-        K.backward_router_shared_mxfp8(*ins, aux_scale, *outs, acc, _stream(), **kw)
+        K.backward_router_shared_mxfp8(*ins, _ptr(aux_scale), *outs, acc, _stream(), **kw)
     return (dX, dW1, dW2, dWr) + _shared_grads(ws1, ws2, dWs1, dWs2, acc) + (dsgate,)
 
 
@@ -411,8 +546,8 @@ _WS = {}
 
 
 def _workspace(config, ep_group, num_local_experts, T, router=None, shared=False, mxfp8=False):
-    """The workspace shared by every MoE layer of one shape (and fused-router, shared-expert and
-    MXFP8 config)."""
+    """(The workspace shared by every MoE layer of one shape (and fused-router, shared-expert and
+    MXFP8 config), its _Pool)."""
     key = (
         config.hidden_size,
         config.moe_ffn_hidden_size,
@@ -428,6 +563,321 @@ def _workspace(config, ep_group, num_local_experts, T, router=None, shared=False
     if key not in _WS:
         _WS[key] = _new_workspace(config, ep_group, num_local_experts, T, router, shared, mxfp8)
     return _WS[key]
+
+
+# Step boundaries: the optimizer step post-hook only flags one; the next MoE forward with no stored
+# block alive acts on it (_step_boundary).
+_AUTO = {
+    "on": False,
+    "step": False,
+    "resizes": 0,
+    "refusals": 0,
+    "alloc0": None,
+    "boundaries": 0,
+    "graphs": False,
+    "iter": 0,
+    "stable": 0,
+    "queried": 0,
+}
+_MAX_RESIZES = 2
+_MAX_REFUSALS = 5
+
+
+def _rank0():
+    return not dist.is_initialized() or dist.get_rank() == 0
+
+
+def _iteration():
+    """Megatron's number of the iteration whose optimizer step just ran (as its log prints it)."""
+    try:
+        from megatron.training.global_vars import get_args
+
+        return get_args().curr_iteration + 1
+    except Exception:  # pylint: disable=broad-except
+        return _AUTO["iter"] + 1
+
+
+def _on_optimizer_step(optimizer, args, kwargs):
+    _AUTO["step"] = True
+    _AUTO["iter"] = _iteration()
+
+
+def _graphs_fixed(config):
+    """CUDA graphs keep the addresses captured, so the pool and capacity resizes must come before
+    the capture (the first _MAX_RESIZES boundaries): with TE graphs the warmup steps are raised to
+    _MAX_RESIZES + 1 (captured after them); otherwise (local or full-iteration graphs, fixed when
+    the model was built) True: fixed sizes. Decided once, the same on every rank."""
+    if "graphs_fixed" in _AUTO:
+        return _AUTO["graphs_fixed"]
+    impl = getattr(config, "cuda_graph_impl", "none")
+    graphs = impl != "none" or getattr(config, "enable_cuda_graph", False)
+    fixed = False
+    if graphs and config.cuda_graph_warmup_steps < _MAX_RESIZES + 1:
+        args = None
+        try:
+            from megatron.training.global_vars import get_args
+
+            args = get_args()
+        except Exception:  # pylint: disable=broad-except
+            pass
+        scope = str(getattr(config, "cuda_graph_scope", "") or "")
+        if impl == "transformer_engine" and args is not None and "full_iteration" not in scope:
+            old = args.cuda_graph_warmup_steps
+            args.cuda_graph_warmup_steps = config.cuda_graph_warmup_steps = _MAX_RESIZES + 1
+            if _rank0():
+                print(
+                    f"[KOSMOS] CUDA graphs: --cuda-graph-warmup-steps raised {old} -> "
+                    f"{_MAX_RESIZES + 1} (capture after the pool and capacity resizes)",
+                    flush=True,
+                )
+        else:
+            fixed = True
+            if _rank0():
+                print(
+                    f"[KOSMOS] WARNING: CUDA graphs ({impl}) with --cuda-graph-warmup-steps "
+                    f"{config.cuda_graph_warmup_steps} < {_MAX_RESIZES + 1} cannot be raised here: "
+                    f"fixed sizes (KOSMOS_CAPACITY_FACTOR {_CF_FIXED}, pool of every local layer's "
+                    "block and one more) unless set explicitly",
+                    flush=True,
+                )
+    _AUTO["graphs"] = graphs
+    _AUTO["graphs_fixed"] = fixed
+    return fixed
+
+
+def _auto_setup(pool, capacity):
+    """Every workspace: register the step hook once (the boundary's status line)."""
+    ws_type = _kosmos().MoeWorkspace
+    assert hasattr(ws_type, "pool_resize") and hasattr(ws_type, "set_capacity"), (
+        "KOSMOS module without MoeWorkspace.pool_resize / set_capacity: rebuild it (make python)"
+    )
+    if not _AUTO["on"]:
+        register_optimizer_step_post_hook(_on_optimizer_step)
+        _AUTO["on"] = True
+    if pool and not _AUTO.get("pool_said") and _rank0():
+        _AUTO["pool_said"] = True
+        print(
+            "[KOSMOS] saved-state pool: automatic (one call's block until the first optimizer step)",
+            flush=True,
+        )
+    if capacity and not _AUTO.get("cap_said") and _rank0():
+        _AUTO["cap_said"] = True
+        print(
+            f"[KOSMOS] capacity: automatic from {_CF_START} T k rows (headroom {_cap_headroom()})",
+            flush=True,
+        )
+
+
+def _auto_pools():
+    return [p for _, p in _WS.values() if not p.fixed]
+
+
+def _iteration_start():
+    torch.cuda.reset_peak_memory_stats()
+    _AUTO["alloc0"] = torch.cuda.memory_allocated()
+
+
+def _pool_refused(why):
+    """A resize refused on every rank (nothing changed for that pool): retried at the next step
+    boundary; an error after _MAX_REFUSALS while the pools are still at one block."""
+    _AUTO["refusals"] += 1
+    if _rank0():
+        print(f"[KOSMOS] pool resize refused ({why}), refusal {_AUTO['refusals']}", flush=True)
+    if _AUTO["resizes"] == 0 and _AUTO["refusals"] >= _MAX_REFUSALS:
+        raise RuntimeError(
+            f"KOSMOS: the saved-state pool resize was refused {_MAX_REFUSALS} times; the pools are "
+            "still one call's block (set KOSMOS_POOL_GB to fix the size)"
+        )
+
+
+def _resize(pool, nbytes):
+    """True if done; False if refused (a stored block alive or a stream capture)."""
+    if torch.cuda.is_current_stream_capturing():
+        _pool_refused("inside a CUDA graph capture")
+        return False
+    r = pool.ws.pool_resize(int(nbytes))
+    if r:
+        _pool_refused("a stored block awaits its backward" if r == 1 else "inside a stream capture")
+    return r == 0
+
+
+def _tag(p):
+    return f" ({p.name})" if len(_WS) > 1 else ""
+
+
+def _capacity_target(p, q, pressure):
+    """(rows, reason) for an automatic capacity at a boundary, or None: grow to peak (1 + h) when
+    the peak exceeds capacity / (1 + h); shrink to it after _SHRINK_AFTER boundaries in a row with
+    the peak below capacity / (1 + 2 h), and only under memory pressure (a storing pool holds less
+    than all its calls). Inputs and state are the same on every rank."""
+    peak, cap, h = q["peak"], q["rows"], _cap_headroom()
+    if not peak:
+        return None
+    want = min(-(-int(peak * (1 + h)) // _ROWS) * _ROWS, q["max_rows"])
+    if peak * (1 + h) > cap and want > cap:
+        p.low = 0
+        if p.cap_fail is not None and want >= p.cap_fail:
+            return None
+        return want, "overflow" if peak > cap else "grow"
+    if peak * (1 + 2 * h) < cap:
+        p.low += 1
+        if p.low >= _SHRINK_AFTER and want < cap and pressure:
+            p.low = 0
+            return want, "shrink"
+        return None
+    p.low = 0
+    return None
+
+
+def _agree_min(group, v):
+    t = torch.tensor([v], dtype=torch.int64, device="cuda")
+    dist.all_reduce(t, op=dist.ReduceOp.MIN, group=group)
+    return int(t.item())
+
+
+def _set_capacity(p, cur, rows, reason, peak, mem, events):
+    """One workspace's capacity cur -> rows; a growth limited to what the memory leaves (mem: the
+    step's peak reserved and growth in allocated, the headroom), the ranks' least."""
+    if rows > cur:
+        free, _ = torch.cuda.mem_get_info()
+        room = free - max(0, mem[0] + mem[1] - torch.cuda.memory_reserved()) - mem[2]
+        need = p.ws.capacity_bytes(rows) - p.ws.capacity_bytes(cur)
+        if need > room:
+            rows = cur + max(0, room) // max(1, need // (rows - cur)) // _ROWS * _ROWS
+            reason += ", memory-limited"
+        rows = _agree_min(p.group, rows)
+    if rows == cur:
+        events.append(f"capacity{_tag(p)} {cur} rows kept ({reason}, peak {peak})")
+        return
+    r = p.ws.set_capacity(int(rows))
+    if r == 0:
+        p.caps.append(rows)
+        p.cap_fail = None if rows < cur else p.cap_fail
+        events.append(f"capacity{_tag(p)} {cur} -> {rows} rows ({reason}, peak {peak})")
+    elif r == 3:
+        p.cap_fail = rows
+        events.append(
+            f"capacity{_tag(p)} {cur} -> {rows} rows FAILED, out of memory ({reason}, peak {peak})"
+        )
+    else:
+        events.append(f"capacity{_tag(p)} {cur} -> {rows} rows refused ({reason}, peak {peak})")
+
+
+def _resizes(changes, events):
+    """The boundary's capacity changes (p, cur, rows, reason, peak), then the automatic pools'
+    resize (at the first _MAX_RESIZES boundaries and after a capacity change): to what the rank can
+    spare, split over the storing workspaces in proportion to, and at most, what keeps all their
+    calls. The step boundary has checked what refuses a resize (a stored block, a capture), so a
+    refusal here is a bug: the pools shrunk so far are restored and it raises."""
+    auto = _auto_pools()
+    first = _AUTO["resizes"] < _MAX_RESIZES
+    pools_due = bool(auto) and (first or bool(changes))
+    if not pools_due and not changes:
+        return
+    headroom = int(float(os.environ.get("KOSMOS_POOL_HEADROOM_GB", "8")) * 2**30)
+    grown = torch.cuda.memory_allocated() - _AUTO["alloc0"]
+    mem = (torch.cuda.max_memory_reserved(), grown, headroom)
+    storing = [p for p in auto if p.peak] if pools_due else []
+    old = [p.size() for p in storing]
+    for p, o in zip(storing, old):
+        if not p.sizes:
+            p.sizes.append(o)
+    done = []
+    for p in storing:
+        if not _resize(p, 0):
+            _restore(done, storing, old)
+        done.append(p)
+    torch.cuda.empty_cache()
+    for c in changes:
+        _set_capacity(*c, mem, events)
+    if storing:
+        free, _ = torch.cuda.mem_get_info()
+        need = [p.keep_all() for p in storing]
+        torch_more = max(0, mem[0] + mem[1] - torch.cuda.memory_reserved())
+        head = sum(p.size() for p in storing)
+        budget = max(0, free + head - torch_more - headroom)
+        total = sum(need) or 1
+        for i, (p, n, o) in enumerate(zip(storing, need, old)):
+            if not _resize(p, min(n, budget * n // total)):
+                _restore(storing[i:], storing, old)
+            p.sizes.append(p.size())
+            events.append(
+                f"pool{_tag(p)} {o / 2**30:.2f} -> {p.sizes[-1] / 2**30:.2f} GiB (keep-all "
+                f"{n / 2**30:.2f}, budget {budget / 2**30:.2f})"
+            )
+    if pools_due and first:
+        _AUTO["resizes"] += 1
+
+
+def _restore(shrunk, storing, old):
+    """A refused pool resize: the pools in shrunk back to their old sizes, then an error."""
+    for p in shrunk:
+        p.ws.pool_resize(int(old[storing.index(p)]))
+    raise RuntimeError(
+        "KOSMOS: a pool resize was refused at a step boundary that had checked no stored block is "
+        "alive and no capture is running (pools restored to their old sizes)"
+    )
+
+
+def _log_interval():
+    try:
+        from megatron.training.global_vars import get_args
+
+        return max(1, int(get_args().log_interval))
+    except Exception:  # pylint: disable=broad-except
+        return 1
+
+
+def _step_boundary():
+    """At the top of an MoE forward after an optimizer step, with no stored block alive (rank-
+    identical): the step's memory statistics restart; at the first _MAX_RESIZES boundaries, within
+    _SHRINK_AFTER boundaries of a change, and at Megatron's log interval (else no host sync), one
+    device sync and one query per workspace (status words and peak rows since the previous query),
+    the capacity and pool resizes due, and one line on rank 0."""
+    if not _AUTO["on"]:
+        return
+    if _AUTO["alloc0"] is None:
+        _iteration_start()
+    if not _AUTO["step"] or torch.cuda.is_current_stream_capturing():
+        return
+    if any(p.live for _, p in _WS.values()):
+        return
+    _AUTO["step"] = False
+    _AUTO["boundaries"] += 1
+    it = _AUTO["iter"]
+    busy = _AUTO["boundaries"] <= _MAX_RESIZES or _AUTO["stable"] < _SHRINK_AFTER
+    if not busy and it % _log_interval():
+        _AUTO["stable"] += 1
+        _iteration_start()
+        return
+    try:
+        torch.cuda.synchronize()
+        frozen = _AUTO["graphs"] and _AUTO["boundaries"] > _MAX_RESIZES
+        pools = [p for _, p in _WS.values() if p.peak]
+        pressure = any(p.size() < p.keep_all() for p in pools)
+        nl = nr = nc = 0
+        changes, events = [], []
+        for ws, p in _WS.values():
+            q = ws.capacity_query()
+            nl, nr = nl + q["nctx"], nr + q["rounds"]
+            nc += q["cap_rounds"]
+            auto = p.auto_cap and not frozen
+            d = _capacity_target(p, q, pressure) if auto else None
+            if d is not None:
+                changes.append((p, q["rows"], d[0], d[1], q["peak"]))
+        n0 = sum(len(p.caps) + len(p.sizes) for _, p in _WS.values())
+        _resizes(changes, events)
+        n1 = sum(len(p.caps) + len(p.sizes) for _, p in _WS.values())
+        _AUTO["stable"] = 0 if n1 != n0 else _AUTO["stable"] + 1
+        first = _AUTO["queried"] + 1
+        span = f"iteration {it}" if first >= it else f"iterations {first}-{it}"
+        _AUTO["queried"] = it
+        if _rank0():
+            more = "".join(f"; {e}" for e in events)
+            line = f"[KOSMOS] {span}: rounds in {nr}/{nl} layers ({nc} over capacity){more}"
+            print(line, flush=True)
+    finally:
+        _iteration_start()
 
 
 def w1_kosmos_perm(I, device=None):
@@ -447,29 +897,53 @@ _CONTEXTS = []
 def _report_status():
     """At exit: each layer's device status (the OR over all its calls), one line per rank."""
     rank = dist.get_rank() if dist.is_initialized() else int(os.environ.get("RANK", "0"))
-    flagged, n = [], 0
+    flagged, n, notes = [], 0, [0, 0, 0]
     try:
         for kc in _CONTEXTS:
             st = kc.ctx.plan_status()
             n += 1
-            if st:
-                flagged.append(f"layer {kc.layer_number} status {st}")
+            if st & 71:
+                flagged.append(f"layer {kc.layer_number} status {st & 71}")
+            for i in range(3):
+                notes[i] += bool(st & (8 << i))
         rows = max(kc.ctx.info()["arena_rows"] for kc in _CONTEXTS)
     except Exception as e:  # pylint: disable=broad-except
         print(f"[KOSMOS] plan status rank {rank}: QUERY FAILED: {e}", flush=True)
         return
-    cf = os.environ.get("KOSMOS_CAPACITY_FACTOR", "1.5")
+    cf = _cf()
+    pools = [p for _, p in _WS.values()]
+    autos = "; ".join(
+        f"{p.name}: " + " -> ".join(str(r) for r in p.caps) for p in pools if p.auto_cap
+    )
+    if cf is not None:
+        cf = f"KOSMOS_CAPACITY_FACTOR {cf}"
+    else:
+        cf = f"capacity auto, {autos or 'none'} rows"
+    for p in pools:
+        if not p.sizes:
+            p.sizes.append(p.size())
+    pool = "; ".join(
+        f"{p.name}: " + " -> ".join(f"{b / 2**30:.2f}" for b in p.sizes) + " GiB" for p in pools if p.sizes
+    )
+    pool = f", pool ({pool})" if pool else ""
+    if any(notes):
+        pool += (
+            f"; layers with calls in rounds {notes[0]}, keeping Xp only {notes[1]}, "
+            f"keeping nothing {notes[2]}"
+        )
     if flagged:
         print(
             f"[KOSMOS] plan status rank {rank}: OVERFLOW or bad routing in {len(flagged)} of {n} "
-            f"layers ({', '.join(flagged)}; 4 = over capacity, 1 = bad expert id, 2 = duplicate); "
-            f"arena {rows} rows (KOSMOS_CAPACITY_FACTOR {cf}): those calls' outputs are undefined",
+            f"layers ({', '.join(flagged)}; 4 = over capacity (KOSMOS error), 1 = bad expert id, "
+            f"2 = duplicate, 64 = a single pass kept nothing (KOSMOS error)); arena {rows} rows "
+            f"({cf}){pool}: those calls' "
+            f"outputs are undefined",
             flush=True,
         )
     else:
         print(
             f"[KOSMOS] plan status rank {rank}: ok, {n} layers, arena {rows} rows "
-            f"(KOSMOS_CAPACITY_FACTOR {cf})",
+            f"({cf}){pool}",
             flush=True,
         )
 
@@ -486,14 +960,16 @@ class KosmosContext:
         self.mxfp8 = mxfp8
         self.layer_number = None
         self.ctx = None
+        self.pool = None
         self.T = None
 
     def get(self, T, router=None):
         if self.ctx is None:
-            ws = _workspace(
+            ws, self.pool = _workspace(
                 self.config, self.ep_group, self.E_loc, T, router, self.shared, self.mxfp8
             )
             self.ctx = _new_context(ws)
+            self.pool.nctx += 1
             self.T = T
             if not _CONTEXTS:
                 atexit.register(_report_status)
@@ -524,6 +1000,7 @@ class KosmosMoEFunction(torch.autograd.Function):
     ):
         idx32, w = _topk(probs, routing_map, kctx.config.moe_router_topk)
         K = kctx.get(hidden.shape[0])
+        _step_boundary()
         ctx.shared = ws1 is not None
         hidden = hidden.contiguous()
         kosmos_gate.before_kernel()
@@ -536,14 +1013,14 @@ class KosmosMoEFunction(torch.autograd.Function):
             out, G = _forward(K, hidden, w1, w2, idx32, w, need_g, mxw)
             Gs = None
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
+        if need_g:
+            kctx.pool.stored()
+        # The backward may read the forward's X (MXFP8, probs on input, the bf16 pool, a call over
+        # capacity): keep it alive and unchanged.
         if ctx.shared:
             ctx.save_for_backward(w1, w2, hidden, ws1, ws2, sgate)
-        elif experts is not None or kctx.config.moe_apply_probs_on_input:
-            # The MXFP8 and probs-on-input backwards read the forward's X: keep it alive and
-            # unchanged.
-            ctx.save_for_backward(w1, w2, hidden)
         else:
-            ctx.save_for_backward(w1, w2)
+            ctx.save_for_backward(w1, w2, hidden)
         ctx.G, ctx.Gs = (G, Gs) if need_g else (None, None)
         ctx.kctx, ctx.experts = kctx, experts
         return out
@@ -566,28 +1043,29 @@ class KosmosMoEFunction(torch.autograd.Function):
             dX, dprobs, dW1, dW2 = _backward(K, dout, ctx.G, w1, w2, hidden, mxc)
             dWs1 = dWs2 = dsgate = None
         kosmos_gate.after_kernel(backward=True)
+        ctx.kctx.pool.released()
         ctx.G = ctx.Gs = ctx.experts = None
         return dX, dprobs, None, dW1, dW2, None, None, dWs1, dWs2, dsgate, None
 
 
-_AUX_SCALE = (None, None, 1.0)
+_AUX_SCALE_ONE = None
 
 
 def _aux_scale():
-    """MoEAuxLossAutoScaler.main_loss_backward_scale as a float. Megatron writes it after every
-    microbatch's forward (set_loss_scale: copy_ into the tensor); it is read on the host (one sync)
-    only when the tensor was replaced or written since the last read."""
-    global _AUX_SCALE
+    """MoEAuxLossAutoScaler.main_loss_backward_scale, the device fp32 scale the backward launch
+    reads when it runs (Megatron updates it in place); a device 1 if unset."""
+    global _AUX_SCALE_ONE
     from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
 
     s = MoEAuxLossAutoScaler.main_loss_backward_scale
     if s is None:
-        return 1.0
-    if not torch.is_tensor(s):
-        return float(s)
-    if _AUX_SCALE[0] is not s or _AUX_SCALE[1] != s._version:
-        _AUX_SCALE = (s, s._version, float(s.item()))
-    return _AUX_SCALE[2]
+        if _AUX_SCALE_ONE is None:
+            _AUX_SCALE_ONE = torch.ones(1, dtype=torch.float32, device="cuda")
+        return _AUX_SCALE_ONE
+    assert (
+        s.is_cuda and s.dtype == torch.float32 and s.numel() == 1
+    ), "KOSMOS reads a device fp32 scale"
+    return s.contiguous()
 
 
 class KosmosRouterMoEFunction(torch.autograd.Function):
@@ -615,6 +1093,7 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
     ):
         T, _ = hidden.shape
         K = kctx.get(T, router_cfg)
+        _step_boundary()
         ctx.shared = ws1 is not None
         hidden = hidden.contiguous()
         kosmos_gate.before_kernel()
@@ -629,6 +1108,8 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
             )
             Gs = None
         kosmos_gate.after_kernel(backward=False, need_backward=need_g)
+        if need_g:
+            kctx.pool.stored()
         if ctx.shared:
             ctx.save_for_backward(hidden, wr, w1, w2, ws1, ws2, sgate)
         else:
@@ -670,6 +1151,7 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
             )
             dWs1 = dWs2 = dsgate = None
         kosmos_gate.after_kernel(backward=True)
+        ctx.kctx.pool.released()
         ctx.G = ctx.Gs = ctx.experts = None
         return dX, dWr, None, dW1, dW2, None, None, None, None, dWs1, dWs2, dsgate, None
 
