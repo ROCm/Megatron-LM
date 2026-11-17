@@ -54,6 +54,7 @@ pynvml \
 fastapi \
 uvicorn \
 openai \
+aiohttp \
 msgpack \
 tensorboard
 
