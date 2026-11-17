@@ -1,0 +1,148 @@
+name: Publish ROCm CI Docker image
+
+# Builds Dockerfile_rocm.ci and pushes it to the container registry. CI
+# (megatron-ci.yml) only pulls the image pinned in .github/ci_config.json, so
+# after publishing, bump that pin in a PR.
+#
+# Required repository secrets:
+#   HARBOR_USERNAME / HARBOR_PASSWORD - registry robot account with push access
+#
+# Optional repository variables:
+#   HARBOR_REGISTRY              - defaults to registry-sc-harbor.amd.com
+#   MEGATRON_CI_IMAGE_REPOSITORY - defaults to framework/megatron-lm-ci
+#   CI_IMAGE_BUILD_RUNNER        - defaults to linux-megatron-mi325-8
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Tag to push, e.g. rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_<sha8>_gfx942'
+        required: true
+        type: string
+      te_ref:
+        description: 'TransformerEngine branch, tag or commit to build'
+        required: false
+        default: 'release_v2.12_rocm'
+        type: string
+      gpu_arch:
+        description: 'GPU architecture to compile for'
+        required: false
+        default: 'gfx942'
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.image_tag }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    name: Build and push CI image
+    runs-on: ${{ vars.CI_IMAGE_BUILD_RUNNER || 'linux-megatron-mi325-8' }}
+    timeout-minutes: 720
+    env:
+      REGISTRY: ${{ vars.HARBOR_REGISTRY || 'registry-sc-harbor.amd.com' }}
+      REPOSITORY: ${{ vars.MEGATRON_CI_IMAGE_REPOSITORY || 'framework/megatron-lm-ci' }}
+      IMAGE_TAG: ${{ inputs.image_tag }}
+      TE_REF: ${{ inputs.te_ref }}
+      GPU_ARCH: ${{ inputs.gpu_arch }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Validate inputs
+        id: validate
+        run: |
+          set -euo pipefail
+          if ! [[ "$IMAGE_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "::error::image_tag must match [A-Za-z0-9_][A-Za-z0-9_.-]{0,127}"
+            exit 1
+          fi
+          if ! [[ "$GPU_ARCH" =~ ^gfx[0-9a-f]+(\;gfx[0-9a-f]+)*$ ]]; then
+            echo "::error::gpu_arch must look like gfx942 or gfx942;gfx950"
+            exit 1
+          fi
+          echo "image=${REGISTRY}/${REPOSITORY}:${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve TransformerEngine commit
+        id: te
+        run: |
+          set -euo pipefail
+          if [[ "$TE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            SHA="$TE_REF"
+          else
+            SHA=$(git ls-remote https://github.com/ROCm/TransformerEngine.git \
+              "refs/heads/$TE_REF" "refs/tags/$TE_REF" | head -1 | cut -f1)
+          fi
+          if [ -z "$SHA" ]; then
+            echo "::error::Could not resolve TransformerEngine ref '$TE_REF'"
+            exit 1
+          fi
+          echo "Using TransformerEngine $TE_REF at $SHA"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Refuse to overwrite an existing tag
+        env:
+          IMAGE: ${{ steps.validate.outputs.image }}
+        run: |
+          set -euo pipefail
+          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
+            echo "::error::$IMAGE already exists. Tags are immutable; pick a new image_tag."
+            exit 1
+          fi
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.HARBOR_USERNAME }}
+          password: ${{ secrets.HARBOR_PASSWORD }}
+
+      - name: Build image
+        env:
+          IMAGE: ${{ steps.validate.outputs.image }}
+          TE_SHA: ${{ steps.te.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker build \
+            -f Dockerfile_rocm.ci \
+            --build-arg PYTORCH_ROCM_ARCH_OVERRIDE="$GPU_ARCH" \
+            --build-arg TE_COMMIT="$TE_SHA" \
+            --label org.opencontainers.image.source="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}" \
+            --label org.opencontainers.image.revision="$GITHUB_SHA" \
+            --label com.amd.megatron.te-commit="$TE_SHA" \
+            --label com.amd.megatron.gpu-arch="$GPU_ARCH" \
+            -t "$IMAGE" \
+            .
+
+      - name: Push image
+        env:
+          IMAGE: ${{ steps.validate.outputs.image }}
+          TE_SHA: ${{ steps.te.outputs.sha }}
+        run: |
+          set -euo pipefail
+          docker push "$IMAGE"
+          {
+            echo "### Published \`$IMAGE\`"
+            echo ""
+            echo "- Megatron-LM commit: \`$GITHUB_SHA\` (\`$GITHUB_REF_NAME\`)"
+            echo "- TransformerEngine: \`$TE_REF\` at \`$TE_SHA\`"
+            echo "- GPU arch: \`$GPU_ARCH\`"
+            echo ""
+            echo "To use it in CI, set this in \`.github/ci_config.json\`:"
+            echo ""
+            echo '```json'
+            echo "\"default\": \"$IMAGE\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove local image
+        if: always()
+        env:
+          IMAGE: ${{ steps.validate.outputs.image }}
+        run: docker image rm "$IMAGE" || true
