@@ -40,8 +40,9 @@ MXFP8 (KOSMOS_MXFP8=1, --fp8-recipe mxfp8): on the layers Megatron runs in FP8, 
 GEMMs run in MXFP8 (TE recipe, no requantization): the forward quantizes X at the source and
 dispatches it in MXFP8, the backward dispatches dY in bf16 and quantizes it at the experts. The
 weights are quantized both ways once per step: with one microbatch per step, the row-wise copy in
-the forward (kept from a checkpointed first pass for its recompute) and the column-wise copy in
-the backward, each freed after its use; with more, both on the first microbatch and cached for
+the forward (kept from a checkpointed first pass for its recompute; its W1 and W1_scale until the
+backward, which re-reads them in rounds) and the column-wise copy in the backward, each freed after
+its use; with more, both on the first microbatch and cached for
 the step (as TE's weight cache);
 the layer's inputs, outputs and gradients stay bf16 (probs gradient fp32). MXFP8 layers run what
 bf16 layers run, through the library's MXFP8 training calls: top-k 1, 2, 4, probs on input (the
@@ -1023,6 +1024,9 @@ class KosmosMoEFunction(torch.autograd.Function):
             ctx.save_for_backward(w1, w2, hidden)
         ctx.G, ctx.Gs = (G, Gs) if need_g else (None, None)
         ctx.kctx, ctx.experts = kctx, experts
+        # A backward in rounds (over capacity, or the pool kept nothing) recomputes GEMM1 from the
+        # forward's row-wise W1 and W1_scale (KOSMOS keeps their addresses): hold them until then.
+        ctx.w1_row = mxw[:2] if need_g and mxw is not None else None
         return out
 
     @staticmethod
@@ -1044,7 +1048,7 @@ class KosmosMoEFunction(torch.autograd.Function):
             dWs1 = dWs2 = dsgate = None
         kosmos_gate.after_kernel(backward=True)
         ctx.kctx.pool.released()
-        ctx.G = ctx.Gs = ctx.experts = None
+        ctx.G = ctx.Gs = ctx.experts = ctx.w1_row = None
         return dX, dprobs, None, dW1, dW2, None, None, dWs1, dWs2, dsgate, None
 
 
@@ -1116,6 +1120,9 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
             ctx.save_for_backward(hidden, wr, w1, w2)
         ctx.G, ctx.Gs = (G, Gs) if need_g else (None, None)
         ctx.kctx, ctx.experts = kctx, experts
+        # A backward in rounds (over capacity, or the pool kept nothing) recomputes GEMM1 from the
+        # forward's row-wise W1 and W1_scale (KOSMOS keeps their addresses): hold them until then.
+        ctx.w1_row = mxw[:2] if need_g and mxw is not None else None
         ctx.mark_non_differentiable(aux, tpe)
         return out, aux, tpe
 
@@ -1152,7 +1159,7 @@ class KosmosRouterMoEFunction(torch.autograd.Function):
             dWs1 = dWs2 = dsgate = None
         kosmos_gate.after_kernel(backward=True)
         ctx.kctx.pool.released()
-        ctx.G = ctx.Gs = ctx.experts = None
+        ctx.G = ctx.Gs = ctx.experts = ctx.w1_row = None
         return dX, dWr, None, dW1, dW2, None, None, None, None, dWs1, dWs2, dsgate, None
 
 
