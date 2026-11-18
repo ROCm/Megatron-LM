@@ -2080,4 +2080,5 @@ class TestMLAKVDownProjFP8Padding:
         if padding:
             attention = self.attention
             down = attention.linear_qkv_down_proj if fused else attention.linear_kv_down_proj
+            assert torch.count_nonzero(down.weight.grad[:-padding]) > 0
             assert torch.count_nonzero(down.weight.grad[-padding:]) == 0
