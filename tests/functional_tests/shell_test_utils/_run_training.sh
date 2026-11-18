@@ -8,6 +8,23 @@
 
 set -euxo pipefail
 
+is_sensitive_env_name() {
+    local name="${1^^}"
+    [[ "$name" == *KEY* || "$name" == *TOKEN* || "$name" == *API* ]]
+}
+
+export_env_assignment() {
+    local key="$1"
+    local value="$2"
+
+    export "$key"="$value"
+    if is_sensitive_env_name "$key"; then
+        printf '%s=<redacted>\n' "$key"
+    else
+        printf '%s=%s\n' "$key" "$value"
+    fi
+}
+
 set +x
 for ARGUMENT in "$@"; do
     KEY=$(echo $ARGUMENT | cut -f1 -d=)
@@ -15,8 +32,7 @@ for ARGUMENT in "$@"; do
     KEY_LENGTH=${#KEY}
     VALUE="${ARGUMENT:$KEY_LENGTH+1}"
 
-    export "$KEY"="$VALUE"
-    echo "$KEY=$VALUE"
+    export_env_assignment "$KEY" "$VALUE"
 done
 set -x
 
@@ -56,6 +72,7 @@ TRAINING_PARAMS_PATH="$TRAINING_PARAMS_PATH.tmp"
 set -x
 
 # Pull env vars to export
+set +x
 ENV_VARS=$(/usr/local/bin/yq '... comments="" | .ENV_VARS | to_entries | .[] | [.key + "=" + .value] | join(" ")' "$TRAINING_PARAMS_PATH")
 while IFS= read -r ARGUMENT; do
     KEY=$(echo $ARGUMENT | cut -f1 -d=)
@@ -63,15 +80,18 @@ while IFS= read -r ARGUMENT; do
     KEY_LENGTH=${#KEY}
     VALUE="${ARGUMENT:$KEY_LENGTH+1}"
 
-    export "$KEY"="$VALUE"
-    echo "$KEY=$VALUE"
+    export_env_assignment "$KEY" "$VALUE"
 done <<<"$ENV_VARS"
+set -x
 
 # Run before script
 BEFORE_SCRIPT=$(cat "$TRAINING_PARAMS_PATH" | /usr/local/bin/yq '.BEFORE_SCRIPT')
 if [[ "$BEFORE_SCRIPT" != null ]]; then
     eval "$BEFORE_SCRIPT"
 fi
+
+# Keep functional validation on FA2 while using the unpatched NGC 26.09 stack.
+export NVTE_FLASH_ATTN_V4=0
 
 # Exit earlier to leave time for properly saving checkpoint
 if [[ "$IS_NEMO_TEST" == "true" ]]; then
@@ -170,6 +190,9 @@ fi
 
 # Extract training params
 PARAMS=("${PARAMS[@]}" "${TRAINING_PARAMS_ARRAY[@]}")
+if [[ "$IS_NEMO_TEST" != "true" ]]; then
+    PARAMS+=("--flash-attention-version" "2")
+fi
 
 # Set PYTHONPATH
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
