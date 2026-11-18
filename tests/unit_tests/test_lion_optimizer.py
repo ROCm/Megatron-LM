@@ -14,15 +14,16 @@ import torch
 import torch.nn as nn
 
 from megatron.core.optimizer import (
-    HAVE_EO_V02,
+    HAVE_EMERGING_OPTIMIZERS,
     OptimizerConfig,
     _get_megatron_optimizer_based_on_param_groups,
     _get_param_groups,
 )
+from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from megatron.core.optimizer.optimizer import FP32Optimizer
 
 requires_emerging_optimizers = pytest.mark.skipif(
-    not HAVE_EO_V02, reason="emerging_optimizers package not installed"
+    not HAVE_EMERGING_OPTIMIZERS, reason="emerging_optimizers package not installed"
 )
 
 
@@ -97,9 +98,9 @@ class TestLionOptimizerConfig:
         """Should raise ImportError with helpful message if emerging_optimizers not installed."""
         import megatron.core.optimizer as opt_module
 
-        original_have_lion = opt_module.HAVE_EO_V02
+        original_have_lion = opt_module.HAVE_EMERGING_OPTIMIZERS
         try:
-            opt_module.HAVE_EO_V02 = False
+            opt_module.HAVE_EMERGING_OPTIMIZERS = False
 
             model = SimpleModel()
             config = OptimizerConfig(optimizer="lion", lr=1e-4)
@@ -107,7 +108,7 @@ class TestLionOptimizerConfig:
             with pytest.raises(ImportError, match="emerging_optimizers"):
                 _create_lion_optimizer(model, config)
         finally:
-            opt_module.HAVE_EO_V02 = original_have_lion
+            opt_module.HAVE_EMERGING_OPTIMIZERS = original_have_lion
 
 
 @requires_emerging_optimizers
@@ -253,3 +254,53 @@ class TestLionOptimizerExactness:
                         rtol=0,
                         msg=f"Step {step}, state '{key}': optimizer states differ",
                     )
+
+
+class TestDistributedOptimizerStateKeys:
+    """Tests for DistributedOptimizer.optimizer_state_keys and _get_state_key_dtype.
+
+    These tests use a mock to avoid needing a full distributed setup.
+    """
+
+    def _make_mock_distopt(self, optimizer_name):
+        """Create a minimal mock with just the config needed for optimizer_state_keys."""
+        mock = object.__new__(DistributedOptimizer)
+        mock.config = OptimizerConfig(optimizer=optimizer_name, lr=1e-4)
+        return mock
+
+    def test_adam_state_keys(self):
+        distopt = self._make_mock_distopt("adam")
+        assert distopt.optimizer_state_keys == ("exp_avg", "exp_avg_sq")
+
+    def test_lion_state_keys(self):
+        distopt = self._make_mock_distopt("lion")
+        assert distopt.optimizer_state_keys == ("exp_avg",)
+
+    def test_sgd_state_keys_defaults_to_adam(self):
+        distopt = self._make_mock_distopt("sgd")
+        assert distopt.optimizer_state_keys == ("exp_avg", "exp_avg_sq")
+
+    def test_get_state_key_dtype_known_keys(self):
+        distopt = self._make_mock_distopt("adam")
+        assert distopt._get_state_key_dtype("exp_avg") == torch.float32
+        assert distopt._get_state_key_dtype("exp_avg_sq") == torch.float32
+
+    def test_get_state_key_dtype_unknown_key(self):
+        distopt = self._make_mock_distopt("adam")
+        assert distopt._get_state_key_dtype("unknown_key") == torch.float32
+
+    def test_get_state_key_dtype_respects_config(self):
+        mock = object.__new__(DistributedOptimizer)
+        mock.config = SimpleNamespace(exp_avg_dtype=torch.bfloat16, exp_avg_sq_dtype=torch.float16)
+        assert mock._get_state_key_dtype("exp_avg") == torch.bfloat16
+        assert mock._get_state_key_dtype("exp_avg_sq") == torch.float16
+
+    def test_muon_with_lion_scalar_optimizer(self):
+        mock = object.__new__(DistributedOptimizer)
+        mock.config = OptimizerConfig(optimizer="muon", lr=1e-4, muon_scalar_optimizer="lion")
+        assert mock.optimizer_state_keys == ("exp_avg",)
+
+    def test_muon_with_adam_scalar_optimizer(self):
+        mock = object.__new__(DistributedOptimizer)
+        mock.config = OptimizerConfig(optimizer="muon", lr=1e-4, muon_scalar_optimizer="adam")
+        assert mock.optimizer_state_keys == ("exp_avg", "exp_avg_sq")

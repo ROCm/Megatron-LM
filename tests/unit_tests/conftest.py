@@ -3,6 +3,19 @@
 # Modified for portability across upstream and ROCm CI environments.
 
 import os
+
+# Pin Mamba/SSM Triton autotune to a deterministic config for the whole unit-test
+# session. The SSM kernels evaluate their autotune config list at @triton.autotune
+# decoration (import) time, so MAMBA_DETERMINISTIC must be set before any test
+# module imports megatron.core.ssm.*. Setting it in a per-file module (e.g.
+# test_dynamic_engine.py) is too late in a full-suite run, because an earlier test
+# may import the SSM kernels first and freeze the non-deterministic config list --
+# which lets timing-based autotuning flip a greedy token across runs of the hybrid
+# inference tests. Setting it here (before the megatron imports below) guarantees
+# determinism is engaged regardless of collection order. Use setdefault so an
+# explicit override from the environment still wins.
+os.environ.setdefault("MAMBA_DETERMINISTIC", "1")
+
 from pathlib import Path
 
 import pytest
@@ -17,14 +30,35 @@ from tests.unit_tests.paths import unit_test_data_dir
 from tests.unit_tests.test_utilities import Utils
 
 
+def _set_nccl_defaults():
+    """Set NCCL defaults for the unit-test suite.
+
+    These previously lived as ``export``s in ``tests/unit_tests/run_ci_test.sh``.
+    They reduce NCCL memory usage / SM contention and were originally added to
+    fix NCCL hangs observed for FSDP v1 (among other MCore algorithms). Setting
+    them here — at session start, before any test initializes NCCL communicators
+    — keeps that default while moving the test-bucket configuration out of the
+    CI launch script and into pytest. Individual buckets that want
+    production-like NCCL settings (e.g. MFSDP v2) can pop these in their own
+    conftest before initializing their process group.
+
+    Skipped on ROCm: with RCCL <= 2.27.7 (ROCm 7.2.x), a low NCCL_MAX_NCHANNELS
+    leaves fewer P2P channels than P2P parts per peer, which silently corrupts
+    send/recv messages larger than ~32 MB (fixed upstream in ROCm/rocm-systems#6307).
+    """
+    if torch.version.hip:
+        return
+    os.environ.setdefault("NCCL_MAX_NCHANNELS", "1")
+    os.environ.setdefault("NCCL_NVLS_ENABLE", "0")
+
+
 def _insert_rank_suffix(path: str, rank: str) -> str:
     """Insert a ``.rank<N>`` suffix before the file extension."""
     root, ext = os.path.splitext(path)
     return f"{root}.rank{rank}{ext}"
 
 
-@pytest.hookimpl(tryfirst=True)
-def pytest_configure(config):
+def _suffix_report_paths_with_rank(config):
     """Give each distributed rank its own report file.
 
     Under ``torchrun`` every rank runs pytest and, by default, writes to the
@@ -44,6 +78,12 @@ def pytest_configure(config):
     csvpath = getattr(config.option, "csvpath", None)
     if csvpath:
         config.option.csvpath = _insert_rank_suffix(csvpath, rank)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_configure(config):
+    _set_nccl_defaults()
+    _suffix_report_paths_with_rank(config)
 
 
 def pytest_addoption(parser):
@@ -74,7 +114,13 @@ def pytest_sessionfinish(session, exitstatus):
 def cleanup():
     yield
     if torch.distributed.is_initialized():
-        torch.distributed.barrier()
+        try:
+            if torch.cuda.is_available():
+                torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
+            else:
+                torch.distributed.barrier()
+        except Exception:
+            return
         torch.distributed.destroy_process_group()
 
 

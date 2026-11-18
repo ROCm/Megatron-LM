@@ -1,12 +1,19 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import os
+from argparse import Namespace
 from datetime import timedelta
+from typing import Literal
 
 import torch
 from torch._C._distributed_c10d import PrefixStore
 from torch.distributed import rendezvous
 
 import megatron.core.parallel_state as ps
+from megatron.training.argument_utils import (
+    gpt_config_from_args,
+    hybrid_config_from_args,
+    pretrain_cfg_container_from_args,
+)
 
 
 class TestModel(torch.nn.Module):
@@ -24,6 +31,13 @@ class TestModel(torch.nn.Module):
         )
         if shared_embedding:
             self.layers[-1].weight.shared_embedding = True
+
+
+def clear_nvte_env_vars():
+    """Clear NVTE env vars set by conftest set_env fixture."""
+    os.environ.pop('NVTE_FLASH_ATTN', None)
+    os.environ.pop('NVTE_FUSED_ATTN', None)
+    os.environ.pop('NVTE_UNFUSED_ATTN', None)
 
 
 class Utils:
@@ -48,7 +62,7 @@ class Utils:
             torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
             init_method = 'tcp://'
             master_ip = os.getenv('MASTER_ADDR', 'localhost')
-            master_port = os.getenv('MASTER_PORT', '6000')
+            master_port = os.getenv('MASTER_PORT', '29500')
             init_method += master_ip + ':' + master_port
             rendezvous_iterator = rendezvous(
                 init_method, Utils.rank, Utils.world_size, timeout=timedelta(minutes=1)
@@ -113,10 +127,47 @@ class Utils:
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
         if not Utils.inited:
             return
-        torch.distributed.barrier()
+
+        try:
+            # Flush pending CUDA work before the barrier so slow ranks don't
+            # time out while fast ranks tear down process groups.
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
+        except Exception:
+            Utils.inited = False
+            return
         Utils._destroy_model_parallel_process_groups()
         ps.destroy_model_parallel()
+        Utils._clear_dtensor_sharding_caches()
         Utils.inited = False
+        torch.cuda.memory.empty_cache()
+
+    @staticmethod
+    def _clear_dtensor_sharding_caches():
+        """Drop DTensor sharding-propagation caches after process groups are destroyed.
+
+        DeviceMesh equality ignores process-group names, so a mesh rebuilt over new
+        groups hits cache entries holding the old mesh. DTensors created afterwards
+        (e.g. Megatron-FSDP params) then reference destroyed groups.
+
+        Upstream PyTorch bug, still open: https://github.com/pytorch/pytorch/issues/169814
+        PyTorch's own DTensor tests clear the cache the same way:
+        https://github.com/pytorch/pytorch/pull/172504
+        The id-based DeviceMesh redesign that would fix it was not merged:
+        https://github.com/pytorch/pytorch/pull/167753
+        """
+        try:
+            from torch.distributed.tensor import DTensor
+        except ImportError:
+            return
+        propagator = DTensor._op_dispatcher.sharding_propagator
+        for name in ("propagate_op_sharding", "_propagate_tensor_meta"):
+            cache_clear = getattr(getattr(propagator, name, None), "cache_clear", None)
+            if cache_clear is not None:
+                cache_clear()
+        clear_native_cache = getattr(torch._C, "_clear_DTensor_sharding_propagator_cache", None)
+        if clear_native_cache is not None:
+            clear_native_cache()
 
     @staticmethod
     def initialize_model_parallel(
@@ -143,6 +194,19 @@ class Utils:
             **kwargs,
         )
         Utils.inited = True
+
+    @staticmethod
+    def pretrain_config_from_global_args(args: Namespace, model_class: Literal["gpt", "hybrid"]):
+        if model_class == "gpt":
+            model_cfg = gpt_config_from_args(args)
+        elif model_class == "hybrid":
+            model_cfg = hybrid_config_from_args(args)
+        else:
+            raise ValueError(
+                f"MCore model type {model_class} not supported. Choose one of 'gpt' or 'hybrid'."
+            )
+
+        return pretrain_cfg_container_from_args(args, model_cfg)
 
     @staticmethod
     def fake_initialize_model_parallel(

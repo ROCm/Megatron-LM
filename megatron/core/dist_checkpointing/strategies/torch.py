@@ -1,17 +1,17 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 """ Strategies using PyTorch distributed.checkpoint as an underlying format. """
+import inspect
 import io
 import os
 import pickle
 import warnings
-from abc import ABC
 from collections import defaultdict
 from contextlib import contextmanager
 from itertools import product
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import torch
 from packaging.version import Version as PkgVersion
@@ -49,22 +49,19 @@ from ..mapping import (
     is_main_replica,
 )
 from .async_utils import AsyncRequest
-from .base import (
-    AsyncSaveShardedStrategy,
-    LoadShardedStrategy,
-    StrategyAction,
-    register_default_strategy,
-)
 from .checkpointable import CheckpointableShardedTensor, LocalShardsContainer
+from .nvrx import has_nvrx_async_support, make_nvrx_async_request
 
-try:
+if TYPE_CHECKING:
     from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncRequest as NVRxAsyncRequest
     from nvidia_resiliency_ext.checkpointing.async_ckpt.state_dict_saver import (
         CheckpointMetadataCache,
     )
-except (ImportError, ModuleNotFoundError):
-    CheckpointMetadataCache = ABC
-    NVRxAsyncRequest = ABC
+else:
+    CheckpointMetadataCache = Any
+    NVRxAsyncRequest = Any
+
+HAVE_NVRX = has_nvrx_async_support()
 
 try:
     if not torch.cuda.is_available():
@@ -103,17 +100,8 @@ class MCoreSavePlan:
     pass
 
 
-def register_default_torch_strategies():
-    """Register default strategies related to PyT Distributed backend."""
-    register_default_strategy(
-        StrategyAction.LOAD_SHARDED, 'torch_dist', 1, TorchDistLoadShardedStrategy()
-    )
-    register_default_strategy(
-        StrategyAction.SAVE_SHARDED, 'torch_dist', 1, TorchDistSaveShardedStrategy()
-    )
-
-
 logger = getLogger(__name__)
+_logged_mcore_async_deprecation = False
 
 
 def flatten_state_dict(
@@ -361,9 +349,20 @@ def _unwrap_pyt_sharded_tensor(
     ret_tensors = []
     for sh in sh_ten.local_shards():
         ten = sh.tensor
-        for _ in range(mcore_sh_ten.prepend_axis_num):
-            assert ten.size(0) == 1
-            ten = ten[0]  # NOTE: ten.squeeze(0) uses more memory for FP8 tensors
+        if mcore_sh_ten.prepend_axis_num > 0:
+            # NOTE: use ``view`` to strip the prepended singleton axes. Indexing
+            # (``ten[0]``) and ``squeeze`` both dispatch through
+            # ``aten.select.int`` / ``aten.squeeze`` which are not implemented
+            # by ``MXFP8Tensor`` (nor by the blockwise tensor class) — they
+            # fall back to ``QuantizedTensor.__torch_dispatch__`` which
+            # dequantizes the entire tensor to BF16 before applying the op.
+            # For large FP8/MXFP8 checkpoints this materializes a full-size
+            # BF16 copy per shard and OOMs right after a successful streaming
+            # load. ``view`` is handled natively by all TE quantized tensor
+            # classes without any dequantize.
+            for i in range(mcore_sh_ten.prepend_axis_num):
+                assert ten.size(i) == 1
+            ten = ten.view(ten.shape[mcore_sh_ten.prepend_axis_num :])
         ret_tensors.append(ten)
     return ret_tensors
 
@@ -503,12 +502,19 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
         *args,
         shapes_validation_sharded_tensors: Iterable[ShardedTensor] = (),
         allow_shape_mismatch_sharded_tensors: Optional[Dict[str, ShardedTensor]] = None,
+        stream_ckpt_dequant: bool = True,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.shapes_validation_sharded_tensors = shapes_validation_sharded_tensors
         self.allow_shape_mismatch_sharded_tensors = allow_shape_mismatch_sharded_tensors
-        self._intermediate_read_item_and_target: Optional[Tuple[ReadItem, torch.Tensor]] = None
+        self.stream_ckpt_dequant = stream_ckpt_dequant
+        # Maps id(read_item) -> (read_item, target_tensor, amax_snapshot_or_None, kind)
+        # kind is "stream" for the streaming per-tensor dequant path and "noncontig"
+        # for the existing contiguity-fix path.
+        self._intermediate_read_items: Dict[
+            int, Tuple[ReadItem, torch.Tensor, Optional[torch.Tensor], str]
+        ] = {}
 
     def _validate_global_shapes(self, metadata, sharded_tensors):
         for sh_ten in sharded_tensors:
@@ -562,41 +568,96 @@ class MCoreLoadPlanner(DefaultLoadPlanner):
         return local_plan
 
     def resolve_tensor(self, read_item: ReadItem):
-        """Override to add FP8 support.
+        """Override to add quantized-tensor support.
 
-        Narrowing the Float8Tensor can create incontiguous tensors and there are
-        no `copy` kernels for such cases. This method creates a contiguous FP8
-        tensors so that the subsequent `copy_` in FileSystemReader succeeds.
-        Note that this requires tracking the original tensor
-        (as `self._intermediate_read_item_and_target` attribute)
-        and restoring it in `commit_tensor` method.
+        Two paths are handled here:
+
+        1. Streaming per-tensor dequantize (when ``stream_ckpt_dequant`` is True
+           and the destination is a TE ``QuantizedTensor`` — covers Float8,
+           MXFP8, blockwise FP8, and NVFP4 via the common base class). We
+           allocate a per-tensor high-precision scratch buffer, return it as
+           the load destination, and quantize-copy it back into the original
+           tensor in ``commit_tensor``. This replaces the upfront bulk
+           dequantize done by ``force_all_tensors_to_non_fp8`` and keeps at
+           most one scratch tensor live at a time.
+
+        2. Non-contiguous Float8 fix: narrowing a Float8Tensor can produce a
+           non-contiguous view for which no ``copy_`` kernel exists. We fall
+           back to a contiguous Float8 clone and copy it back in
+           ``commit_tensor``.
+
+        Both cases stash state in ``self._intermediate_read_items``, keyed by
+        ``id(read_item)``, so ``commit_tensor`` can undo them.
         """
         target_tensor = super().resolve_tensor(read_item)
+
+        # Lazy import to avoid circular imports (fp8_utils pulls in core.tensor_parallel).
+        from ...fp8_utils import is_float8tensor as _is_quantized_tensor
+
+        if (
+            self.stream_ckpt_dequant
+            and HAVE_TE
+            and _is_quantized_tensor(target_tensor)
+            and target_tensor.is_cuda
+        ):
+            # Snapshot amax for delayed-scaling quantizers so the subsequent
+            # BF16->FP8 quantize-copy does not pollute amax_history. For
+            # current-scaling / MXFP8 / blockwise / NVFP4 quantizers, amax is
+            # None or absent on the quantizer and the snapshot is a no-op.
+            amax_snapshot: Optional[torch.Tensor] = None
+            quantizer = getattr(target_tensor, "_quantizer", None)
+            amax = getattr(quantizer, "amax", None) if quantizer is not None else None
+            if isinstance(amax, torch.Tensor):
+                amax_snapshot = amax.detach().clone()
+
+            scratch = torch.empty(
+                target_tensor.shape, dtype=target_tensor.dtype, device=target_tensor.device
+            )
+            self._intermediate_read_items[id(read_item)] = (
+                read_item,
+                target_tensor,
+                amax_snapshot,
+                "stream",
+            )
+            return scratch
+
         if (
             not target_tensor.is_contiguous()
             and HAVE_TE
             and isinstance(target_tensor, Float8Tensor)
         ):
-            self._intermediate_read_item_and_target = (read_item, target_tensor)
+            self._intermediate_read_items[id(read_item)] = (
+                read_item,
+                target_tensor,
+                None,
+                "noncontig",
+            )
             target_tensor = Float8Tensor.make_like(
                 target_tensor, data=target_tensor._data.contiguous()
             )
         return target_tensor
 
     def commit_tensor(self, read_item: ReadItem, tensor: torch.Tensor) -> None:
-        """Restores the original FP8 tensor saved in `resolve_tensor`."""
-        if self._intermediate_read_item_and_target is not None:
-            interm_read_item, target_tensor = self._intermediate_read_item_and_target
-            assert (
-                interm_read_item is read_item
-            ), '`commit_tensor` method should be called right after `resolve_tensor`'
+        """Undo the detours stashed in ``resolve_tensor``.
+
+        - Streaming case: copy the high-precision scratch back into the
+          original quantized tensor (quantize-on-copy), then restore the
+          pre-load ``amax`` for delayed-scaling quantizers.
+        - Non-contiguous case: copy the contiguous clone back into the
+          original narrowed Float8Tensor view.
+        """
+        entry = self._intermediate_read_items.pop(id(read_item), None)
+        if entry is not None:
+            _, target_tensor, amax_snapshot, kind = entry
             target_tensor.copy_(tensor)
+            if kind == "stream" and amax_snapshot is not None:
+                # quantizer was non-None when we took the snapshot
+                target_tensor._quantizer.amax.copy_(amax_snapshot)
             tensor = target_tensor
-            self._intermediate_read_item_and_target = None
         return super().commit_tensor(read_item, tensor)
 
 
-class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
+class TorchDistSaveShardedStrategy:
     """Async save strategy for the PyT Distributed format.
 
     The idea is to translate MCore ShardedTensors into PyT ShardedTensors
@@ -612,6 +673,7 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
         thread_count: int = 1,
         cached_metadata: bool = False,
         separation_hint: Optional[str] = None,
+        cpu_shm_mode: bool = False,
     ):
         """Adds parameters specific to PyT Distributed format
         Args:
@@ -626,8 +688,13 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
                 gathering local metadata every checkpointing invocation
             separation_hint(str, optional): If provided, all tensors whose keys have this
                 prefix will be saved to a separate file.
+            cpu_shm_mode (bool, optional): Copy GPU tensors to CPU shared-memory in the
+                training process before handing off to the async worker. Avoids CUDA IPC /
+                NVLink fabric handles in the worker subprocess. Only applies with nvrx async
+                strategy.
         """
-        super().__init__(backend, version)
+        self.backend = backend
+        self.version = version
         self.keep_only_main_replica = keep_only_main_replica
         self.thread_count = thread_count
 
@@ -651,8 +718,15 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
         self.cached_global_metadata: Optional[Metadata] = None
 
         self.separation_hint = separation_hint
+        self.cpu_shm_mode = cpu_shm_mode
 
         self.validated_loaded_metadata_reuse = False
+
+    def save(self, sharded_state_dict: ShardedStateDict, checkpoint_dir: Path):
+        """Sync save always uses the built-in implementation."""
+        async_request = self.async_save(sharded_state_dict, checkpoint_dir, async_strategy="mcore")
+        async_request.execute_sync()
+        del async_request
 
     def async_save(
         self,
@@ -668,11 +742,14 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
 
         Returns: None
         """
+        global _logged_mcore_async_deprecation
         if async_strategy == "mcore":
-            logger.warning(
-                "MCore's async save is deprecated and will be removed in the future releases. "
-                "Please, use NVRx async solution by setting `async_strategy` to `nvrx`."
-            )
+            if not _logged_mcore_async_deprecation:
+                logger.warning(
+                    "MCore's async save is deprecated and will be removed in the future releases. "
+                    "Please, use NVRx async solution by setting `async_strategy` to `nvrx`."
+                )
+                _logged_mcore_async_deprecation = True
 
         # Translate the state dict
         (sharded_state_dict, flat_mapping, rename_mapping) = (
@@ -698,10 +775,24 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
         if async_strategy == "nvrx":
             if self._metadata_cache is None:
                 self._metadata_cache = checkpointable_metadata_cache()
-                if self.cached_global_metadata is not None:
+                if self.cached_global_metadata is not None and hasattr(
+                    self._metadata_cache, "set_cached_global_metadata"
+                ):
                     self._metadata_cache.set_cached_global_metadata(self.cached_global_metadata)
             # Define additional arguments
             async_writer_kwargs["use_cached_data_structure"] = self.use_cached_ckpt_structure
+            if self.cpu_shm_mode:
+                if (
+                    "use_cpu_shm_for_gpu_tensors"
+                    in inspect.signature(async_writer.__init__).parameters
+                ):
+                    async_writer_kwargs["use_cpu_shm_for_gpu_tensors"] = True
+                else:
+                    raise AssertionError(
+                        "Installed nvidia-resiliency-ext does not support "
+                        "use_cpu_shm_for_gpu_tensors. Update nvidia-resiliency-ext "
+                        "to enable cpu_shm_mode."
+                    )
             state_dict_saver_kwargs["enable_cache"] = self.use_cached_ckpt_structure
             state_dict_saver_kwargs["metadata_cache"] = self._metadata_cache
         else:
@@ -803,17 +894,24 @@ class TorchDistSaveShardedStrategy(AsyncSaveShardedStrategy):
         def finalize_fn():
             save_state_dict_async_finalize(*save_state_dict_ret)
 
-        return async_request(save_fn, save_args, [finalize_fn], preload_fn=preload_fn)
-
-    def can_handle_sharded_objects(self):
-        return True
+        return make_nvrx_async_request(
+            async_request, save_fn, save_args, [finalize_fn], preload_fn=preload_fn
+        )
 
 
 def _get_filesystem_reader(
-    checkpoint_dir: Union[str, Path], cache_metadata: bool = False, async_strategy: str = "nvrx"
+    checkpoint_dir: Union[str, Path], cache_metadata: bool = False, async_strategy: str = "mcore"
 ) -> FileSystemReader:
     if MultiStorageClientFeature.is_enabled():
         msc = MultiStorageClientFeature.import_package()
+        if cache_metadata:
+            warnings.warn(
+                "MSC is enabled: returning msc.torch.MultiStorageFileSystemReader instead of "
+                "CachedMetadataFileSystemReader. The cache_metadata=True request "
+                "(e.g. ckpt_assume_constant_structure=True) will be ignored and metadata "
+                "will be re-read on every load. Pass --enable-msc only when this is intended.",
+                stacklevel=2,
+            )
         return msc.torch.MultiStorageFileSystemReader(checkpoint_dir, thread_count=2)
 
     if cache_metadata:
@@ -823,19 +921,30 @@ def _get_filesystem_reader(
     return FileSystemReader(checkpoint_dir)
 
 
-class TorchDistLoadShardedStrategy(LoadShardedStrategy):
+class TorchDistLoadShardedStrategy:
     """Basic load strategy for the PyT Distributed format."""
 
-    def __init__(self, cache_metadata: bool = False):
+    def __init__(
+        self,
+        cache_metadata: bool = False,
+        stream_ckpt_dequant: bool = True,
+        checkpoint_name: str = None,
+    ):
         self.cached_global_metadata: Optional[Metadata] = None
         self.cache_metadata = cache_metadata
-        super().__init__()
+        # When True, quantized destinations (FP8/MXFP8/blockwise FP8/NVFP4) are
+        # dequantized per-tensor inside the LoadPlanner rather than all at once
+        # before the load starts. This trades a small planner overhead for a
+        # large reduction in peak GPU memory during load. See
+        # serialization.load() and MCoreLoadPlanner.resolve_tensor for details.
+        self.stream_ckpt_dequant = stream_ckpt_dequant
+        self.checkpoint_name = checkpoint_name
 
     def load(
         self,
         sharded_state_dict: ShardedStateDict,
         checkpoint_dir: Path,
-        async_strategy: str = "nvrx",
+        async_strategy: str = "mcore",
     ) -> StateDict:
         """Translates MCore ShardedTensors to PyT ShardedTensors & loads from PyT Distributed fmt.
 
@@ -867,15 +976,17 @@ class TorchDistLoadShardedStrategy(LoadShardedStrategy):
         fsr = _get_filesystem_reader(
             checkpoint_dir, cache_metadata=self.cache_metadata, async_strategy=async_strategy
         )
-        checkpoint.load_state_dict(
+        checkpoint.load(
             pyt_state_dict,
             fsr,
             planner=MCoreLoadPlanner(
                 shapes_validation_sharded_tensors=flexible_shape_sharded_tensors,
                 allow_shape_mismatch_sharded_tensors=allow_shape_mismatch_sharded_tensors,
+                stream_ckpt_dequant=self.stream_ckpt_dequant,
                 flatten_state_dict=False,
                 flatten_sharded_tensors=False,
             ),
+            no_dist=True,
         )
 
         if self.cache_metadata:
@@ -998,28 +1109,19 @@ class TorchDistLoadShardedStrategy(LoadShardedStrategy):
             except AttributeError:
                 os.sync()
         ## move the old metadata
-        fs_writer.fs.rename(fs_writer.metadata_path, old_path)
+        fs_writer.fs.rename(metadata_filename, old_path)
         try:
             ## rename the new metadata
-            fs_writer.fs.rename(tmp_path, fs_writer.metadata_path)
+            fs_writer.fs.rename(tmp_path, metadata_filename)
 
             ## finally, remove the files we want to drop
             for f in files_to_remove:
-                fs_writer.fs.rm_file(checkpoint_dir / f)
+                fs_writer.fs.rm_file(Path(checkpoint_dir) / f)
         except Exception as e:
-            fs_writer.fs.rename(old_path, fs_writer.metadata_path)
+            fs_writer.fs.rename(old_path, metadata_filename)
             raise e
         else:
             fs_writer.fs.rm_file(old_path)
-
-    def can_handle_sharded_objects(self):
-        return True
-
-    def check_backend_compatibility(self, loaded_version):
-        pass  # TODO
-
-    def check_version_compatibility(self, loaded_version):
-        pass  # TODO
 
 
 def get_async_strategy(async_strategy: str = "nvrx", module: str = None) -> tuple:
@@ -1059,9 +1161,8 @@ def get_async_strategy(async_strategy: str = "nvrx", module: str = None) -> tupl
             async_strategy = "nvrx"
         except (ImportError, ModuleNotFoundError):
             raise ModuleNotFoundError(
-                "nvidia-resiliency-ext package is not installed. "
-                "Please, install nvidia-resiliency-ext package or set `async_strategy` to `mcore` "
-                "to enable async save strategy."
+                "A compatible `nvidia-resiliency-ext` installation is required for "
+                '`async_strategy="nvrx"`. Please install it or set `async_strategy` to `mcore`.'
             )
     elif async_strategy == "mcore":
         # do mcore async imports

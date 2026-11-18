@@ -42,7 +42,7 @@ def test_model_provider_switches_to_modelopt_builder(monkeypatch):
     monkeypatch.setattr(mp, "get_args", lambda: args)
     monkeypatch.setattr(
         mp,
-        "modelopt_gpt_mamba_builder",
+        "modelopt_gpt_hybrid_builder",
         _sentinel_builder(modelopt_result, modelopt_calls),
         raising=False,
     )
