@@ -98,11 +98,16 @@ ENV PYTORCH_ROCM_ARCH=${PYTORCH_ROCM_ARCH_OVERRIDE}
 ENV NVTE_USE_HIPBLASLT=1
 ENV NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
 
+# TE >= 2.15 builds AITER kernels via CK-JIT, which inherits CMake's CXX (ROCm clang++).
+# Under ROCm 7.2's rocm.cfg, `clang++ -v` attempts a link and fails AITER's compiler
+# check, so run CK-JIT with CXX unset (falls back to c++). No-op for TE < 2.15.
 RUN git clone --recursive https://github.com/ROCm/TransformerEngine.git && \
     cd TransformerEngine && \
     git checkout ${TE_COMMIT} && \
     git submodule update --init --recursive && \
     echo "TransformerEngine at commit:" $(git rev-parse HEAD) && \
+    sed -i 's|COMMAND ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full|COMMAND ${CMAKE_COMMAND} -E env --unset=CXX ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full|' \
+        transformer_engine/common/ck_fused_attn/CMakeLists.txt && \
     pip install --no-build-isolation .
 
 RUN git clone https://github.com/caaatch22/grouped_gemm.git &&\
