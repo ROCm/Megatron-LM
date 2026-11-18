@@ -1,5 +1,12 @@
 {
   "docker_images": {
     "default": "registry-sc-harbor.amd.com/framework/megatron-lm-ci:rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_912fc5d3_gfx942"
+  },
+  "te_regression_images": {
+    "2.12": "registry-sc-harbor.amd.com/framework/megatron-lm-ci:rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_912fc5d3_gfx942",
+    "2.15": "registry-sc-harbor.amd.com/framework/megatron-lm-ci:rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_e7835ed1_gfx942",
+    "2.17": "registry-sc-harbor.amd.com/framework/megatron-lm-ci:rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_130099ce_gfx942",
+    "2.18": "registry-sc-harbor.amd.com/framework/megatron-lm-ci:rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_92bed938_gfx942",
+    "2.19": "registry-sc-harbor.amd.com/framework/megatron-lm-ci:rocm7.2.4_ubuntu24.04_py3.12_pytorch_2.10.0_te_5035366f_gfx942"
   }
 }
