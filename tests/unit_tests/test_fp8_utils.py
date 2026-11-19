@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 
 from megatron.core import fp8_utils
+from megatron.core.enums import Fp8Recipe
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -130,3 +131,20 @@ class TestFP8Padding:
 
             # Verify output has original shape
             assert output.shape == (6, 2, 4096)  # Back to original seq_len
+
+
+@pytest.mark.parametrize(
+    "recipe, hip_version, expected",
+    [
+        (Fp8Recipe.tensorwise, None, 16),
+        (Fp8Recipe.tensorwise, "7.0", 16),
+        (Fp8Recipe.mxfp8, None, 128),
+        (Fp8Recipe.mxfp8, "7.0", 128),
+        (Fp8Recipe.blockwise, None, 16),
+        (Fp8Recipe.blockwise, "7.0", 128),
+    ],
+)
+def test_get_fp8_align_size(monkeypatch, recipe, hip_version, expected):
+    """Blockwise FP8 GEMMs need K % 128 == 0 only on ROCm."""
+    monkeypatch.setattr(torch.version, "hip", hip_version)
+    assert fp8_utils.get_fp8_align_size(recipe) == expected

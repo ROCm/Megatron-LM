@@ -10,6 +10,7 @@ import torch.distributed as dist
 
 from megatron.core import parallel_state
 from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
+from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import AttnMaskType
@@ -391,7 +392,10 @@ def test_load_from_state_dict_backwards_compatible_with_split_kv_up_projection(m
 @pytest.mark.parametrize("tp_cp", [[1, 1], [2, 1], [1, 2], [2, 2]])
 @pytest.mark.parametrize("qkv_format", ['sbhd', 'thd'])
 @pytest.mark.parametrize("down_proj_use_column_parallel", [False, True])
-def test_functionality(tp_cp: List[int], qkv_format: str, down_proj_use_column_parallel: bool):
+@pytest.mark.parametrize("fp8_recipe", [None, "blockwise"])
+def test_functionality(
+    tp_cp: List[int], qkv_format: str, down_proj_use_column_parallel: bool, fp8_recipe
+):
     """Test that AbsorbedMLASelfAttention is equivalent to standard MLA."""
     tp_size, cp_size = tp_cp
     Utils.initialize_model_parallel(
@@ -404,6 +408,10 @@ def test_functionality(tp_cp: List[int], qkv_format: str, down_proj_use_column_p
     config = get_mock_mla_config(
         tensor_model_parallel_size=tp_size, context_parallel_size=cp_size, qk_layernorm=qk_layernorm
     )
+    if fp8_recipe is not None:
+        # Only the kv_down padding depends on the recipe; the GEMMs run in BF16 (no FP8 context).
+        config.fp8 = "e4m3"
+        config.fp8_recipe = fp8_recipe
     absorbed_submodules = get_absorbed_mla_submodules(
         down_proj_use_column_parallel=down_proj_use_column_parallel,
         qk_layernorm=qk_layernorm,
@@ -527,4 +535,70 @@ def test_functionality(tp_cp: List[int], qkv_format: str, down_proj_use_column_p
         assert cos_sim > 0.9999, f"name: {name}, cosine similarity = {cos_sim} < 0.9999"
         assert _calculate_tensor_similarity(absorbed_grad, standard_grad) > 0.9999
 
+    Utils.destroy_model_parallel()
+
+
+try:
+    from transformer_engine.pytorch import is_fp8_block_scaling_available, is_mxfp8_available
+
+    FP8_RECIPE_SUPPORT = {
+        "blockwise": is_fp8_block_scaling_available(return_reason=True),
+        "mxfp8": is_mxfp8_available(return_reason=True),
+    }
+except ImportError:
+    FP8_RECIPE_SUPPORT = {}
+
+
+def _build_fp8_absorbed_mla(fp8_recipe: str) -> AbsorbedMLASelfAttention:
+    config = get_mock_mla_config(
+        tensor_model_parallel_size=1, context_parallel_size=1, qk_layernorm=True
+    )
+    config.fp8 = "e4m3"
+    config.fp8_recipe = fp8_recipe
+    submodules = get_absorbed_mla_submodules(
+        down_proj_use_column_parallel=False, qk_layernorm=True, rms_norm=True
+    )
+    return AbsorbedMLASelfAttention(
+        config=config, submodules=submodules, layer_number=0, attn_mask_type=AttnMaskType.causal
+    ).cuda()
+
+
+@pytest.mark.parametrize("fp8_recipe", ["mxfp8", "blockwise"])
+def test_kv_down_proj_fp8_padding(fp8_recipe):
+    """kv_down_proj out_features (its dgrad K) are padded to the FP8 GEMM alignment."""
+    Utils.initialize_model_parallel(tensor_model_parallel_size=1, context_parallel_size=1)
+    model_parallel_cuda_manual_seed(123)
+    absorbed_mla = _build_fp8_absorbed_mla(fp8_recipe)
+    # kv_lora_rank + qk_pos_emb_head_dim = 576 becomes 640 where K % 128 is required.
+    padding = 64 if fp8_recipe == "mxfp8" or torch.version.hip is not None else 0
+    assert absorbed_mla.kv_down_proj_mxfp8_padding == padding
+    assert absorbed_mla.linear_kv_down_proj.weight.shape[0] == 576 + padding
+    Utils.destroy_model_parallel()
+
+
+@pytest.mark.parametrize("fp8_recipe", ["mxfp8", "blockwise"])
+def test_kv_down_proj_fp8_forward_backward(fp8_recipe):
+    """The padded kv_down_proj runs under FP8 and its padded rows get no gradient."""
+    supported, reason = FP8_RECIPE_SUPPORT.get(fp8_recipe, (False, "No TE support check"))
+    if not supported:
+        pytest.skip(reason)
+    Utils.initialize_model_parallel(tensor_model_parallel_size=1, context_parallel_size=1)
+    model_parallel_cuda_manual_seed(123)
+    absorbed_mla = _build_fp8_absorbed_mla(fp8_recipe)
+    # 128 tokens, so the wgrad K (the token count) is aligned too.
+    hidden_states = torch.randn(
+        (128, 1, absorbed_mla.config.hidden_size),
+        dtype=torch.bfloat16,
+        device="cuda",
+        requires_grad=True,
+    )
+    with get_fp8_context(absorbed_mla.config):
+        q_absorbed, kv_compressed, _ = absorbed_mla.get_query_key_value_tensors(hidden_states)
+    (q_absorbed.float().sum() + kv_compressed.float().sum()).backward()
+    assert torch.isfinite(hidden_states.grad).all()
+    padding = absorbed_mla.kv_down_proj_mxfp8_padding
+    if padding:
+        weight_grad = absorbed_mla.linear_kv_down_proj.weight.grad
+        assert torch.count_nonzero(weight_grad[:-padding]) > 0
+        assert torch.count_nonzero(weight_grad[-padding:]) == 0
     Utils.destroy_model_parallel()
