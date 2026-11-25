@@ -33,6 +33,7 @@ from megatron.core.transformer.module import GraphableMegatronModule, MegatronMo
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import (
     get_attr_wrapped_model,
+    get_cuda_event,
     get_torch_version,
     is_te_min_version,
     log_on_each_pipeline_stage,
@@ -956,8 +957,8 @@ class _CudaGraphRunner(torch.nn.Module):
 
                 self.use_stream = True
                 self.stream = torch.cuda.Stream()
-                self.fwd_completion_event = torch.cuda.Event(external=True, interprocess=True)
-                self.bwd_completion_event = torch.cuda.Event(external=True, interprocess=True)
+                self.fwd_completion_event = get_cuda_event(external=True, interprocess=True)
+                self.bwd_completion_event = get_cuda_event(external=True, interprocess=True)
                 # Register (chain, group) side streams before the first forward.
                 # Dense for mamba/attn/shared_experts; expert (below) for routed
                 # experts captured when "moe" is in cuda_graph_modules.

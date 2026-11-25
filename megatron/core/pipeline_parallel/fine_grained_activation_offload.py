@@ -12,7 +12,7 @@ DEBUG = False
 DEBUG_RANK = 0
 
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
-from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import get_cuda_event, nvtx_range_pop, nvtx_range_push
 
 
 def debug_rank(message):
@@ -432,7 +432,7 @@ class PipelineOffloadManager:
         # individual layer objects so capture, replay, and backward hooks order
         # the same D2H/H2D work with the same synchronization primitives.
         self._cuda_graph_stream = torch.cuda.Stream()
-        self._cuda_graph_event = torch.cuda.Event(external=True)
+        self._cuda_graph_event = get_cuda_event(external=True)
         # Shared CPU tensor pool for all chunks to improve reuse efficiency
         self._cpu_tensor_pool = OffloadTensorPool(device="cpu", pin_memory=True)
 

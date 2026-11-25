@@ -913,8 +913,10 @@ class TestWaitAsyncCommsFallback:
         p._wgrad_rs_handle = None  # _wait_reduce_scatter is no-op → fallback fires
         p._cached_ag_stream = None
         p._cached_rs_stream = None
-        p.ag_event = torch.cuda.Event(external=True)
-        p.rs_event = torch.cuda.Event(external=True)
+        # Non-external: test only needs a recorded event for wait(); ROCm
+        # rejects record() on Event(external=True).
+        p.ag_event = torch.cuda.Event()
+        p.rs_event = torch.cuda.Event()
         p.rs_event.record()  # so rs_event.wait() in fallback doesn't block
         p._already_finalized = already_finalized
         p.grad_added_to_main_grad = False
