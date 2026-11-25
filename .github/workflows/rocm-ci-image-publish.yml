@@ -29,6 +29,28 @@ on:
         required: false
         default: 'gfx942'
         type: string
+  workflow_call:
+    inputs:
+      image_tag:
+        required: true
+        type: string
+      te_ref:
+        required: false
+        default: 'release_v2.12_rocm'
+        type: string
+      gpu_arch:
+        required: false
+        default: 'gfx942'
+        type: string
+    secrets:
+      HARBOR_USERNAME:
+        required: true
+      HARBOR_PASSWORD:
+        required: true
+    outputs:
+      image:
+        description: 'Full reference of the pushed image'
+        value: ${{ jobs.build-and-push.outputs.image }}
 
 permissions:
   contents: read
@@ -42,6 +64,8 @@ jobs:
     name: Build and push CI image
     runs-on: ${{ vars.CI_IMAGE_BUILD_RUNNER || 'linux-megatron-mi325-8' }}
     timeout-minutes: 720
+    outputs:
+      image: ${{ steps.validate.outputs.image }}
     env:
       REGISTRY: ${{ vars.HARBOR_REGISTRY || 'registry-sc-harbor.amd.com' }}
       REPOSITORY: ${{ vars.MEGATRON_CI_IMAGE_REPOSITORY || 'framework/megatron-lm-ci' }}
@@ -91,17 +115,43 @@ jobs:
           IMAGE: ${{ steps.validate.outputs.image }}
         run: |
           set -euo pipefail
-          if docker manifest inspect "$IMAGE" > /dev/null 2>&1; then
-            echo "::error::$IMAGE already exists. Tags are immutable; pick a new image_tag."
-            exit 1
-          fi
+          # Query Harbor's artifact API: 200 = exists, 404 = missing, anything else is an
+          # error that must not be mistaken for "missing". -k: the registry's internal CA
+          # is not trusted on the runners (dockerd uses insecure-registries for it too).
+          PROJECT="${REPOSITORY%%/*}"
+          REPO="${REPOSITORY#*/}"
+          API="https://${REGISTRY}/api/v2.0/projects/${PROJECT}/repositories/${REPO//\//%252F}/artifacts/${IMAGE_TAG}"
+          for attempt in 1 2 3; do
+            CODE=$(curl -sk -o /dev/null -w '%{http_code}' --max-time 30 "$API" || true)
+            case "$CODE" in
+              200)
+                echo "::error::$IMAGE already exists. Tags are immutable; pick a new image_tag."
+                exit 1 ;;
+              404)
+                echo "$IMAGE does not exist yet."
+                exit 0 ;;
+            esac
+            echo "::warning::Could not query $IMAGE (attempt $attempt, HTTP $CODE)"
+            sleep 30
+          done
+          echo "::error::Could not determine whether $IMAGE exists; refusing to push."
+          exit 1
 
       - name: Log in to container registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.HARBOR_USERNAME }}
-          password: ${{ secrets.HARBOR_PASSWORD }}
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3 4 5; do
+            if docker login "$REGISTRY" -u "$HARBOR_USERNAME" --password-stdin <<< "$HARBOR_PASSWORD"; then
+              exit 0
+            fi
+            echo "::warning::docker login failed (attempt $attempt), retrying in 30s"
+            sleep 30
+          done
+          echo "::error::Failed to log in to $REGISTRY"
+          exit 1
 
       - name: Build image
         env:
@@ -145,4 +195,6 @@ jobs:
         if: always()
         env:
           IMAGE: ${{ steps.validate.outputs.image }}
-        run: docker image rm "$IMAGE" || true
+        run: |
+          docker image rm "$IMAGE" || true
+          docker logout "$REGISTRY" || true
