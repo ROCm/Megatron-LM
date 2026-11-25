@@ -353,6 +353,20 @@ def is_torch_min_version(version, check_equality=True):
     return get_torch_version() > PkgVersion(version)
 
 
+def get_cuda_event(*, external: bool = False, interprocess: bool = False, **kwargs):
+    """Create a ``torch.cuda.Event``, dropping external/interprocess flags on ROCm.
+
+    ROCm rejects recording external CUDA events
+    (``RuntimeError: External events are disallowed in rocm``). Callers that need
+    CG-crossing semantics on CUDA can still pass ``external=True``; on HIP those
+    flags are forced off so ``record()`` / ``wait()`` remain usable.
+    """
+    if torch.version.hip is not None:
+        external = False
+        interprocess = False
+    return torch.cuda.Event(external=external, interprocess=interprocess, **kwargs)
+
+
 def get_fa_version():
     """Get Flash attention version from __version__; if not available use pip's. Use caching."""
     if not HAVE_PACKAGING:

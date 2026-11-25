@@ -36,7 +36,7 @@ from typing import Dict, List, Optional
 import torch
 from packaging.version import Version
 
-from megatron.core.utils import log_single_rank
+from megatron.core.utils import get_cuda_event, log_single_rank
 
 logger = logging.getLogger(__name__)
 
@@ -784,7 +784,7 @@ def _init_gtp_runtime_attrs(obj):
     # (wgrad is a token-indexed scatter-add, input non-differentiable). classify_gtp_chains()
     # sets this False for embedding.word_embeddings.weight.
     obj._need_weight_prefetch_bwd = True
-    obj.ag_event = torch.cuda.Event(external=True)
+    obj.ag_event = get_cuda_event(external=True)
     # DDP backward hook (set by register_grad_accum_hook); invoked after
     # the wgrad RS accumulation completes (Graphed.backward / chain cascade).
     obj._grad_accum_hook = None
@@ -804,7 +804,7 @@ def _init_gtp_runtime_attrs(obj):
     obj._recompute_next = None
     obj._recompute_prev = None
     obj._recompute_prefetch_handle = None
-    obj._recompute_ag_event = torch.cuda.Event(external=True)
+    obj._recompute_ag_event = get_cuda_event(external=True)
     obj._recompute_already_drained = False
     # Chain identity (GRAPHED/UNGRAPHED). Defaults to UNGRAPHED; classify_gtp_chains(model)
     # walks the model at init (after set_cuda_graph_modules) and reclassifies on param name +
@@ -818,7 +818,7 @@ def _init_gtp_runtime_attrs(obj):
     # Reduce-scatter state (set during wgrad_reduce_scatter)
     obj.rs_state = GTPWeightState.NONE
     obj._wgrad_rs_handle = None
-    obj.rs_event = torch.cuda.Event(external=True)
+    obj.rs_event = get_cuda_event(external=True)
     obj._rs_ticket = None
     # Padding
     obj.pad_length = 0
